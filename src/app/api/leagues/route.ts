@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { getLeagues } from "@/lib/queries";
 
+export const dynamic = "force-dynamic";
+
 export async function GET() {
   const result = await getLeagues();
   if (result.error) {
