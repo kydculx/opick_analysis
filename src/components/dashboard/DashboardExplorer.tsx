@@ -139,8 +139,9 @@ export function DashboardExplorer() {
   const gridJobRef = useRef<string | null>(null);
   const gridBestRef = useRef(-1);
   const [gridding, setGridding] = useState(false);
-  const [gridInfo, setGridInfo] = useState<{ done: number; total: number; best: number | null } | null>(null);
-  const [gridStep, setGridStep] = useState(0.5);
+  const [gridInfo, setGridInfo] = useState<{ done: number; total: number; best: number | null; sweep: number | null; curAcc: number | null } | null>(null);
+  const [gridLive, setGridLive] = useState<{ weights: number[]; hfa: number; acc: number } | null>(null);
+  const [gridStepText, setGridStepText] = useState("0.01");
   const FEATURE_KO: Record<string, string> = {
     rank: "순위차", power: "전력", hstr: "H2H강도", cond: "컨디션", att: "공격", def: "수비",
     val: "가치", form5: "최근폼", h2h5: "H2H5", avg_goals: "평균득점", avg_conceded: "평균실점",
@@ -155,10 +156,14 @@ export function DashboardExplorer() {
   const selVerRef = useRef(selVer);
   const checkedRef = useRef(checked);
   const modelDetailRef = useRef(modelDetail);
+  const rawMatchesRef = useRef(rawMatches);
+  const previewRef = useRef(previewWith);
   leagueRef.current = league;
   selVerRef.current = selVer;
   checkedRef.current = checked;
   modelDetailRef.current = modelDetail;
+  rawMatchesRef.current = rawMatches;
+  previewRef.current = previewWith;
 
   function selectLeague(lg: string) {
     if (!lg || lg === leagueRef.current) return;
@@ -279,7 +284,7 @@ export function DashboardExplorer() {
       return;
     }
     const qs = new URLSearchParams({ league: lg, model_ver: ver, seasons: seasonList.join(",") });
-    fetch(`/api/accuracy?${qs.toString()}`)
+    fetch(`/api/accuracy?${qs.toString()}`, { cache: "no-store" })
       .then((r) => r.json())
       .then((j) => {
         if (j.ok) {
@@ -498,7 +503,7 @@ export function DashboardExplorer() {
       if (!md || md.model_type !== "permatch" || !md.detail || !lg || !ver) return;
       if (tweakedRef.current) return;
       try {
-        const j = await fetch(`/api/models?league=${encodeURIComponent(lg)}&ver=${encodeURIComponent(ver)}`).then((r) => r.json());
+        const j = await fetch(`/api/models?league=${encodeURIComponent(lg)}&ver=${encodeURIComponent(ver)}`, { cache: "no-store" }).then((r) => r.json());
         if (!j.ok || !j.detail || !Array.isArray(j.detail.weights)) return;
         const cur = modelDetailRef.current?.detail;
         if (JSON.stringify(j.detail.weights) === JSON.stringify(cur?.weights) && j.detail.hfa === cur?.hfa) return;
@@ -507,7 +512,7 @@ export function DashboardExplorer() {
         const ws = j.detail.weights as number[];
         setModelDetail({ model_type: j.model_type, detail: j.detail });
         setWOrder(ws.map((_, i) => i).sort((a, b) => Math.abs(ws[b]) - Math.abs(ws[a])));
-        previewWith(ws, typeof j.detail.hfa === "number" ? j.detail.hfa : 0);
+        previewRef.current(ws, typeof j.detail.hfa === "number" ? j.detail.hfa : 0);
         loadAccuracy(lg, ver, checkedRef.current);
       } catch {
       }
@@ -587,6 +592,10 @@ export function DashboardExplorer() {
     if (tuningRef.current) {
       tuningRef.current = false;
       setTuning(false);
+      return;
+    }
+    if (gridRef.current) {
+      setError("전수탐색 중에는 랜덤을 시작할 수 없습니다");
       return;
     }
     const d = modelDetail?.detail;
@@ -853,9 +862,14 @@ export function DashboardExplorer() {
     if (gridRef.current) {
       gridRef.current = false;
       setGridding(false);
+      setGridLive(null);
       if (gridJobRef.current) {
         fetch(`/api/grid?jobId=${encodeURIComponent(gridJobRef.current)}`, { method: "DELETE" }).catch(() => {});
       }
+      return;
+    }
+    if (tuningRef.current) {
+      setError("랜덤 조절 중에는 전수탐색을 시작할 수 없습니다");
       return;
     }
     const d = modelDetail?.detail;
@@ -870,13 +884,20 @@ export function DashboardExplorer() {
       return;
     }
     const five = selVer.endsWith("-f5");
+    const step = parseFloat(gridStepText);
+    if (!Number.isFinite(step) || step < 0.001 || step > 2) {
+      setError("축간격은 0.001~2 사이 숫자로 입력하세요");
+      return;
+    }
     gridRef.current = true;
     setGridding(true);
     setGridInfo(null);
+    setGridLive(null);
     gridBestRef.current = -1;
+    const nw = d.weights.length;
     const refreshGridView = async (preview: boolean): Promise<void> => {
       try {
-        const j = await fetch(`/api/models?league=${encodeURIComponent(league)}&ver=${encodeURIComponent(selVer)}`).then((r) => r.json());
+        const j = await fetch(`/api/models?league=${encodeURIComponent(league)}&ver=${encodeURIComponent(selVer)}`, { cache: "no-store" }).then((r) => r.json());
         if (!j.ok || !j.detail) return;
         const ws = j.detail?.weights;
         setModelDetail({ model_type: j.model_type, detail: j.detail });
@@ -893,7 +914,7 @@ export function DashboardExplorer() {
       const res = await fetch("/api/grid", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ league, ver: selVer, tune, five, jobs: 4, grid_step: gridStep }),
+        body: JSON.stringify({ league, ver: selVer, tune, five, jobs: 4, grid_step: step }),
       }).then((r) => r.json());
       if (!res.ok) {
         gridRef.current = false;
@@ -903,13 +924,27 @@ export function DashboardExplorer() {
       }
       gridJobRef.current = res.jobId as string;
       const qs = `jobId=${encodeURIComponent(res.jobId as string)}&league=${encodeURIComponent(league)}&ver=${encodeURIComponent(selVer)}${five ? "&five=1" : ""}`;
-      for (let i = 0; i < 3600 && gridRef.current; i++) {
-        await new Promise((r) => setTimeout(r, 2000));
+      for (let i = 0; i < 648000 && gridRef.current; i++) {
+        await new Promise((r) => setTimeout(r, 16));
         if (!gridRef.current) break;
         try {
-          const st = await fetch(`/api/grid?${qs}`).then((r) => r.json());
+          const st = await fetch(`/api/grid?${qs}`, { cache: "no-store" }).then((r) => r.json());
           if (st.ok && st.progress) {
-            setGridInfo(st.progress);
+            const pg = st.progress as {
+              done: number; total: number; best: number | null;
+              sweep?: number | null; curW?: number[] | null;
+              curHfa?: number | null; curAcc?: number | null;
+            };
+            setGridInfo({
+              done: pg.done, total: pg.total, best: pg.best,
+              sweep: typeof pg.sweep === "number" ? pg.sweep : null,
+              curAcc: typeof pg.curAcc === "number" ? pg.curAcc : null,
+            });
+            if (Array.isArray(pg.curW) && pg.curW.length === nw
+              && pg.curW.every((v) => typeof v === "number")
+              && typeof pg.curHfa === "number" && typeof pg.curAcc === "number") {
+              setGridLive({ weights: [...pg.curW], hfa: pg.curHfa, acc: pg.curAcc });
+            }
             const b = st.progress.best;
             if (typeof b === "number") {
               if (gridBestRef.current < 0) {
@@ -941,6 +976,7 @@ export function DashboardExplorer() {
     }
     gridRef.current = false;
     setGridding(false);
+    setGridLive(null);
   }
 
   async function saveTweaks() {
@@ -1177,7 +1213,7 @@ export function DashboardExplorer() {
           </button>
           {modelDetail?.model_type === "permatch" && modelDetail.detail && (() => {
             const d = modelDetail.detail;
-            const eff = tweaked ?? d.weights;
+            const eff = gridding && gridLive ? gridLive.weights : (tweaked ?? d.weights);
             const orderIdx = wOrder ?? d.features.map((_, i) => i);
             const rows = orderIdx
               .map((i) => ({ name: d.features[i], w: eff[i] ?? 0, fi: i }))
@@ -1188,7 +1224,7 @@ export function DashboardExplorer() {
               <div className="mt-2 rounded-xl border border-zinc-200 p-2.5 dark:border-zinc-800">
                 <div className="mb-1.5 flex items-center justify-between">
                   <span className="text-xs font-medium text-zinc-500">
-                      피처 가중치
+                    {gridding && gridLive ? `피처 가중치 · 탐색 중 ${(gridLive.acc * 100).toFixed(1)}%` : "피처 가중치"}
                   </span>
                   <span className="flex gap-1">
                     {[0.001, 0.01, 0.05].map((s) => (
@@ -1271,35 +1307,31 @@ export function DashboardExplorer() {
                   <span className="text-xs font-medium text-zinc-500">
                     축간격
                   </span>
-                  <span className="flex gap-1">
-                    {[0.5, 0.3, 0.2, 0.1].map((s) => (
-                      <button
-                        key={s}
-                        disabled={gridding}
-                        onClick={() => setGridStep(s)}
-                        className={`rounded-full border px-1.5 py-px text-[10px] disabled:opacity-40 ${gridStep === s
-                            ? "border-purple-600 text-purple-600 dark:border-purple-400 dark:text-purple-400"
-                            : "border-zinc-300 text-zinc-500 dark:border-zinc-700"
-                          }`}
-                      >
-                        {s}
-                      </button>
-                    ))}
-                  </span>
+                  <input
+                    value={gridStepText}
+                    onChange={(e) => setGridStepText(e.target.value)}
+                    disabled={gridding}
+                    inputMode="decimal"
+                    placeholder="0.01"
+                    aria-label="축간격"
+                    className="w-20 rounded-lg border border-zinc-300 bg-white px-2 py-0.5 text-right font-mono text-[11px] text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
+                  />
                 </div>
                 <div className="mt-1.5 flex gap-1.5">
                   <button
                     onClick={autoTune}
+                    disabled={gridding}
                     title="미학습 시즌 적중률이 오르면 자동 저장. 다시 누르면 중지"
-                    className={`flex-1 rounded-lg px-2 py-1 text-[11px] text-white hover:brightness-110 dark:text-black ${tuning ? "bg-red-500 dark:bg-red-400" : "bg-green-600 dark:bg-green-500"
+                    className={`flex-1 rounded-lg px-2 py-1 text-[11px] text-white hover:brightness-110 disabled:opacity-40 dark:text-black ${tuning ? "bg-red-500 dark:bg-red-400" : "bg-green-600 dark:bg-green-500"
                       }`}
                   >
-                    {tuning ? "중지" : "자동"}
+                    {tuning ? "중지" : "랜덤"}
                   </button>
                   <button
                     onClick={gridTune}
+                    disabled={tuning}
                     title="전수탐색으로 가중치를 탐색. 다시 누르면 중지"
-                    className={`flex-1 rounded-lg px-2 py-1 text-[11px] text-white hover:brightness-110 dark:text-black ${gridding ? "bg-red-500 dark:bg-red-400" : "bg-purple-600 dark:bg-purple-400"
+                    className={`flex-1 rounded-lg px-2 py-1 text-[11px] text-white hover:brightness-110 disabled:opacity-40 dark:text-black ${gridding ? "bg-red-500 dark:bg-red-400" : "bg-purple-600 dark:bg-purple-400"
                       }`}
                   >
                     {gridding ? "중지" : "전수"}
@@ -1332,10 +1364,13 @@ export function DashboardExplorer() {
                   </p>
                 )}
                 {gridInfo && (
-                  <p className="mt-1 text-[11px] text-zinc-500">
-                    {gridding ? "전수탐색 중" : "전수탐색 됨"}
-                    {gridInfo.total > 0 ? ` ${Math.min(100, gridInfo.done / gridInfo.total * 100).toFixed(1)}%` : ""} ({gridInfo.done.toLocaleString()}/{gridInfo.total.toLocaleString()}){gridInfo.best != null ? ` best=${gridInfo.best.toFixed(3)}` : ""}
-                  </p>
+                  <div className="mt-1 text-[11px] text-zinc-500">
+                    <p>{gridding ? "전수탐색중" : "전수탐색됨"} {gridInfo.total > 0 ? `${Math.min(100, gridInfo.done / gridInfo.total * 100).toFixed(1)}%` : "-"}</p>
+                    <p>{gridInfo.done.toLocaleString()}</p>
+                    <p>{gridInfo.total.toLocaleString()}</p>
+                    <p>best={gridInfo.best != null ? gridInfo.best.toFixed(3) : "-"}</p>
+                    <p>탐색중={gridInfo.curAcc != null ? gridInfo.curAcc.toFixed(3) : "-"}</p>
+                  </div>
                 )}
               </div>
             );
