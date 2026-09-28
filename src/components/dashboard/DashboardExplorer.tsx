@@ -137,6 +137,7 @@ export function DashboardExplorer() {
   const [tuneInfo, setTuneInfo] = useState<{ sweeps: number; base: number; best: number; stale: number } | null>(null);
   const gridRef = useRef(false);
   const gridJobRef = useRef<string | null>(null);
+  const gridBestRef = useRef(-1);
   const [gridding, setGridding] = useState(false);
   const [gridInfo, setGridInfo] = useState<{ done: number; total: number; best: number | null } | null>(null);
   const [gridStep, setGridStep] = useState(0.5);
@@ -842,6 +843,22 @@ export function DashboardExplorer() {
     gridRef.current = true;
     setGridding(true);
     setGridInfo(null);
+    gridBestRef.current = -1;
+    const refreshGridView = async (preview: boolean): Promise<void> => {
+      try {
+        const j = await fetch(`/api/models?league=${encodeURIComponent(league)}&ver=${encodeURIComponent(selVer)}`).then((r) => r.json());
+        if (!j.ok || !j.detail) return;
+        const ws = j.detail?.weights;
+        setModelDetail({ model_type: j.model_type, detail: j.detail });
+        if (Array.isArray(ws)) {
+          setWOrder(ws.map((_: number, i: number) => i).sort((a: number, b: number) => Math.abs((ws as number[])[b]) - Math.abs((ws as number[])[a])));
+        }
+        if (preview && !tuningRef.current && !tweakedRef.current && Array.isArray(ws)) {
+          previewWith(ws as number[], typeof j.detail?.hfa === "number" ? j.detail.hfa : 0);
+        }
+      } catch {
+      }
+    };
     try {
       const res = await fetch("/api/grid", {
         method: "POST",
@@ -861,9 +878,29 @@ export function DashboardExplorer() {
         if (!gridRef.current) break;
         try {
           const st = await fetch(`/api/grid?${qs}`).then((r) => r.json());
-          if (st.ok && st.progress) setGridInfo(st.progress);
+          if (st.ok && st.progress) {
+            setGridInfo(st.progress);
+            const b = st.progress.best;
+            if (typeof b === "number") {
+              if (gridBestRef.current < 0) {
+                gridBestRef.current = b;
+              } else if (b > gridBestRef.current) {
+                gridBestRef.current = b;
+                delete predCacheRef.current[cacheKey(league, selVer)];
+                delete accCacheRef.current[cacheKey(league, selVer)];
+                await refreshGridView(true);
+                loadAccuracy(league, selVer, checked);
+              }
+            }
+          }
           if (st.ok && st.job.status !== "running") {
-            if (st.job.status === "done") await fetchModels(league);
+            if (st.job.status === "done") {
+              await fetchModels(league);
+              delete predCacheRef.current[cacheKey(league, selVer)];
+              delete accCacheRef.current[cacheKey(league, selVer)];
+              await refreshGridView(true);
+              loadAccuracy(league, selVer, checked);
+            }
             break;
           }
         } catch {
