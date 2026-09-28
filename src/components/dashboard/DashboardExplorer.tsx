@@ -135,6 +135,10 @@ export function DashboardExplorer() {
   const [tuning, setTuning] = useState(false);
   const [tuneActive, setTuneActive] = useState<number | null>(null);
   const [tuneInfo, setTuneInfo] = useState<{ sweeps: number; base: number; best: number; stale: number } | null>(null);
+  const gridRef = useRef(false);
+  const gridJobRef = useRef<string | null>(null);
+  const [gridding, setGridding] = useState(false);
+  const [gridInfo, setGridInfo] = useState<{ done: number; total: number; best: number | null } | null>(null);
   const FEATURE_KO: Record<string, string> = {
     rank: "순위차", power: "전력", hstr: "H2H강도", cond: "컨디션", att: "공격", def: "수비",
     val: "가치", form5: "최근폼", h2h5: "H2H5", avg_goals: "평균득점", avg_conceded: "평균실점",
@@ -813,6 +817,64 @@ export function DashboardExplorer() {
     setTuning(false);
   }
 
+  async function gridTune() {
+    if (gridRef.current) {
+      gridRef.current = false;
+      setGridding(false);
+      if (gridJobRef.current) {
+        fetch(`/api/grid?jobId=${encodeURIComponent(gridJobRef.current)}`, { method: "DELETE" }).catch(() => {});
+      }
+      return;
+    }
+    const d = modelDetail?.detail;
+    if (!d || !league || !selVer) return;
+    const train = new Set(d.train_seasons);
+    const tune = [...new Set(rawMatches.filter((m) => {
+      if (!checked.includes(String(m.season)) || train.has(String(m.season))) return false;
+      return parseScoreLocal(m.home_score) != null && parseScoreLocal(m.away_score) != null;
+    }).map((m) => String(m.season)))].sort();
+    if (tune.length === 0) {
+      setError("조절용 미학습 시즌을 체크하세요");
+      return;
+    }
+    const five = selVer.endsWith("-f5");
+    gridRef.current = true;
+    setGridding(true);
+    setGridInfo(null);
+    try {
+      const res = await fetch("/api/grid", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ league, ver: selVer, tune, five, jobs: 4 }),
+      }).then((r) => r.json());
+      if (!res.ok) {
+        gridRef.current = false;
+        setGridding(false);
+        setError("전수탐색 시작 실패");
+        return;
+      }
+      gridJobRef.current = res.jobId as string;
+      const qs = `jobId=${encodeURIComponent(res.jobId as string)}&league=${encodeURIComponent(league)}&ver=${encodeURIComponent(selVer)}${five ? "&five=1" : ""}`;
+      for (let i = 0; i < 3600 && gridRef.current; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        if (!gridRef.current) break;
+        try {
+          const st = await fetch(`/api/grid?${qs}`).then((r) => r.json());
+          if (st.ok && st.progress) setGridInfo(st.progress);
+          if (st.ok && st.job.status !== "running") {
+            if (st.job.status === "done") await fetchModels(league);
+            break;
+          }
+        } catch {
+          break;
+        }
+      }
+    } catch {
+    }
+    gridRef.current = false;
+    setGridding(false);
+  }
+
   async function saveTweaks() {
     if (!tweaked) return;
     const res = await fetch("/api/models", {
@@ -1147,6 +1209,14 @@ export function DashboardExplorer() {
                     {tuning ? "중지" : "자동"}
                   </button>
                   <button
+                    onClick={gridTune}
+                    title="전수탐색으로 가중치를 탐색. 다시 누르면 중지"
+                    className={`flex-1 rounded-lg px-2 py-1 text-[11px] text-white hover:brightness-110 dark:text-black ${gridding ? "bg-red-500 dark:bg-red-400" : "bg-purple-600 dark:bg-purple-400"
+                      }`}
+                  >
+                    {gridding ? "중지" : "전수"}
+                  </button>
+                  <button
                     disabled={!canSave}
                     onClick={saveTweaks}
                     title={saveTitle}
@@ -1171,6 +1241,12 @@ export function DashboardExplorer() {
                 {tuneInfo && (
                   <p className="mt-1 text-[11px] text-zinc-500">
                     {tuning ? (tuneInfo.stale >= 5 ? `정체 ${tuneInfo.stale}` : "조절 중") : "조절됨"} {tuneInfo.sweeps}sweep · {tuneInfo.base.toFixed(3)} → {tuneInfo.best.toFixed(3)}
+                  </p>
+                )}
+                {gridInfo && (
+                  <p className="mt-1 text-[11px] text-zinc-500">
+                    {gridding ? "전수탐색 중" : "전수탐색 됨"}
+                    {gridInfo.total > 0 ? ` ${(gridInfo.done / gridInfo.total * 100).toFixed(1)}%` : ""} ({gridInfo.done.toLocaleString()}/{gridInfo.total.toLocaleString()}){gridInfo.best != null ? ` best=${gridInfo.best.toFixed(3)}` : ""}
                   </p>
                 )}
               </div>
