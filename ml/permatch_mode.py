@@ -40,6 +40,13 @@ import random
 import sys
 import time
 
+try:
+    import numba as _numba
+    import numpy as _np_nb
+    _HAVE_NUMBA = True
+except ImportError:
+    _HAVE_NUMBA = False
+
 
 _START = time.time()
 
@@ -741,9 +748,10 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
                 max_combos: int = 0, max_minutes: float = 0.0,
                 ckpt_every: int = 5000, log_every: int = 20000,
                 wmin: float = -2.0, wmax: float = 2.0,
-                batch: int = 512, log_secs: float = 10.0,
+                batch: int = 4096, log_secs: float = 10.0,
                 split: int = 1, part: int = 0,
-                fresh: bool = False, use_cache: bool = True):
+                fresh: bool = False, use_cache: bool = True,
+                jobs: int = 1):
     import numpy as _np
     p = model_path(league, ver)
     if not os.path.exists(p):
@@ -800,6 +808,10 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
         ddArr = 1.0 / (1.0 + _np.exp(-_np.clip(_Dd, -30.0, 30.0)))
     else:
         ddArr = _np.full(len(yn), d)
+    f32 = _np.float32
+    X32 = _np.ascontiguousarray(Xn, dtype=f32)
+    dd32 = _np.ascontiguousarray(ddArr, dtype=f32)
+    PP32 = _np.ascontiguousarray(PP, dtype=f32) if PP is not None else None
 
     def _acc_batch(Wmat, hvec):
         B = Wmat.shape[0]
@@ -902,15 +914,27 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
     num = start_num
     idx = num_to_idx(num)
     ndone = 0
+    chunks_resume = None
     if os.path.exists(ckpt_p) and not fresh:
         try:
             c = json.load(open(ckpt_p))
             if (c.get("vals") == vals and c.get("order") == order
                     and set(c.get("tune", [])) == set(tune_s)
                     and c.get("split", 1) == split and c.get("part", 0) == part):
-                num = max(start_num, min(int(c.get("num", c.get("done", start_num))), end_num))
-                idx = num_to_idx(num)
-                ndone = num - start_num
+                ch = c.get("chunks")
+                if (isinstance(ch, list) and len(ch) == jobs
+                        and all(isinstance(x, list) and len(x) == 3 for x in ch)
+                        and sum(int(e) - int(s) for s, e, _ in ch) == end_num - start_num
+                        and all(start_num <= int(s) <= int(s) + int(dd) <= int(e) <= end_num
+                                for s, e, dd in ch)):
+                    chunks_resume = [[int(s), int(e), int(dd)] for s, e, dd in ch]
+                    ndone = sum(dd for _, _, dd in chunks_resume)
+                    num = min(s + dd for s, _, dd in chunks_resume)
+                    idx = num_to_idx(num)
+                else:
+                    num = max(start_num, min(int(c.get("num", c.get("done", start_num))), end_num))
+                    idx = num_to_idx(num)
+                    ndone = num - start_num
                 if isinstance(c.get("bestW"), list) and len(c["bestW"]) == nw:
                     cb = acc_of(c["bestW"], c.get("bestHfa", 0.0))
                     if cb > best:
@@ -928,35 +952,65 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
     last_log = t0
     complete = False
     B = max(1, batch)
+    if _HAVE_NUMBA:
+        try:
+            _numba.set_num_threads(max(1, int(jobs)))
+        except (ValueError, RuntimeError):
+            log("numba 스레드 수 설정 실패, 기본값으로 계속")
+    _pows = None
+    if total <= 9_000_000_000_000_000_000:
+        _pows = _np.array([nv ** (nf - 1 - k) for k in range(nf)], dtype=_np.int64)
+    _vals_arr = _np.asarray(vals, dtype=float)
+    Xc = _np.ascontiguousarray(Xn, dtype=float)
+    yc = _np.ascontiguousarray(yn, dtype=_np.int64)
+    dc = _np.ascontiguousarray(ddArr, dtype=float)
+    Pc = _np.ascontiguousarray(PP, dtype=float) if PP is not None else _np.zeros((1, 3))
+    use_pp = PP is not None
+    capf = float(cap or 0.0)
     try:
         while num < end_num:
-            Wb, hb = [], []
-            overflow = False
-            for _ in range(B):
-                if num >= end_num:
-                    break
-                row = [0.0] * nw
-                hh = 0.0
+            M = int(min(B, end_num - num))
+            if _pows is not None:
+                nums = _np.arange(num, num + M)
+                VW = _vals_arr[(nums[:, None] // _pows[None, :]) % nv]
+                Wc = _np.zeros((M, nw))
+                hc = _np.empty(M)
                 for k, feat in enumerate(order):
-                    vv = vals[idx[k]]
                     if feat == "hfa":
-                        hh = vv
+                        hc = _np.array(VW[:, k])
                     else:
-                        row[feat] = vv
-                Wb.append(row)
-                hb.append(hh)
-                num += 1
-                ndone += 1
-                if not advance():
-                    overflow = True
-                    break
-            if not Wb:
-                break
-            accs = _acc_batch(_np.asarray(Wb, dtype=float), _np.asarray(hb, dtype=float))
+                        Wc[:, feat] = VW[:, k]
+            else:
+                Wb, hb = [], []
+                for _ in range(M):
+                    row = [0.0] * nw
+                    hh = 0.0
+                    for k, feat in enumerate(order):
+                        vv = vals[idx[k]]
+                        if feat == "hfa":
+                            hh = vv
+                        else:
+                            row[feat] = vv
+                    Wb.append(row)
+                    hb.append(hh)
+                    advance()
+                Wc = _np.asarray(Wb, dtype=float)
+                hc = _np.asarray(hb, dtype=float)
+            num += M
+            ndone += M
+            idx = num_to_idx(num)
+            if _HAVE_NUMBA:
+                out = _np.empty(M)
+                _grid_acc_nb(Xc, yc, dc, Pc, Wc, hc, capf, use_pp, out)
+                accs = out
+            else:
+                accs = _acc_batch32(X32, yn, dd32, PP32, cap, nw,
+                                    _np.ascontiguousarray(Wc, dtype=_np.float32),
+                                    _np.ascontiguousarray(hc, dtype=_np.float32))
             bi = int(_np.argmax(accs))
             ba = float(accs[bi])
             if ba > best:
-                best, bestW, bestHfa = ba, list(Wb[bi]), float(hb[bi])
+                best, bestW, bestHfa = ba, list(Wc[bi]), float(hc[bi])
                 st, bw, bh, bba = persist()
                 if st == "adopted":
                     best, bestW, bestHfa = bba, bw, bh
@@ -985,7 +1039,7 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
             if max_minutes > 0 and (time.time() - _START) / 60 > max_minutes:
                 log(f"{max_minutes}분 제한 도달 → 종료")
                 break
-            if overflow or num >= end_num:
+            if num >= end_num:
                 complete = True
                 break
     except KeyboardInterrupt:
@@ -996,6 +1050,92 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
     span = end_num - start_num
     log(f"전수탐색 종료 {ndone:,}/{span:,} best={best:.3f}" + (" (전체 완료)" if complete else ""))
     return True
+
+
+def _acc_batch32(X32, yn, dd32, PP32, cap, nw, Wmat, hvec):
+    import numpy as _np
+    f32 = _np.float32
+    B = Wmat.shape[0]
+    if cap:
+        S = _np.zeros((B, len(yn)), dtype=f32)
+        Xc = X32.T
+        c32 = f32(cap)
+        for j in range(nw):
+            S += c32 * _np.tanh(Xc[j][None, :] * (Wmat[:, j] / c32)[:, None])
+        S += hvec[:, None]
+    else:
+        S = Wmat @ X32.T + hvec[:, None]
+    Ph = 1.0 / (1.0 + _np.exp(-_np.clip(S, f32(-30.0), f32(30.0))))
+    P0 = Ph * (1.0 - dd32)
+    P1 = _np.broadcast_to(dd32, Ph.shape)
+    P2 = (1.0 - Ph) * (1.0 - dd32)
+    if PP32 is not None:
+        P0 = f32(0.5) * P0 + f32(0.5) * PP32[:, 0]
+        P1 = f32(0.5) * P1 + f32(0.5) * PP32[:, 1]
+        P2 = f32(0.5) * P2 + f32(0.5) * PP32[:, 2]
+    pick = _np.where((P0 >= P1) & (P0 >= P2), 0, _np.where(P1 >= P2, 1, 2))
+    return (pick == yn[None, :]).mean(axis=1)
+
+
+if _HAVE_NUMBA:
+    @_numba.njit(cache=True, nogil=True, parallel=True)
+    def _grid_acc_nb(X, y, dd, PP, Wb, hb, cap, use_pp, out):
+        B = Wb.shape[0]
+        N = X.shape[0]
+        F = X.shape[1]
+        for b in _numba.prange(B):
+            hit = 0
+            for i in range(N):
+                if cap > 0.0:
+                    s = 0.0
+                    for j in range(F):
+                        s += cap * _np_nb.tanh(X[i, j] * (Wb[b, j] / cap))
+                    s += hb[b]
+                else:
+                    s = hb[b]
+                    for j in range(F):
+                        s += X[i, j] * Wb[b, j]
+                if s > 30.0:
+                    s = 30.0
+                elif s < -30.0:
+                    s = -30.0
+                ph = 1.0 / (1.0 + _np_nb.exp(-s))
+                ddi = dd[i]
+                omd = 1.0 - ddi
+                if use_pp:
+                    q0 = 0.5 * ph * omd + 0.5 * PP[i, 0]
+                    q1 = 0.5 * ddi + 0.5 * PP[i, 1]
+                    q2 = 0.5 * (1.0 - ph) * omd + 0.5 * PP[i, 2]
+                else:
+                    q0 = ph * omd
+                    q1 = ddi
+                    q2 = (1.0 - ph) * omd
+                if q0 >= q1 and q0 >= q2:
+                    pk = 0
+                elif q1 >= q2:
+                    pk = 1
+                else:
+                    pk = 2
+                if pk == y[i]:
+                    hit += 1
+            out[b] = hit / N
+
+
+def _grid_acc_batch(Xn, yn, ddArr, PP, cap, nw, Wb, hb, X32, dd32, PP32):
+    import numpy as _np
+    if _HAVE_NUMBA:
+        Xc = _np.ascontiguousarray(Xn, dtype=_np.float64)
+        yc = _np.ascontiguousarray(yn, dtype=_np.int64)
+        dc = _np.ascontiguousarray(ddArr, dtype=_np.float64)
+        Pc = _np.ascontiguousarray(PP, dtype=_np.float64) if PP is not None else _np.zeros((1, 3))
+        Wc = _np.ascontiguousarray(Wb, dtype=_np.float64)
+        hc = _np.ascontiguousarray(hb, dtype=_np.float64)
+        out = _np.empty(Wc.shape[0])
+        _grid_acc_nb(Xc, yc, dc, Pc, Wc, hc, float(cap or 0.0), PP is not None, out)
+        return out
+    return _acc_batch32(X32, yn, dd32, PP32, cap, nw,
+                        _np.ascontiguousarray(Wb, dtype=_np.float32),
+                        _np.ascontiguousarray(hb, dtype=_np.float32))
 
 
 def save_artifact(league: str, ver: str, artifact: dict):
@@ -1549,14 +1689,6 @@ def _sweep_fit_e(Va, ya, w, hfa, d, esteps, use_valid, l2=0.0):
     return [float(v) for v in e]
 
 
-try:
-    import numba as _numba
-    import numpy as _np_nb
-    _HAVE_NUMBA = True
-except ImportError:
-    _HAVE_NUMBA = False
-
-
 if _HAVE_NUMBA:
     @_numba.njit(cache=True)
     def _cd_ll_nb(X, y, w, hfa, d, l2):
@@ -1783,7 +1915,7 @@ def main():
     ap.add_argument("--grid-step", type=float, default=0.5, help="grid 모드 축 간격")
     ap.add_argument("--max-combos", type=int, default=0, help="grid 모드 최대 평가 수 (0=끝까지)")
     ap.add_argument("--ckpt-every", type=int, default=5000, help="grid 모드 체크포인트 간격")
-    ap.add_argument("--batch", type=int, default=512, help="grid 모드 묶음 평가 수")
+    ap.add_argument("--batch", type=int, default=4096, help="grid 모드 묶음 평가 수")
     ap.add_argument("--log-secs", type=float, default=10.0, help="grid 모드 진행 로그 간격(초)")
     ap.add_argument("--split", type=int, default=1, help="grid 모드 분할 수(병렬용)")
     ap.add_argument("--part", type=int, default=0, help="grid 모드 분할 번호(0부터)")
@@ -1874,7 +2006,8 @@ def main():
                     wmin=args.wmin, wmax=args.wmax,
                     batch=args.batch, log_secs=args.log_secs,
                     split=args.split, part=args.part,
-                    fresh=args.new, use_cache=not args.no_cache)
+                    fresh=args.new, use_cache=not args.no_cache,
+                    jobs=args.jobs)
         return
 
     assert args.train and args.valid, "--train과 --valid 필요"
