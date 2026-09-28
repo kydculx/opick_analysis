@@ -1372,6 +1372,270 @@ def eval_artifact(matches, train_s: set, valid: str, artifact: dict):
 
 
 # ---------------------------------------------------------------- autotune
+def _cand_mult(steps):
+    """좌표 하강용 후보 이동폭 [+s0,-s0,+s1,-s1,...]."""
+    import numpy as _np
+    m = []
+    for v in steps:
+        v = float(v)
+        m.append(v)
+        m.append(-v)
+    return _np.asarray(m, dtype=float)
+
+
+def _ll_from_S(S, y, d, l2pen):
+    """batch_ll와 동일한 목적식. S: (N,) 또는 (N,C) logit 행렬."""
+    import numpy as _np
+    Sa = _np.asarray(S, dtype=float)
+    oned = (Sa.ndim == 1)
+    if oned:
+        Sa = Sa[:, None]
+    PH = 1.0 / (1.0 + _np.exp(-_np.clip(Sa, -30.0, 30.0)))
+    omd = 1.0 - d
+    home = PH * omd
+    away = (1.0 - PH) * omd
+    ycol = _np.asarray(y, dtype=int).reshape(-1, 1)
+    Pc = _np.where(ycol == 0, home, _np.where(ycol == 1, d, away))
+    out = -_np.log(_np.maximum(Pc, 1e-12)).mean(axis=0) + _np.asarray(l2pen, dtype=float)
+    return float(out[0]) if oned else out
+
+
+def _acc_from_S(S, y, d):
+    """batch_acc와 동일한 정확도. S: (N,) 또는 (N,C) logit 행렬."""
+    import numpy as _np
+    Sa = _np.asarray(S, dtype=float)
+    oned = (Sa.ndim == 1)
+    if oned:
+        Sa = Sa[:, None]
+    PH = 1.0 / (1.0 + _np.exp(-_np.clip(Sa, -30.0, 30.0)))
+    omd = 1.0 - d
+    home = PH * omd
+    away = (1.0 - PH) * omd
+    pick = _np.where((home >= d) & (home >= away), 0, _np.where(d >= away, 1, 2))
+    out = (pick == _np.asarray(y, dtype=int).reshape(-1, 1)).mean(axis=0)
+    return float(out[0]) if oned else out
+
+
+def _base_proba3(s, d):
+    """T=1 기준 3-way 확률 행렬 (N,3). batch_proba(T=1)와 동일."""
+    import numpy as _np
+    PH = 1.0 / (1.0 + _np.exp(-_np.clip(_np.asarray(s, dtype=float), -30.0, 30.0)))
+    omd = 1.0 - d
+    P = _np.empty((PH.shape[0], 3))
+    P[:, 0] = PH * omd
+    P[:, 1] = d
+    P[:, 2] = (1.0 - PH) * omd
+    return P
+
+
+def _temp_ll(P1, y, t):
+    """온도 t 적용 NLL. batch_proba(T=t)+batch_ll와 동일한 연산."""
+    import numpy as _np
+    L = _np.log(_np.maximum(P1, 1e-9)) / t
+    L = L - L.max(axis=1, keepdims=True)
+    E = _np.exp(L)
+    P = E / E.sum(axis=1, keepdims=True)
+    yy = _np.asarray(y, dtype=int)
+    return float(-_np.log(_np.maximum(P[_np.arange(len(yy)), yy], 1e-12)).mean())
+
+
+def _temp_acc(P1, y, t):
+    """온도 t 적용 정확도. batch_proba(T=t)+batch_acc와 동일한 연산."""
+    import numpy as _np
+    L = _np.log(_np.maximum(P1, 1e-9)) / t
+    L = L - L.max(axis=1, keepdims=True)
+    E = _np.exp(L)
+    P = E / E.sum(axis=1, keepdims=True)
+    home, dr, away = P[:, 0], P[:, 1], P[:, 2]
+    pick = _np.where((home >= dr) & (home >= away), 0, _np.where(dr >= away, 1, 2))
+    yy = _np.asarray(y, dtype=int)
+    return float((pick == yy).mean())
+
+
+def _sweep_fit_w(Xa, ya, w0, hfa0, d, l2, steps, max_sweeps):
+    """좌표 하강: 기존 sweep 순서(좌표→step→부호, 첫 개선 적용)를 유지하되
+    좌표당 8후보를 1회 벡터 평가. 목적식은 batch_ll와 동일."""
+    import numpy as _np
+    nf = Xa.shape[1]
+    mult = _cand_mult(steps)
+    m = mult.shape[0]
+    n = Xa.shape[0]
+    w = _np.asarray(list(w0), dtype=float)
+    hfa = float(hfa0)
+    s = Xa @ w + hfa
+    wnorm2 = float((w ** 2).sum())
+    best = _ll_from_S(s, ya, d, l2 * wnorm2)
+    coords = list(range(nf)) + ["hfa"]
+    for _ in range(max(1, int(max_sweeps))):
+        improved = False
+        for j in coords:
+            k0 = 0
+            while k0 < m:
+                if j == "hfa":
+                    Sc = s[:, None] + mult[None, k0:]
+                    pen = l2 * wnorm2
+                else:
+                    Sc = s[:, None] + Xa[:, j:j + 1] * mult[None, k0:]
+                    Wc = w[j] + mult[k0:]
+                    pen = l2 * (wnorm2 - w[j] ** 2 + Wc ** 2)
+                lls = _ll_from_S(Sc, ya, d, pen)
+                hit = -1
+                for k in range(k0, m):
+                    if float(lls[k - k0]) < best - 1e-6:
+                        hit = k
+                        break
+                if hit < 0:
+                    break
+                best = float(lls[hit - k0])
+                if j == "hfa":
+                    hfa = hfa + float(mult[hit])
+                else:
+                    w[j] = w[j] + float(mult[hit])
+                wnorm2 = float((w ** 2).sum())
+                s = _np.array(Sc[:, hit - k0], dtype=float, copy=True)
+                improved = True
+                k0 = hit + 1
+        if not improved:
+            break
+    return [float(v) for v in w], float(hfa), float(best)
+
+
+def _sweep_fit_e(Va, ya, w, hfa, d, esteps, use_valid, l2=0.0):
+    """emphasis 탐색: 기존 라운드 순서와 ekey 목적식을 유지하되 좌표당
+    8후보를 1회 벡터 평가. use_valid면 (acc, -ll), 아니면 (-ll) 기준."""
+    import numpy as _np
+    nf = Va.shape[1]
+    mult = _cand_mult(esteps)
+    m = mult.shape[0]
+    n = Va.shape[0]
+    wv = _np.asarray(list(w), dtype=float)
+    e = _np.ones(nf)
+    s = (Va * e[None, :]) @ wv + hfa
+    wpen = l2 * float((wv ** 2).sum())
+    if use_valid:
+        best_key = (_acc_from_S(s, ya, d), -_ll_from_S(s, ya, d, 0.0))
+    else:
+        best_key = (-_ll_from_S(s, ya, d, wpen),)
+    for _ in range(8):
+        improved = False
+        for j in range(nf):
+            k0 = 0
+            while k0 < m:
+                Em = _np.maximum(e[j] + mult[k0:], 0.0)
+                Dl = Em - e[j]
+                Sc = s[:, None] + (wv[j] * Va[:, j:j + 1] * Dl[None, :])
+                lls = _ll_from_S(Sc, ya, d, 0.0 if use_valid else wpen)
+                if use_valid:
+                    accs = _acc_from_S(Sc, ya, d)
+                hit = -1
+                for k in range(k0, m):
+                    if use_valid:
+                        key = (float(accs[k - k0]), float(-lls[k - k0]))
+                    else:
+                        key = (float(-lls[k - k0]),)
+                    if key > best_key:
+                        hit = k
+                        hit_key = key
+                        break
+                if hit < 0:
+                    break
+                best_key = hit_key
+                e[j] = float(Em[hit - k0])
+                s = _np.array(Sc[:, hit - k0], dtype=float, copy=True)
+                improved = True
+                k0 = hit + 1
+        if not improved:
+            break
+    return [float(v) for v in e]
+
+
+try:
+    import numba as _numba
+    import numpy as _np_nb
+    _HAVE_NUMBA = True
+except ImportError:
+    _HAVE_NUMBA = False
+
+
+if _HAVE_NUMBA:
+    @_numba.njit(cache=True)
+    def _cd_ll_nb(X, y, w, hfa, d, l2):
+        n = X.shape[0]
+        f = X.shape[1]
+        wpen = 0.0
+        for j in range(f):
+            wpen += w[j] * w[j]
+        ll = 0.0
+        omd = 1.0 - d
+        for i in range(n):
+            s = hfa
+            for j in range(f):
+                s += X[i, j] * w[j]
+            if s > 30.0:
+                s = 30.0
+            elif s < -30.0:
+                s = -30.0
+            ph = 1.0 / (1.0 + _np_nb.exp(-s))
+            yi = y[i]
+            if yi == 0:
+                p = ph * omd
+            elif yi == 1:
+                p = d
+            else:
+                p = (1.0 - ph) * omd
+            if p < 1e-12:
+                p = 1e-12
+            ll += -_np_nb.log(p)
+        return ll / n + l2 * wpen
+
+    @_numba.njit(cache=True)
+    def _cd_fit_w_kernel(X, y, w, H, d, l2, steps, max_sweeps):
+        f = X.shape[1]
+        ns = steps.shape[0]
+        best = _cd_ll_nb(X, y, w, H[0], d, l2)
+        for _ in range(max_sweeps):
+            improved = False
+            for j in range(f + 1):
+                k = 0
+                while k < ns * 2:
+                    si = k // 2
+                    st = steps[si] if k % 2 == 0 else -steps[si]
+                    if j < f:
+                        w[j] += st
+                        ll = _cd_ll_nb(X, y, w, H[0], d, l2)
+                        if ll < best - 1e-6:
+                            best = ll
+                            improved = True
+                            k += 1
+                        else:
+                            w[j] -= st
+                            k += 1
+                    else:
+                        H[0] += st
+                        ll = _cd_ll_nb(X, y, w, H[0], d, l2)
+                        if ll < best - 1e-6:
+                            best = ll
+                            improved = True
+                            k += 1
+                        else:
+                            H[0] -= st
+                            k += 1
+            if not improved:
+                break
+        return best
+
+
+def _nb_fit_w(Xa, ya, w0, hfa0, d, l2, steps, max_sweeps):
+    import numpy as _np
+    Xc = _np.ascontiguousarray(Xa, dtype=_np.float64)
+    yc = _np.ascontiguousarray(ya, dtype=_np.int64)
+    w = _np.ascontiguousarray(list(w0), dtype=_np.float64).copy()
+    H = _np.asarray([float(hfa0)], dtype=_np.float64)
+    st = _np.ascontiguousarray(list(steps), dtype=_np.float64)
+    best = _cd_fit_w_kernel(Xc, yc, w, H, float(d), float(l2), st, int(max_sweeps))
+    return [float(v) for v in w], float(H[0]), float(best)
+
+
 def sample_steps(rng: random.Random, lo: float = 0.005, hi: float = 0.5, k: int = 4):
     vals = sorted(rng.uniform(math.log(lo), math.log(hi)) for _ in range(k))
     return [round(math.exp(v), 4) for v in vals]
@@ -1403,30 +1667,14 @@ def fit_trial(Xn, ty, Vn, vy, d, mu, sd, cfg):
         rng.seed(1000 + restart)
         w = [rng.gauss(0, 0.3) for _ in range(nw)]
         hfa = rng.gauss(0, 0.2)
-
-        def ll_of(wv, hv):
-            return batch_ll(Xn, ty, wv, hv, d, 1.0, cfg["l2"])
-
-        best_ll = ll_of(w, hfa)
-        for _ in range(cfg["sweeps"]):
-            improved = False
-            for j in list(range(nw)) + ["hfa"]:
-                for step in cfg["steps"]:
-                    for sign in (1.0, -1.0):
-                        cw = list(w)
-                        ch = hfa + sign * step if j == "hfa" else hfa
-                        if j != "hfa":
-                            cw[j] += sign * step
-                        ll = ll_of(cw, ch)
-                        if ll < best_ll - 1e-6:
-                            best_ll = ll
-                            w, hfa = cw, ch
-                            improved = True
-            if not improved:
-                break
+        if _HAVE_NUMBA:
+            w, hfa, best_ll = _nb_fit_w(Xn, ty, w, hfa, d, cfg["l2"], cfg["steps"], cfg["sweeps"])
+        else:
+            w, hfa, best_ll = _sweep_fit_w(Xn, ty, w, hfa, d, cfg["l2"], cfg["steps"], cfg["sweeps"])
         if len(Vn) and len(vy):
-            key = (batch_acc(Vn, vy, w, hfa, d),
-                   -batch_ll(Vn, vy, w, hfa, d))
+            sv = Vn @ _np.asarray(w, dtype=float) + hfa
+            key = (_acc_from_S(sv, vy, d),
+                   -_ll_from_S(sv, vy, d, 0.0))
         else:
             key = (-best_ll,)
         scored.append((key, list(w), hfa))
@@ -1437,39 +1685,27 @@ def fit_trial(Xn, ty, Vn, vy, d, mu, sd, cfg):
 
     e = [1.0] * nw
     if cfg["emphasis"]:
-        def ekey(ee):
-            if len(Vn) and len(vy):
-                return (batch_acc(Vn, vy, w, hfa, d, 1.0, ee),
-                        -batch_ll(Vn, vy, w, hfa, d, 1.0, 0.0, ee))
-            return (-batch_ll(Xn, ty, w, hfa, d, 1.0, cfg["l2"], ee),)
-        best_key = ekey(e)
-        for _ in range(8):
-            improved = False
-            for j in range(nw):
-                for step in cfg["esteps"]:
-                    for sign in (1.0, -1.0):
-                        cand = list(e)
-                        cand[j] = max(0.0, cand[j] + sign * step)
-                        key = ekey(cand)
-                        if key > best_key:
-                            e, best_key = cand, key
-                            improved = True
-            if not improved:
-                break
+        use_valid = bool(len(Vn) and len(vy))
+        e = _sweep_fit_e(Vn if use_valid else Xn, vy if use_valid else ty,
+                         w, hfa, d, cfg["esteps"], use_valid, cfg["l2"])
 
+    _wa = _np.asarray(w, dtype=float)
+    _ea = _np.asarray(e, dtype=float)
     T, best_t = 1.0, None
+    _P1 = _base_proba3((Xn * _ea[None, :]) @ _wa + hfa, d)
     t = 0.5
     while t <= 10.001:
-        ll = batch_ll(Xn, ty, w, hfa, d, t, 0.0, e)
+        ll = _temp_ll(_P1, ty, t)
         if best_t is None or ll < best_t:
             best_t, T = ll, t
         t += 0.1
     if len(Vn) and len(vy):
         best_T, best_key = T, None
+        _V1 = _base_proba3((Vn * _ea[None, :]) @ _wa + hfa, d)
         t = 0.5
         while t <= 10.001:
-            key = (batch_acc(Vn, vy, w, hfa, d, t, e),
-                   -batch_ll(Vn, vy, w, hfa, d, t, 0.0, e))
+            key = (_temp_acc(_V1, vy, t),
+                   -_temp_ll(_V1, vy, t))
             if best_key is None or key > best_key:
                 best_key, best_T = key, t
             t += 0.1
