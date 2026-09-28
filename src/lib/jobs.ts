@@ -36,6 +36,7 @@ export function startJob(opts: {
   seasons: string[];
   ver: string;
   argv: string[];
+  script?: string;
 }): JobStatus {
   const id = `${opts.league}-${opts.kind}-${Date.now()}`;
   const job: JobStatus = {
@@ -53,7 +54,7 @@ export function startJob(opts: {
 
   const python = process.env.ML_PYTHON || "python3";
   const logFd = openSync(logPath, "w");
-  const child = spawn(/*turbopackIgnore: true*/ python, ["ml/train.py", ...opts.argv], {
+  const child = spawn(/*turbopackIgnore: true*/ python, [opts.script ?? "ml/train.py", ...opts.argv], {
     cwd: process.cwd(),
     stdio: ["ignore", logFd, logFd],
   });
