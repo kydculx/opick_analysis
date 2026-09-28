@@ -20,6 +20,10 @@ export type PredMapEntry = { home: number; draw: number; away: number; ver: stri
 
 export type AccuracyMap = Record<string, { n: number; hit: number; acc: number | null }>;
 
+// 순차 탐색용 이동폭 사다리: 0.001 단위 전수 스캔(최대 4000회) 대신 12개 대표값만
+// 평가하고, 개선된 구간만 조밀하게 재탐색한다.
+const TUNE_LADDER = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 4];
+
 function parseScoreLocal(v: string | null | undefined): number | null {
   if (v == null || v === "") return null;
   const n = Number(v);
@@ -641,16 +645,16 @@ export function DashboardExplorer() {
           if (!tuningRef.current) break;
           setTuneActive(j);
           for (const dir of [1, -1] as const) {
-            for (let step = 1; ; step++) {
-              if (!tuningRef.current) break;
-              const delta = Math.round(step * 0.001 * 10000) / 10000;
-              if (delta > 4.001) break;
+            let evals = 0;
+            const tryDelta = async (delta: number): Promise<"hit" | "miss" | "stop"> => {
+              if (!tuningRef.current) return "stop";
               const cw = [...w];
               let ch = hfa;
               if (j === -1) ch = clamp4(hfa + dir * delta);
               else cw[j] = clamp4(cw[j] + dir * delta);
-              if (j === -1 ? ch === hfa : cw[j] === w[j]) break;
+              if (j === -1 ? ch === hfa : cw[j] === w[j]) return "stop";
               const v = accLine(cw, ch);
+              evals++;
               const nowMs = Date.now();
               if (v > best) {
                 best = v;
@@ -659,11 +663,12 @@ export function DashboardExplorer() {
                 improved = true;
                 lastDisp = nowMs;
                 setTweaked(cw);
+                return "hit";
               } else if (nowMs - lastDisp > 120) {
                 lastDisp = nowMs;
                 setTweaked(cw);
               }
-              if (step % 20 === 0 || nowMs - lastYield > 12) {
+              if (evals % 20 === 0 || nowMs - lastYield > 12) {
                 lastYield = nowMs;
                 await new Promise((r) => setTimeout(r, 0));
               }
@@ -671,6 +676,28 @@ export function DashboardExplorer() {
                 lastPv = nowMs;
                 previewWith(cw, ch, false);
               }
+              return "miss";
+            };
+            let prev = 0;
+            for (const delta of TUNE_LADDER) {
+              if (!tuningRef.current) break;
+              const before = best;
+              const r = await tryDelta(delta);
+              if (r === "stop") break;
+              if (best > before) {
+                const gap = delta - prev;
+                if (gap > 0.0015) {
+                  const rd = Math.max(0.001, gap / 8);
+                  let d = prev + rd;
+                  while (d < delta - 1e-9) {
+                    if (!tuningRef.current) break;
+                    const rr = await tryDelta(Math.round(d * 10000) / 10000);
+                    if (rr === "stop") break;
+                    d += rd;
+                  }
+                }
+              }
+              prev = delta;
             }
             await new Promise((r) => setTimeout(r, 0));
           }
