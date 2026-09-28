@@ -678,29 +678,52 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
             for j in order:
                 fname = FEATURES[j] if j != "hfa" else "hfa"
                 t0 = time.time()
+
+                def try_delta(delta):
+                    nonlocal w, hfa, best, bestW, bestHfa, time_up
+                    cw = list(w)
+                    ch = hfa
+                    if j == "hfa":
+                        ch = clamp(hfa + sgn * delta)
+                    else:
+                        cw[j] = clamp(cw[j] + sgn * delta)
+                    if (ch == hfa) if j == "hfa" else (cw[j] == w[j]):
+                        return "stop"
+                    if max_minutes > 0 and (time.time() - _START) / 60 > max_minutes:
+                        time_up = True
+                        return "stop"
+                    a = acc_of(cw, ch)
+                    if a > best:
+                        best, w, hfa = a, cw, ch
+                        bestW, bestHfa = list(cw), ch
+                        commit(f"★ 순차 {fname} {sgn:+.0f} 값={cw[j] if j != 'hfa' else ch:+.3f}")
+                        return "hit"
+                    return "miss"
+
                 for sgn in (1.0, -1.0):
-                    step = 0
-                    while True:
-                        step += 1
-                        delta = round(step * 0.001, 4)
-                        if delta > 4.001:
+                    prev = 0.0
+                    for delta in _TUNE_LADDER:
+                        if time_up:
                             break
-                        if max_minutes > 0 and (time.time() - _START) / 60 > max_minutes:
-                            time_up = True
+                        before = best
+                        r = try_delta(delta)
+                        if r == "stop":
                             break
-                        cw = list(w)
-                        ch = hfa
-                        if j == "hfa":
-                            ch = clamp(hfa + sgn * delta)
-                        else:
-                            cw[j] = clamp(cw[j] + sgn * delta)
-                        if (ch == hfa) if j == "hfa" else (cw[j] == w[j]):
-                            break
-                        a = acc_of(cw, ch)
-                        if a > best:
-                            best, w, hfa = a, cw, ch
-                            bestW, bestHfa = list(cw), ch
-                            commit(f"★ 순차 {fname} {sgn:+.0f} 값={cw[j] if j != 'hfa' else ch:+.3f}")
+                        if best > before:
+                            gap = delta - prev
+                            if gap > 0.0015:
+                                rd = max(0.001, gap / 8)
+                                dd = prev + rd
+                                while dd < delta - 1e-9:
+                                    if time_up:
+                                        break
+                                    rr = try_delta(round(dd, 4))
+                                    if rr == "stop":
+                                        break
+                                    dd += rd
+                        prev = delta
+                    if time_up:
+                        break
                 if time_up:
                     break
                 log(f"순차 {fname} 완료 ({time.time() - t0:.1f}s) 현재={w[j] if j != 'hfa' else hfa:+.3f} best={best:.3f}")
@@ -711,23 +734,59 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
         rnd = 0
         log(f"랜덤워크 시작 (noise={noise} hfa_noise={hfa_noise} rounds=" +
             ("무한" if random_rounds <= 0 else str(random_rounds)) + ", Ctrl+C로 중지)")
+        RK = 16
+        Xc = _np.ascontiguousarray(Xn, dtype=float)
+        yc = _np.ascontiguousarray(yn, dtype=_np.int64)
+        if use_draw:
+            _Dd = _np.asarray(Xd, dtype=float) @ _np.asarray(dw, dtype=float) + db
+            dc = 1.0 / (1.0 + _np.exp(-_np.clip(_Dd, -30.0, 30.0)))
+        else:
+            dc = _np.full(len(yn), d)
+        dc = _np.ascontiguousarray(dc, dtype=float)
+        Pc = _np.ascontiguousarray(PP, dtype=float) if PP is not None else _np.zeros((1, 3))
+        use_pp = PP is not None
+        capf = float(cap or 0.0)
+        if _HAVE_NUMBA:
+            try:
+                _numba.set_num_threads(max(1, int(os.cpu_count() or 4)))
+            except (ValueError, RuntimeError):
+                pass
         while not time_up:
-            rnd += 1
-            if random_rounds > 0 and rnd > random_rounds:
-                log(f"라운드 {random_rounds} 도달 → 종료")
-                break
+            n = RK
+            if random_rounds > 0:
+                n = min(RK, random_rounds - rnd)
+                if n <= 0:
+                    log(f"라운드 {random_rounds} 도달 → 종료")
+                    break
             if max_minutes > 0 and (time.time() - _START) / 60 > max_minutes:
                 log(f"{max_minutes}분 제한 도달 → 종료")
                 break
-            kw = [clamp(v + rng.uniform(-noise, noise)) for v in w]
-            kh = clamp(hfa + rng.uniform(-hfa_noise, hfa_noise))
-            a = acc_of(kw, kh)
-            w, hfa = kw, kh
-            if a > best:
-                best, bestW, bestHfa = a, list(kw), kh
-                commit(f"★ 랜덤 #{rnd}")
-            elif rnd % max(1, log_every) == 0:
-                log(f"랜덤 #{rnd} 진행중 best={best:.3f} 현재={a:.3f}")
+            cand_w, cand_h = [], []
+            cw_, ch_ = list(w), hfa
+            for _ in range(n):
+                cw_ = [clamp(v + rng.uniform(-noise, noise)) for v in cw_]
+                ch_ = clamp(ch_ + rng.uniform(-hfa_noise, hfa_noise))
+                cand_w.append(cw_)
+                cand_h.append(ch_)
+            if _HAVE_NUMBA:
+                out = _np.empty(n)
+                _grid_acc_nb(Xc, yc, dc, Pc,
+                             _np.ascontiguousarray(cand_w, dtype=float),
+                             _np.ascontiguousarray(cand_h, dtype=float),
+                             capf, use_pp, out)
+                accs = out
+            else:
+                accs = [acc_of(cw_, ch_) for cw_, ch_ in zip(cand_w, cand_h)]
+            for t in range(n):
+                rnd += 1
+                a = float(accs[t])
+                kw, kh = cand_w[t], cand_h[t]
+                w, hfa = kw, kh
+                if a > best:
+                    best, bestW, bestHfa = a, list(kw), kh
+                    commit(f"★ 랜덤 #{rnd}")
+                elif rnd % max(1, log_every) == 0:
+                    log(f"랜덤 #{rnd} 진행중 best={best:.3f} 현재={a:.3f}")
     except KeyboardInterrupt:
         log("중단됨(Ctrl+C) → 최고점 유지 후 종료")
     if time_up:
@@ -1755,6 +1814,9 @@ def _fit_restart(Xa, ya, w0, hfa0, d, l2, steps, sweeps):
     if _HAVE_NUMBA:
         return _nb_fit_w(Xa, ya, w0, hfa0, d, l2, steps, sweeps)
     return _sweep_fit_w(Xa, ya, w0, hfa0, d, l2, steps, sweeps)
+
+
+_TUNE_LADDER = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 4]
 
 
 def sample_steps(rng: random.Random, lo: float = 0.005, hi: float = 0.5, k: int = 4):
