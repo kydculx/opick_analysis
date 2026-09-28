@@ -927,20 +927,22 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
     best = acc_of(artW, artH)
     bestW, bestHfa = list(artW), artH
 
-    def advance():
-        for k in range(nf - 1, -1, -1):
-            idx[k] += 1
-            if idx[k] < nv:
-                return True
-            idx[k] = 0
-        return False
+    num0 = 0
+    if split < 1:
+        split = 1
+    seg_start = total * part // split
+    seg_end = total * (part + 1) // split
+    seg_len = seg_end - seg_start
+    cyc_start = seg_start
 
     def write_ckpt():
         with open(ckpt_p, "w") as f:
-            json.dump({"idx": idx, "num": num, "done": ndone, "total": total, "best": best,
+            json.dump({"mode": "odometer", "num": num, "ndone": ndone, "done": ndone,
+                       "total": seg_len, "num0": num0, "best": best,
                        "bestW": bestW, "bestHfa": bestHfa, "vals": vals,
                        "order": order, "tune": sorted(tune_s),
-                       "split": split, "part": part}, f)
+                       "split": split, "part": part,
+                       "curW": curW, "curHfa": curHfa, "curAcc": curAcc}, f)
 
     def persist():
         try:
@@ -963,58 +965,81 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
         save_artifact(league, ver, art)
         return ("saved", list(bestW), bestHfa, best)
 
-    if split < 1:
-        split = 1
-    start_num = total * part // split
-    end_num = total * (part + 1) // split
-
-    def num_to_idx(num):
-        dd = [0] * nf
-        for k in range(nf):
-            dd[k] = (num // nv ** (nf - 1 - k)) % nv
-        return dd
-
-    num = start_num
-    idx = num_to_idx(num)
+    num = cyc_start
     ndone = 0
-    chunks_resume = None
+    if seg_len <= 0:
+        log("담당 구간 없음 → 종료")
+        return True
     if os.path.exists(ckpt_p) and not fresh:
         try:
             c = json.load(open(ckpt_p))
-            if (c.get("vals") == vals and c.get("order") == order
-                    and set(c.get("tune", [])) == set(tune_s)
-                    and c.get("split", 1) == split and c.get("part", 0) == part):
-                ch = c.get("chunks")
-                if (isinstance(ch, list) and len(ch) == jobs
-                        and all(isinstance(x, list) and len(x) == 3 for x in ch)
-                        and sum(int(e) - int(s) for s, e, _ in ch) == end_num - start_num
-                        and all(start_num <= int(s) <= int(s) + int(dd) <= int(e) <= end_num
-                                for s, e, dd in ch)):
-                    chunks_resume = [[int(s), int(e), int(dd)] for s, e, dd in ch]
-                    ndone = sum(dd for _, _, dd in chunks_resume)
-                    num = min(s + dd for s, _, dd in chunks_resume)
-                    idx = num_to_idx(num)
-                else:
-                    num = max(start_num, min(int(c.get("num", c.get("done", start_num))), end_num))
-                    idx = num_to_idx(num)
-                    ndone = num - start_num
-                if isinstance(c.get("bestW"), list) and len(c["bestW"]) == nw:
+        except (OSError, ValueError):
+            c = None
+        if (isinstance(c, dict) and c.get("mode") == "odometer" and c.get("vals") == vals
+                and c.get("order") == order and set(c.get("tune", [])) == set(tune_s)
+                and c.get("split", 1) == split and c.get("part", 0) == part
+                and c.get("total") == seg_len and c.get("num0") == num0):
+            num = int(c.get("num", cyc_start))
+            ndone = int(c.get("ndone", 0))
+            if isinstance(c.get("bestW"), list) and len(c["bestW"]) == nw:
+                cb = acc_of(c["bestW"], c.get("bestHfa", 0.0))
+                if cb > best:
+                    best, bestW, bestHfa = cb, list(c["bestW"]), c.get("bestHfa", 0.0)
+            try:
+                cur = json.load(open(model_path(league, ver)))
+                cw, chh = cur.get("weights"), cur.get("hfa")
+                if isinstance(cw, list) and len(cw) == nw and isinstance(chh, (int, float)):
+                    facc = acc_of(cw, chh)
+                    if facc > best:
+                        best, bestW, bestHfa = facc, list(cw), float(chh)
+            except (OSError, ValueError):
+                pass
+            log(f"체크포인트 이어하기: {ndone:,}/{seg_len:,} 완료 best={best:.3f}")
+        else:
+            if isinstance(c, dict) and isinstance(c.get("bestW"), list) and len(c["bestW"]) == nw:
+                try:
                     cb = acc_of(c["bestW"], c.get("bestHfa", 0.0))
                     if cb > best:
                         best, bestW, bestHfa = cb, list(c["bestW"]), c.get("bestHfa", 0.0)
-                log(f"체크포인트 이어하기: {num:,}/{end_num:,} 완료 best={best:.3f}")
-            else:
-                log("체크포인트 조건 불일치 → 처음부터")
-        except (OSError, ValueError, KeyError, TypeError):
-            log("체크포인트 손상 → 처음부터")
+                except (OSError, ValueError, KeyError, TypeError):
+                    pass
+            try:
+                cur = json.load(open(model_path(league, ver)))
+                cw, chh = cur.get("weights"), cur.get("hfa")
+                if isinstance(cw, list) and len(cw) == nw and isinstance(chh, (int, float)):
+                    facc = acc_of(cw, chh)
+                    if facc > best:
+                        best, bestW, bestHfa = facc, list(cw), float(chh)
+            except (OSError, ValueError):
+                pass
+            num0 = 0
+            cyc_start = seg_start
+            num = cyc_start
+            ndone = 0
+            log("구 체크포인트 형식 → 처음부터 전수탐색")
     se = season_acc(bestW, bestHfa)
-    log(f"전수탐색 시작: dim={nf} 값/축={nv} 전체={total:,}가지 " +
-        (f"분할 {part + 1}/{split} [{start_num:,},{end_num:,}) " if split > 1 else "") +
+    curW, curHfa, curAcc = list(bestW), bestHfa, best
+    log(f"전수탐색 시작: dim={nf} 값/축={nv} 전체={seg_len:,}가지 시작={num:,} " +
         " ".join(f"{s}={se[s]:.3f}" for s in sorted(se)) + f" base={best:.3f}")
     t0 = time.time()
     last_log = t0
+    last_cur = 0.0
     complete = False
     B = max(1, batch)
+
+    def num_to_idx(n):
+        dd = [0] * nf
+        for k in range(nf - 1, -1, -1):
+            dd[k] = n % nv
+            n //= nv
+        return dd
+
+    def abs_of(off):
+        head = seg_end - cyc_start
+        if off < head:
+            return cyc_start + off
+        return seg_start + (off - head)
+
     try:
         import signal
 
@@ -1029,24 +1054,34 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
             _numba.set_num_threads(max(1, int(jobs)))
         except (ValueError, RuntimeError):
             log("numba 스레드 수 설정 실패, 기본값으로 계속")
-    _pows = None
-    if total <= 9_000_000_000_000_000_000:
-        _pows = _np.array([nv ** (nf - 1 - k) for k in range(nf)], dtype=_np.int64)
-    _vals_arr = _np.asarray(vals, dtype=float)
     Xc = _np.ascontiguousarray(Xn, dtype=float)
     yc = _np.ascontiguousarray(yn, dtype=_np.int64)
     dc = _np.ascontiguousarray(ddArr, dtype=float)
     Pc = _np.ascontiguousarray(PP, dtype=float) if PP is not None else _np.zeros((1, 3))
     use_pp = PP is not None
     capf = float(cap or 0.0)
+    _pows = None
+    _vals_arr = None
+    if total <= 9_000_000_000_000_000_000:
+        _pows = _np.array([nv ** (nf - 1 - k) for k in range(nf)], dtype=_np.int64)
+        _vals_arr = _np.asarray(vals, dtype=float)
     try:
-        while num < end_num:
-            M = int(min(B, end_num - num))
+        while ndone < seg_len:
+            M = int(min(B, seg_len - ndone))
+            a0 = abs_of(ndone)
+            if a0 >= cyc_start:
+                M1 = min(M, seg_end - a0)
+            else:
+                M1 = min(M, cyc_start - a0)
+            M2 = M - M1
             if _pows is not None:
-                nums = _np.arange(num, num + M)
+                parts = [_np.arange(a0, a0 + M1)]
+                if M2:
+                    parts.append(_np.arange(seg_start, seg_start + M2))
+                nums = _np.concatenate(parts) if len(parts) > 1 else parts[0]
                 VW = _vals_arr[(nums[:, None] // _pows[None, :]) % nv]
-                Wc = _np.zeros((M, nw))
-                hc = _np.zeros(M)
+                Wc = _np.repeat(_np.asarray([bestW], dtype=float), M, axis=0)
+                hc = _np.full(M, bestHfa)
                 for k, feat in enumerate(order):
                     if feat == "hfa":
                         hc = _np.array(VW[:, k])
@@ -1054,23 +1089,22 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
                         Wc[:, feat] = VW[:, k]
             else:
                 Wb, hb = [], []
-                for _ in range(M):
-                    row = [0.0] * nw
-                    hh = 0.0
+                for i in range(M):
+                    ii = num_to_idx(abs_of(ndone + i))
+                    row = list(bestW)
+                    hh = bestHfa
                     for k, feat in enumerate(order):
-                        vv = vals[idx[k]]
+                        vv = vals[ii[k]]
                         if feat == "hfa":
                             hh = vv
                         else:
                             row[feat] = vv
                     Wb.append(row)
                     hb.append(hh)
-                    advance()
                 Wc = _np.asarray(Wb, dtype=float)
                 hc = _np.asarray(hb, dtype=float)
-            num += M
             ndone += M
-            idx = num_to_idx(num)
+            num = abs_of(ndone) if ndone < seg_len else cyc_start
             if _HAVE_NUMBA:
                 out = _np.empty(M)
                 _grid_acc_nb(Xc, yc, dc, Pc, Wc, hc, capf, use_pp, out)
@@ -1081,28 +1115,31 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
                                     _np.ascontiguousarray(hc, dtype=_np.float32))
             bi = int(_np.argmax(accs))
             ba = float(accs[bi])
+            curW, curHfa, curAcc = list(Wc[bi]), float(hc[bi]), ba
             if ba > best:
                 best, bestW, bestHfa = ba, list(Wc[bi]), float(hc[bi])
                 st, bw, bh, bba = persist()
                 if st == "adopted":
                     best, bestW, bestHfa = bba, bw, bh
                 ise = season_acc(bestW, bestHfa)
-                log(f"★ #{num:,} acc={best:.3f} " +
+                log(f"★ #{ndone:,} acc={best:.3f} " +
                     " ".join(f"{s}={ise[s]:.3f}" for s in sorted(ise)) +
                     (" → 외부파일 채택" if st == "adopted" else
                      " → 동일, 저장 생략" if st == "same" else " → 저장"))
                 last_log = time.time()
                 write_ckpt()
             now = time.time()
+            if now - last_cur >= 0.016:
+                last_cur = now
+                write_ckpt()
             if now - last_log >= log_secs:
                 last_log = now
                 el = now - t0
                 cps = ndone / max(el, 1e-6)
-                span = end_num - start_num
-                pct = ndone / span * 100 if span else 100.0
-                eta_s = (span - ndone) / cps if cps > 0 else float("inf")
+                pct = ndone / seg_len * 100 if seg_len else 100.0
+                eta_s = (seg_len - ndone) / cps if cps > 0 else float("inf")
                 eta_txt = f"{eta_s / 31557600:,.0f}년" if eta_s > 31557600 * 2 else f"{eta_s / 3600:,.1f}h"
-                log(f"진행 {ndone:,}/{span:,} ({pct:.4f}%) {cps:,.0f}/s 남은≈{eta_txt} best={best:.3f}")
+                log(f"진행 {ndone:,}/{seg_len:,} ({pct:.4f}%) {cps:,.0f}/s 남은≈{eta_txt} best={best:.3f}")
             if ndone % max(1, ckpt_every) == 0:
                 write_ckpt()
             if max_combos > 0 and ndone >= max_combos:
@@ -1111,7 +1148,7 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
             if max_minutes > 0 and (time.time() - _START) / 60 > max_minutes:
                 log(f"{max_minutes}분 제한 도달 → 종료")
                 break
-            if num >= end_num:
+            if ndone >= seg_len:
                 complete = True
                 break
     except KeyboardInterrupt:
@@ -1129,8 +1166,7 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
     write_ckpt()
     if bestW != artW or bestHfa != artH:
         persist()
-    span = end_num - start_num
-    log(f"전수탐색 종료 {ndone:,}/{span:,} best={best:.3f}" + (" (전체 완료)" if complete else ""))
+    log(f"전수탐색 종료 {ndone:,}/{seg_len:,} best={best:.3f}" + (" (전체 완료)" if complete else ""))
     return True
 
 
