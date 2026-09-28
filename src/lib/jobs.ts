@@ -15,6 +15,7 @@ export type JobStatus = {
   log?: string;
   startedAt: string;
   finishedAt?: string;
+  pid?: number;
 };
 
 export function readJob(id: string): JobStatus | null {
@@ -58,6 +59,10 @@ export function startJob(opts: {
     cwd: process.cwd(),
     stdio: ["ignore", logFd, logFd],
   });
+  if (child.pid !== undefined) {
+    job.pid = child.pid;
+    writeJob(job);
+  }
   child.on("error", (e) => {
     writeJob({ ...job, status: "error", log: e.message, finishedAt: new Date().toISOString() });
   });
@@ -72,6 +77,18 @@ export function startJob(opts: {
     writeJob({ ...job, status: code === 0 ? "done" : "error", log, finishedAt: new Date().toISOString() });
   });
   return job;
+}
+
+export function killJob(id: string): boolean {
+  const job = readJob(id);
+  if (!job || job.status !== "running" || !job.pid) return false;
+  try {
+    process.kill(job.pid, "SIGTERM");
+  } catch {
+    return false;
+  }
+  writeJob({ ...job, status: "error", log: "사용자 중지", finishedAt: new Date().toISOString() });
+  return true;
 }
 
 export function isJobId(id: string) {
