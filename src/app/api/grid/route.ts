@@ -15,12 +15,20 @@ function readProgress(league: string, ver: string) {
       done?: unknown;
       total?: unknown;
       best?: unknown;
+      sweep?: unknown;
+      curW?: unknown;
+      curHfa?: unknown;
+      curAcc?: unknown;
     };
     if (typeof c.done !== "number" || typeof c.total !== "number") return null;
     return {
       done: c.done,
       total: c.total,
       best: typeof c.best === "number" ? c.best : null,
+      sweep: typeof c.sweep === "number" ? c.sweep : null,
+      curW: Array.isArray(c.curW) && c.curW.every((v) => typeof v === "number") ? (c.curW as number[]) : null,
+      curHfa: typeof c.curHfa === "number" ? c.curHfa : null,
+      curAcc: typeof c.curAcc === "number" ? c.curAcc : null,
     };
   } catch {
     return null;
