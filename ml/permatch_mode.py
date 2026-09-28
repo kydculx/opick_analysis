@@ -1636,6 +1636,12 @@ def _nb_fit_w(Xa, ya, w0, hfa0, d, l2, steps, max_sweeps):
     return [float(v) for v in w], float(H[0]), float(best)
 
 
+def _fit_restart(Xa, ya, w0, hfa0, d, l2, steps, sweeps):
+    if _HAVE_NUMBA:
+        return _nb_fit_w(Xa, ya, w0, hfa0, d, l2, steps, sweeps)
+    return _sweep_fit_w(Xa, ya, w0, hfa0, d, l2, steps, sweeps)
+
+
 def sample_steps(rng: random.Random, lo: float = 0.005, hi: float = 0.5, k: int = 4):
     vals = sorted(rng.uniform(math.log(lo), math.log(hi)) for _ in range(k))
     return [round(math.exp(v), 4) for v in vals]
@@ -1662,15 +1668,26 @@ def fit_trial(Xn, ty, Vn, vy, d, mu, sd, cfg):
     vy = _np.asarray(vy, dtype=int)
     nw = nf
     rng = random.Random()
-    scored = []
+    inits = []
     for restart in range(cfg["restarts"]):
         rng.seed(1000 + restart)
-        w = [rng.gauss(0, 0.3) for _ in range(nw)]
-        hfa = rng.gauss(0, 0.2)
-        if _HAVE_NUMBA:
-            w, hfa, best_ll = _nb_fit_w(Xn, ty, w, hfa, d, cfg["l2"], cfg["steps"], cfg["sweeps"])
-        else:
-            w, hfa, best_ll = _sweep_fit_w(Xn, ty, w, hfa, d, cfg["l2"], cfg["steps"], cfg["sweeps"])
+        inits.append(([rng.gauss(0, 0.3) for _ in range(nw)], rng.gauss(0, 0.2)))
+    halving = not cfg.get("no_halving", False) and len(inits) > 2
+    phase1 = min(2, int(cfg["sweeps"])) if halving else int(cfg["sweeps"])
+    states = []
+    for w0, h0 in inits:
+        w, hfa, ll = _fit_restart(Xn, ty, w0, h0, d, cfg["l2"], cfg["steps"], phase1)
+        states.append([w, hfa, ll])
+    if halving:
+        states.sort(key=lambda s: s[2])
+        keep = max(int(cfg["top_k"]), len(states) // 2, 2)
+        states = states[:keep]
+        rest = int(cfg["sweeps"]) - phase1
+        if rest > 0:
+            for s in states:
+                s[0], s[1], s[2] = _fit_restart(Xn, ty, s[0], s[1], d, cfg["l2"], cfg["steps"], rest)
+    scored = []
+    for w, hfa, best_ll in states:
         if len(Vn) and len(vy):
             sv = Vn @ _np.asarray(w, dtype=float) + hfa
             key = (_acc_from_S(sv, vy, d),
@@ -1773,6 +1790,7 @@ def main():
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--patience", type=int, default=0)
+    ap.add_argument("--no-halving", action="store_true", help="restart halving 끄기 (전 restart 끝까지 탐색)")
     ap.add_argument("--no-cache", action="store_true")
     args = ap.parse_args()
 
@@ -1946,6 +1964,8 @@ def main():
 
     trial_ids = list(range(start_trial + 1, start_trial + args.trials + 1))
     cfgs = [sample_cfg(rng) for _ in trial_ids]
+    for c in cfgs:
+        c["no_halving"] = args.no_halving
 
     from functools import partial
     _run = partial(fit_trial, Xn, ty, vX, vy, d, mu, sd)
