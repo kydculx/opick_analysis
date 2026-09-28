@@ -139,6 +139,7 @@ export function DashboardExplorer() {
   const gridJobRef = useRef<string | null>(null);
   const [gridding, setGridding] = useState(false);
   const [gridInfo, setGridInfo] = useState<{ done: number; total: number; best: number | null } | null>(null);
+  const [gridStep, setGridStep] = useState(0.5);
   const FEATURE_KO: Record<string, string> = {
     rank: "순위차", power: "전력", hstr: "H2H강도", cond: "컨디션", att: "공격", def: "수비",
     val: "가치", form5: "최근폼", h2h5: "H2H5", avg_goals: "평균득점", avg_conceded: "평균실점",
@@ -845,7 +846,7 @@ export function DashboardExplorer() {
       const res = await fetch("/api/grid", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ league, ver: selVer, tune, five, jobs: 4 }),
+        body: JSON.stringify({ league, ver: selVer, tune, five, jobs: 4, grid_step: gridStep }),
       }).then((r) => r.json());
       if (!res.ok) {
         gridRef.current = false;
@@ -1199,6 +1200,26 @@ export function DashboardExplorer() {
                     예측율 {(curOverall * 100).toFixed(1)}%
                   </p>
                 )}
+                <div className="mb-1.5 flex items-center justify-between">
+                  <span className="text-xs font-medium text-zinc-500">
+                    축간격
+                  </span>
+                  <span className="flex gap-1">
+                    {[0.5, 0.3, 0.2, 0.1].map((s) => (
+                      <button
+                        key={s}
+                        disabled={gridding}
+                        onClick={() => setGridStep(s)}
+                        className={`rounded-full border px-1.5 py-px text-[10px] disabled:opacity-40 ${gridStep === s
+                            ? "border-purple-600 text-purple-600 dark:border-purple-400 dark:text-purple-400"
+                            : "border-zinc-300 text-zinc-500 dark:border-zinc-700"
+                          }`}
+                      >
+                        {s}
+                      </button>
+                    ))}
+                  </span>
+                </div>
                 <div className="mt-1.5 flex gap-1.5">
                   <button
                     onClick={autoTune}
