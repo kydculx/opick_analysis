@@ -37,6 +37,18 @@ yarn-error.log*
 /ml/.venv/
 /ml/models/
 
+# python
+__pycache__/
+*.py[cod]
+*.bak
+/ml/.cache/
+
+# logs
+*.log
+
+# playwright mcp
+.playwright-mcp/
+
 # vercel
 .vercel
 
