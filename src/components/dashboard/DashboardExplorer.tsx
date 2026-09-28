@@ -154,9 +154,11 @@ export function DashboardExplorer() {
   const leagueRef = useRef(league);
   const selVerRef = useRef(selVer);
   const checkedRef = useRef(checked);
+  const modelDetailRef = useRef(modelDetail);
   leagueRef.current = league;
   selVerRef.current = selVer;
   checkedRef.current = checked;
+  modelDetailRef.current = modelDetail;
 
   function selectLeague(lg: string) {
     if (!lg || lg === leagueRef.current) return;
@@ -485,6 +487,34 @@ export function DashboardExplorer() {
       tuningRef.current = false;
     };
   }, [league, selVer]);
+
+  useEffect(() => {
+    const id = setInterval(async () => {
+      if (document.visibilityState !== "visible") return;
+      if (tuningRef.current) return;
+      const md = modelDetailRef.current;
+      const lg = leagueRef.current;
+      const ver = selVerRef.current;
+      if (!md || md.model_type !== "permatch" || !md.detail || !lg || !ver) return;
+      if (tweakedRef.current) return;
+      try {
+        const j = await fetch(`/api/models?league=${encodeURIComponent(lg)}&ver=${encodeURIComponent(ver)}`).then((r) => r.json());
+        if (!j.ok || !j.detail || !Array.isArray(j.detail.weights)) return;
+        const cur = modelDetailRef.current?.detail;
+        if (JSON.stringify(j.detail.weights) === JSON.stringify(cur?.weights) && j.detail.hfa === cur?.hfa) return;
+        delete predCacheRef.current[cacheKey(lg, ver)];
+        delete accCacheRef.current[cacheKey(lg, ver)];
+        const ws = j.detail.weights as number[];
+        setModelDetail({ model_type: j.model_type, detail: j.detail });
+        setWOrder(ws.map((_, i) => i).sort((a, b) => Math.abs(ws[b]) - Math.abs(ws[a])));
+        previewWith(ws, typeof j.detail.hfa === "number" ? j.detail.hfa : 0);
+        loadAccuracy(lg, ver, checkedRef.current);
+      } catch {
+      }
+    }, 5000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
 
   function overallOf(m: Record<string, { n: number; hit: number }>): number | null {
@@ -1304,7 +1334,7 @@ export function DashboardExplorer() {
                 {gridInfo && (
                   <p className="mt-1 text-[11px] text-zinc-500">
                     {gridding ? "전수탐색 중" : "전수탐색 됨"}
-                    {gridInfo.total > 0 ? ` ${(gridInfo.done / gridInfo.total * 100).toFixed(1)}%` : ""} ({gridInfo.done.toLocaleString()}/{gridInfo.total.toLocaleString()}){gridInfo.best != null ? ` best=${gridInfo.best.toFixed(3)}` : ""}
+                    {gridInfo.total > 0 ? ` ${Math.min(100, gridInfo.done / gridInfo.total * 100).toFixed(1)}%` : ""} ({gridInfo.done.toLocaleString()}/{gridInfo.total.toLocaleString()}){gridInfo.best != null ? ` best=${gridInfo.best.toFixed(3)}` : ""}
                   </p>
                 )}
               </div>
