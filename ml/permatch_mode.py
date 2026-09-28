@@ -803,6 +803,10 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
     return improved_any
 
 
+class _GridStop(Exception):
+    pass
+
+
 def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
                 max_combos: int = 0, max_minutes: float = 0.0,
                 ckpt_every: int = 5000, log_every: int = 20000,
@@ -1011,6 +1015,15 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
     last_log = t0
     complete = False
     B = max(1, batch)
+    try:
+        import signal
+
+        def _on_term(signum, frame):
+            raise _GridStop()
+
+        _prev_sigterm = signal.signal(signal.SIGTERM, _on_term)
+    except (ValueError, RuntimeError, OSError, AttributeError):
+        _prev_sigterm = None
     if _HAVE_NUMBA:
         try:
             _numba.set_num_threads(max(1, int(jobs)))
@@ -1103,6 +1116,16 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
                 break
     except KeyboardInterrupt:
         log("중단됨(Ctrl+C) → 체크포인트 저장 후 종료")
+    except _GridStop:
+        log("중지 요청 → 체크포인트 저장 후 종료")
+    finally:
+        try:
+            if _prev_sigterm is not None:
+                import signal
+
+                signal.signal(signal.SIGTERM, _prev_sigterm)
+        except (ValueError, RuntimeError, OSError, AttributeError):
+            pass
     write_ckpt()
     if bestW != artW or bestHfa != artH:
         persist()
