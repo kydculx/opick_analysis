@@ -974,7 +974,7 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
                 nums = _np.arange(num, num + M)
                 VW = _vals_arr[(nums[:, None] // _pows[None, :]) % nv]
                 Wc = _np.zeros((M, nw))
-                hc = _np.empty(M)
+                hc = _np.zeros(M)
                 for k, feat in enumerate(order):
                     if feat == "hfa":
                         hc = _np.array(VW[:, k])
@@ -1119,23 +1119,6 @@ if _HAVE_NUMBA:
                 if pk == y[i]:
                     hit += 1
             out[b] = hit / N
-
-
-def _grid_acc_batch(Xn, yn, ddArr, PP, cap, nw, Wb, hb, X32, dd32, PP32):
-    import numpy as _np
-    if _HAVE_NUMBA:
-        Xc = _np.ascontiguousarray(Xn, dtype=_np.float64)
-        yc = _np.ascontiguousarray(yn, dtype=_np.int64)
-        dc = _np.ascontiguousarray(ddArr, dtype=_np.float64)
-        Pc = _np.ascontiguousarray(PP, dtype=_np.float64) if PP is not None else _np.zeros((1, 3))
-        Wc = _np.ascontiguousarray(Wb, dtype=_np.float64)
-        hc = _np.ascontiguousarray(hb, dtype=_np.float64)
-        out = _np.empty(Wc.shape[0])
-        _grid_acc_nb(Xc, yc, dc, Pc, Wc, hc, float(cap or 0.0), PP is not None, out)
-        return out
-    return _acc_batch32(X32, yn, dd32, PP32, cap, nw,
-                        _np.ascontiguousarray(Wb, dtype=_np.float32),
-                        _np.ascontiguousarray(hb, dtype=_np.float32))
 
 
 def save_artifact(league: str, ver: str, artifact: dict):
