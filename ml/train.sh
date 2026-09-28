@@ -14,6 +14,8 @@ PY="ml/.venv/bin/python"
 # 병렬 워커 수: 기본 CPU 코어 수 (넘파이 스레드 경합 방지용 스레드 제한과 함께 사용)
 JOBS="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)}"
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+# 연속 미개선 trial 수 제한 (0=끄기). 새로하기 장기 탐색 시 정체 구간 절약용.
+PATIENCE="${PATIENCE:-0}"
 
 leagues="premier_league k_league_1 k_league_2 j1_league bundesliga laliga ligue_1 serie_a eredivisie mls a_league"
 
@@ -110,7 +112,7 @@ run_permatch() {
   esac
   # shellcheck disable=SC2086
   exec $PY ml/permatch_mode.py --league "$league" --train "$TRAIN" \
-    --valid "$VALID" --ver "$VER" --trials "$trials" --jobs "$JOBS" $extra
+    --valid "$VALID" --ver "$VER" --trials "$trials" --jobs "$JOBS" --patience "$PATIENCE" $extra
 }
 
 menu() {
