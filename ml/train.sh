@@ -14,6 +14,9 @@ PY="ml/.venv/bin/python"
 # 병렬 워커 수: 기본 CPU 코어 수 (넘파이 스레드 경합 방지용 스레드 제한과 함께 사용)
 JOBS="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || nproc 2>/dev/null || echo 4)}"
 export OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+# numba 스레드: autotune 워커는 단일 스레드(과다점유 방지), grid 본체는 코어 수
+NUMBA_NUM_THREADS=1
+export NUMBA_NUM_THREADS
 # 연속 미개선 trial 수 제한 (0=끄기). 새로하기 장기 탐색 시 정체 구간 절약용.
 PATIENCE="${PATIENCE:-0}"
 
@@ -149,7 +152,7 @@ menu() {
        gs="${gs:-0.5}"
        echo "→ 전수탐색: [$(league_short "$league")] ver=$VER tune=[${ts:-미학습 전체}] step=$gs (Ctrl+C로 중지, 이어하기 지원)"
        # shellcheck disable=SC2086
-       exec $PY ml/permatch_mode.py --mode grid --league "$league" --ver "$VER" --tune "$ts" --grid-step "$gs" ;;
+       NUMBA_NUM_THREADS="$JOBS" exec $PY ml/permatch_mode.py --mode grid --league "$league" --ver "$VER" --tune "$ts" --grid-step "$gs" --jobs "$JOBS" ;;
     5) printf "학습 횟수 [기본 10000]: "; read -r trials
        case "$trials" in ""|*[!0-9]*) trials=10000 ;; esac
        run_permatch "$league" "--new --five" "$trials" ;;
@@ -165,7 +168,7 @@ menu() {
        gs="${gs:-0.5}"
        echo "→ 5피처 전수탐색: [$(league_short "$league")] ver=${VER}-f5 tune=[${ts:-미학습 전체}] step=$gs (Ctrl+C로 중지, 이어하기 지원)"
        # shellcheck disable=SC2086
-       exec $PY ml/permatch_mode.py --mode grid --league "$league" --ver "$VER" --five --tune "$ts" --grid-step "$gs" ;;
+       NUMBA_NUM_THREADS="$JOBS" exec $PY ml/permatch_mode.py --mode grid --league "$league" --ver "$VER" --five --tune "$ts" --grid-step "$gs" --jobs "$JOBS" ;;
     *) exit 0 ;;
   esac
 }
@@ -201,7 +204,7 @@ case "$cmd" in
     preset_for "$league"
     echo "→ 전수탐색: [$(league_short "$league")] ver=$VER (tune 생략시 미학습 전체, Ctrl+C로 중지)"
     # shellcheck disable=SC2086
-    exec $PY ml/permatch_mode.py --mode grid --league "$league" --ver "$VER" $* ;;
+    NUMBA_NUM_THREADS="$JOBS" exec $PY ml/permatch_mode.py --mode grid --league "$league" --ver "$VER" --jobs "$JOBS" $* ;;
   auto5) league="k_league_1"
     case "${1:-}" in ""|-*) : ;; *) league="$1"; shift ;; esac
     league=$(league_alias "$league")
@@ -215,6 +218,6 @@ case "$cmd" in
     preset_for "$league"
     echo "→ 5피처 전수탐색: [$(league_short "$league")] ver=${VER}-f5 (tune 생략시 미학습 전체, Ctrl+C로 중지)"
     # shellcheck disable=SC2086
-    exec $PY ml/permatch_mode.py --mode grid --league "$league" --ver "$VER" --five $* ;;
+    NUMBA_NUM_THREADS="$JOBS" exec $PY ml/permatch_mode.py --mode grid --league "$league" --ver "$VER" --five --jobs "$JOBS" $* ;;
   *) menu ;;
 esac
