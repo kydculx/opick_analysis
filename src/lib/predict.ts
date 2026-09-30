@@ -1,12 +1,15 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { SoccerMatch } from "@/lib/queries";
-import { applyTemp, blendProbs, cappedDot, drawFeatures, rowFeatures, selectFeatures, sigmoid } from "./permatch-math";
+import { applyTemp, blendProbs, cappedDot, drawFeatures, rowFeatures, selectFeatures, sigmoid, softmaxLogits, softmaxProbs } from "./permatch-math";
 
 export type PermatchArtifact = {
-  weights: number[];
-  hfa: number;
+  model_type?: string;
+  weights?: number[];
+  W?: number[][];
+  b?: number[];
+  hfa?: number;
   T: number;
-  draw_prior: number;
+  draw_prior?: number;
   mu: number[];
   sd: number[];
   features?: string[];
@@ -27,9 +30,15 @@ export function loadArtifact(league: string, ver: string): PermatchArtifact | nu
     const p = `${process.cwd()}/ml/permatch/${league}_${ver}.json`;
     if (!existsSync(p)) return null;
     const a = JSON.parse(readFileSync(p, "utf-8"));
+    if (!Array.isArray(a.mu) || !Array.isArray(a.sd)) return null;
+    if (a.model_type === "softmax3") {
+      if (!Array.isArray(a.W) || !Array.isArray(a.b) || a.b.length !== 3) return null;
+      const n = a.features?.length ?? a.mu.length;
+      if (a.W.length !== n || a.mu.length !== n || a.sd.length !== n) return null;
+      return a as PermatchArtifact;
+    }
     const n = Array.isArray(a.weights) ? a.weights.length : 0;
-    if (n === 0 || !Array.isArray(a.mu) || !Array.isArray(a.sd)) return null;
-    if (a.mu.length !== n || a.sd.length !== n) return null;
+    if (n === 0 || a.mu.length !== n || a.sd.length !== n) return null;
     if (Array.isArray(a.features) && a.features.length !== n) return null;
     return a as PermatchArtifact;
   } catch {
@@ -43,20 +52,27 @@ function std(x: number[], mu: number[], sd: number[]): number[] {
 
 export function predictForRow(m: SoccerMatch, art: PermatchArtifact, ver: string): PredEntry | null {
   try {
-    const n = art.weights.length;
-    const e = art.emphasis ?? new Array(n).fill(1);
+    const e = art.emphasis ?? new Array(art.features?.length ?? art.mu.length).fill(1);
     const x = std(selectFeatures(rowFeatures(m), art.features), art.mu, art.sd).map((v, i) => v * e[i]);
-    const s = cappedDot(x, art.weights, art.hfa, art.contrib_cap ?? null);
-    const ph = sigmoid(s);
-    let dd: number;
-    if (art.draw_weights && art.draw_mu && art.draw_sd) {
-      const xd = std(drawFeatures(m), art.draw_mu, art.draw_sd);
-      const ds = xd.reduce((a, v, i) => a + v * (art.draw_weights as number[])[i], 0) + (art.draw_bias ?? 0);
-      dd = sigmoid(ds);
+    let lin: number[];
+    if (art.model_type === "softmax3" && art.W && art.b) {
+      lin = softmaxProbs(softmaxLogits(x, art.W, art.b));
+    } else if (art.weights && art.hfa != null && art.draw_prior != null) {
+      const s = cappedDot(x, art.weights, art.hfa, art.contrib_cap ?? null);
+      const ph = sigmoid(s);
+      let dd: number;
+      if (art.draw_weights && art.draw_mu && art.draw_sd) {
+        const xd = std(drawFeatures(m), art.draw_mu, art.draw_sd);
+        const ds = xd.reduce((a, v, i) => a + v * (art.draw_weights as number[])[i], 0) + (art.draw_bias ?? 0);
+        dd = sigmoid(ds);
+      } else {
+        dd = art.draw_prior;
+      }
+      lin = [ph * (1 - dd), dd, (1 - ph) * (1 - dd)];
     } else {
-      dd = art.draw_prior;
+      return null;
     }
-    const p = applyTemp(blendProbs([ph * (1 - dd), dd, (1 - ph) * (1 - dd)], x, art.patterns, art.pattern_tau ?? 0), art.T);
+    const p = applyTemp(blendProbs(lin, x, art.patterns, art.pattern_tau ?? 0), art.T);
     if (p.some((v) => !Number.isFinite(v))) return null;
     return { home: p[0], draw: p[1], away: p[2], ver };
   } catch {

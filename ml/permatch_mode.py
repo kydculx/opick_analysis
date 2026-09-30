@@ -1,33 +1,34 @@
 """Permatch 학습 단일 진입점 (autotune + 단발).
 
-사용법:
-  # 이어하기 (기본): ml/permatch/{league}_{ver}.json 있으면 최고점으로 로드 후 계속 탐색
+사용법 (버전 형식 {league}_tr{학습시즌수}-f{피처수}-x{해시4}, 예: premier_league_tr6-f13-x8e60.json):
+
+  # 계속학습 (기본): ml/permatch/{league}_{ver}.json 있으면 최고점으로 로드 후 계속 탐색
   ml/.venv/bin/python ml/permatch_mode.py --league premier_league \\
     --train 2016-2017,2017-2018,2018-2019,2019-2020,2020-2021,2021-2022 \\
-    --valid 2022-2023 --ver match-2016-2017-2017-2018-2018-2019-2019-2020-2020-2021-2021-2022-tune \\
+    --valid 2022-2023 --ver tr6-f13-x8e60 \\
     --trials 10000 --jobs 4
 
   # 처음부터 (--new): 기존 아티팩트 무시하고 새로 탐색
   ml/.venv/bin/python ml/permatch_mode.py --league premier_league \\
-    --train 2016-2017,2017-2018 --valid 2018-2019 --ver match-v1 --trials 20 --new
+    --train 2016-2017,2017-2018 --valid 2018-2019 --ver tr2-f13-x0000 --trials 20 --new
 
   # 단발 학습 (빠른 1회 fit, 기존과 비교해 좋으면 저장)
   ml/.venv/bin/python ml/permatch_mode.py --league k_league_1 \\
-    --train 2025 --valid 2024 --ver match-2025-opt --fast
+    --train 2025 --valid 2024 --ver tr1-f13-x0000 --fast
   ml/.venv/bin/python ml/permatch_mode.py --league k_league_1 \\
-    --train 2025 --valid 2024 --ver match-2025-opt --fast --new   # 비교 없이 덮어쓰기
+    --train 2025 --valid 2024 --ver tr1-f13-x0000 --fast --new   # 비교 없이 덮어쓰기
 
   # 예측 (학습 없이 아티팩트로 확률 확인)
   ml/.venv/bin/python ml/permatch_mode.py --league k_league_1 \\
-    --predict 2026 --ver match-v1 --mode predict
+    --predict 2026 --ver tr6-f13-x0000 --mode predict
 
-  # 자동조절 (웹과 동일: 순차 1바퀴 후 랜덤워크, 개선될 때마다 저장, Ctrl+C로 중지)
+  # 랜덤탐색 (웹과 동일: 순차 1바퀴 후 랜덤워크, 개선될 때마다 저장, Ctrl+C로 중지)
   ml/.venv/bin/python ml/permatch_mode.py --mode auto --league k_league_1 \\
-    --ver match-2016-2017-2018-2019-2020-2021-tune --tune 2022,2023,2024,2025
+    --ver tr6-f13-x0000 --tune 2022,2023,2024,2025
 
-  # 전수탐색 (주판 순서로 모든 조합, 체크포인트 이어하기, Ctrl+C로 중지)
+  # 전수탐색 (주판 순서로 모든 조합, 체크포인트 계속학습, Ctrl+C로 중지)
   ml/.venv/bin/python ml/permatch_mode.py --mode grid --league k_league_1 \\
-    --ver match-2016-2017-2018-2019-2020-2021-tune --grid-step 0.5
+    --ver tr6-f13-x0000 --grid-step 0.5
 """
 
 from __future__ import annotations
@@ -423,9 +424,38 @@ def model_path(league: str, ver: str) -> str:
     return f"ml/permatch/{league}_{ver}.json"
 
 
+def auto_prog_path(league: str, ver: str) -> str:
+    return f"ml/permatch/{league}_{ver}.auto.json"
+
+
+def write_auto_prog(league, ver, rnd, best, bestW, curW, curAcc, tune_s):
+    try:
+        with open(auto_prog_path(league, ver), "w") as f:
+            json.dump({"mode": "auto-prog", "ndone": rnd, "best": best,
+                       "bestW": bestW, "curW": curW, "curAcc": curAcc,
+                       "tune": sorted(tune_s)}, f)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
 def cache_path(league: str, seasons: list[str]):
     return os.path.join(os.path.dirname(__file__), ".cache",
                         f"{league}_{'-'.join(sorted(set(seasons)))}.json")
+
+
+def _sb_execute(build, tries: int = 6):
+    """Supabase 조회 재시도 래퍼 (일시적 DNS/네트워크 끊김 대비)."""
+    import time as _t
+    last: Exception | None = None
+    for i in range(max(1, tries)):
+        try:
+            return build().execute()
+        except Exception as e:
+            last = e
+            log(f"DB 조회 실패 ({i + 1}/{tries}): {type(e).__name__} → 재시도")
+            _t.sleep(min(2 ** i, 30))
+    assert last is not None
+    raise last
 
 
 def load_seasons(league: str, seasons: list[str], use_cache: bool = True):
@@ -441,12 +471,12 @@ def load_seasons(league: str, seasons: list[str], use_cache: bool = True):
     for s in seasons:
         off = 0
         while True:
-            res = (sb.table("soccer_matches")
+            res = _sb_execute(lambda: (sb.table("soccer_matches")
                    .select("id,league_code,season,round,home_team,home_rank,away_team,away_rank,"
                            "home_score,away_score,same_odds,source_match_id,"
                            "team_info,recent_form,head_to_head,strength")
                    .eq("league_code", league).eq("season", s).order("round").order("id")
-                   .range(off, off + 999).execute())
+                   .range(off, off + 999)))
             rows += res.data or []
             if not res.data or len(res.data) < 1000:
                 break
@@ -535,8 +565,8 @@ def all_nontrain_seasons(league: str, train_s: set) -> set:
     found: set = set()
     off = 0
     while True:
-        res = (sb.table("soccer_matches").select("season")
-               .eq("league_code", league).range(off, off + 999).execute())
+        res = _sb_execute(lambda: (sb.table("soccer_matches").select("season")
+               .eq("league_code", league).range(off, off + 999)))
         if not res.data:
             break
         for r in res.data:
@@ -550,8 +580,9 @@ def all_nontrain_seasons(league: str, train_s: set) -> set:
 
 def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_rounds: int = 0,
               max_minutes: float = 0.0, noise: float = 0.1, hfa_noise: float = 0.05,
-              wmin: float = -2.0, wmax: float = 2.0, log_every: int = 200,
-              seed: int = 7, fresh: bool = False, use_cache: bool = True):
+              wmin: float = -3.0, wmax: float = 3.0, log_every: int = 200,
+              seed: int = 7, fresh: bool = False, use_cache: bool = True,
+              grid_step: float = 0.0):
     import numpy as _np
     p = model_path(league, ver)
     if not os.path.exists(p):
@@ -669,7 +700,7 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
     bestW, bestHfa = list(w), hfa
     improved_any = False
     se = season_acc(w, hfa)
-    log(f"자동조절 시작: acc={best:.3f} " +
+    log(f"랜덤탐색 시작: acc={best:.3f} " +
         " ".join(f"{s}={se[s]:.3f}" for s in sorted(se)) +
         f" 순서={[FEATURES[j] if j != 'hfa' else 'hfa' for j in order]}")
     try:
@@ -732,9 +763,23 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
             log(f"순차 {sw + 1}바퀴 완료 best={best:.3f}")
         rng = random.Random(seed)
         rnd = 0
-        log(f"랜덤워크 시작 (noise={noise} hfa_noise={hfa_noise} rounds=" +
+        log(f"랜덤워크 시작 (noise={noise} hfa_noise={hfa_noise} grid_step={grid_step} rounds=" +
             ("무한" if random_rounds <= 0 else str(random_rounds)) + ", Ctrl+C로 중지)")
         RK = 16
+        last_prog = 0.0
+        _gvals = None
+        try:
+            _gs0 = float(grid_step)
+        except (TypeError, ValueError):
+            _gs0 = 0.0
+        if _gs0 > 0:
+            _gvals = []
+            _gv = wmin
+            while _gv <= wmax + 1e-9 and len(_gvals) < 100000:
+                _gvals.append(round(_gv, 4))
+                _gv = round(_gv + _gs0, 4)
+            if not _gvals:
+                _gvals = None
         Xc = _np.ascontiguousarray(Xn, dtype=float)
         yc = _np.ascontiguousarray(yn, dtype=_np.int64)
         if use_draw:
@@ -764,8 +809,12 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
             cand_w, cand_h = [], []
             cw_, ch_ = list(w), hfa
             for _ in range(n):
-                cw_ = [clamp(v + rng.uniform(-noise, noise)) for v in cw_]
-                ch_ = clamp(ch_ + rng.uniform(-hfa_noise, hfa_noise))
+                if _gvals is not None:
+                    cw_ = [rng.choice(_gvals) for _ in range(len(cw_))]
+                    ch_ = rng.choice(_gvals)
+                else:
+                    cw_ = [clamp(v + rng.uniform(-noise, noise)) for v in cw_]
+                    ch_ = clamp(ch_ + rng.uniform(-hfa_noise, hfa_noise))
                 cand_w.append(cw_)
                 cand_h.append(ch_)
             if _HAVE_NUMBA:
@@ -787,6 +836,9 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
                     commit(f"★ 랜덤 #{rnd}")
                 elif rnd % max(1, log_every) == 0:
                     log(f"랜덤 #{rnd} 진행중 best={best:.3f} 현재={a:.3f}")
+            if time.time() - last_prog >= 0.016:
+                last_prog = time.time()
+                write_auto_prog(league, ver, rnd, best, bestW, list(w), a, tune_s)
     except KeyboardInterrupt:
         log("중단됨(Ctrl+C) → 최고점 유지 후 종료")
     if time_up:
@@ -797,10 +849,580 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
             best, w, hfa, bestW, bestHfa = ba, bw, bh, list(bw), bh
             log(f"종료 시점 외부파일 채택 acc={best:.3f}")
     fin_se = season_acc(bestW, bestHfa)
-    log(f"자동조절 종료 best={best:.3f} " +
+    log(f"랜덤탐색 종료 best={best:.3f} " +
         " ".join(f"{s}={fin_se[s]:.3f}" for s in sorted(fin_se)) +
         (" (개선 저장됨)" if improved_any else " (개선 없음)"))
     return improved_any
+
+
+def auto_tune_softmax(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_rounds: int = 0,
+                      max_minutes: float = 0.0, noise: float = 0.1, hfa_noise: float = 0.05,
+                      wmin: float = -3.0, wmax: float = 3.0, log_every: int = 200,
+                      seed: int = 7, fresh: bool = False, use_cache: bool = True,
+                      draw_w: float = 0.0, grid_step: float = 0.0):
+    import numpy as _np
+    p = model_path(league, ver)
+    if not os.path.exists(p):
+        log(f"아티팩트 없음: {p} (먼저 학습 필요)")
+        return False
+    art = json.load(open(p))
+    if not is_softmax(art):
+        log(f"softmax 아티팩트 아님: {p} (--model legacy로 실행)")
+        return False
+    afeats = art.get("features")
+    if isinstance(afeats, list) and afeats:
+        global FEATURES, SEL
+        FEATURES = [n for n in afeats if n in FEATURES13]
+        SEL = [FEATURES13.index(n) for n in FEATURES]
+        log(f"피처를 아티팩트 기준으로 사용: {','.join(FEATURES)}")
+    nw = len(FEATURES)
+    mu, sd = art["mu"], art["sd"]
+    e = art.get("emphasis", [1.0] * nw)
+    pats = art.get("patterns")
+    tau = art.get("pattern_tau", 0.0) or 0.0
+    overlap = set(art.get("train_seasons", [])) & set(tune_s)
+    if overlap:
+        log(f"경고: 학습시즌 포함됨 {sorted(overlap)} (미학습 권장)")
+    if fresh:
+        W = _np.zeros((nw, 3))
+        b = _np.zeros(3)
+        log("--new: 가중치 0부터 시작 (mu/sd/e/패턴은 아티팩트 유지)")
+    else:
+        W = _np.asarray(art["W"], dtype=float)
+        b = _np.asarray(art["b"], dtype=float)
+    if not tune_s:
+        tune_s = all_nontrain_seasons(league, set(art.get("train_seasons", [])))
+        log(f"조절 시즌 자동선택(미학습): {sorted(tune_s)}")
+    _, rows = load_seasons(league, sorted(tune_s), use_cache=use_cache)
+    feats, labels, ssn = [], [], []
+    for r in rows:
+        hs, aws = parse_score(r.get("home_score")), parse_score(r.get("away_score"))
+        if hs is None or aws is None:
+            continue
+        feats.append(apply_emphasis(apply_std(row_features(r), mu, sd), e))
+        labels.append(0 if hs > aws else (1 if hs == aws else 2))
+        ssn.append(str(r.get("season")))
+    if not feats:
+        log("조절용 데이터 없음")
+        return False
+    Xn = _np.asarray(feats, dtype=float)
+    yn = _np.asarray(labels, dtype=int)
+    PP = None
+    if pats and tau and tau > 0:
+        try:
+            PP = _np.asarray([pattern_proba(x, pats, tau) for x in feats], dtype=float)
+        except (KeyError, TypeError, ValueError):
+            PP = None
+
+    def acc_of(Wv, bv):
+        return float(_softmax_batch_acc(Xn, yn, PP,
+                                        _np.asarray(Wv, dtype=float)[None, :, :],
+                                        _np.asarray(bv, dtype=float)[None, :])[0][0])
+
+    def ev_of(Wv, bv):
+        a, r = _softmax_batch_acc(Xn, yn, PP,
+                                  _np.asarray(Wv, dtype=float)[None, :, :],
+                                  _np.asarray(bv, dtype=float)[None, :])
+        return float(a[0]), float(r[0])
+
+    def season_acc(Wv, bv):
+        out = {}
+        Wm = _np.asarray(Wv, dtype=float)
+        bm = _np.asarray(bv, dtype=float)
+        for s in sorted(set(ssn)):
+            m = _np.asarray([a == s for a in ssn])
+            if m.sum() == 0:
+                continue
+            P = _softmax3_proba(Xn[m] @ Wm + bm)
+            if PP is not None:
+                P = 0.5 * P + 0.5 * PP[m]
+            out[s] = float((P.argmax(axis=1) == yn[m]).mean())
+        return out
+
+    def clamp(v):
+        return min(wmax, max(wmin, round(float(v), 4)))
+
+    def persist():
+        try:
+            cur = json.load(open(model_path(league, ver)))
+            if is_softmax(cur):
+                cw = _np.asarray(cur.get("W"), dtype=float)
+                ch = _np.asarray(cur.get("b"), dtype=float)
+                if cw.shape == (nw, 3) and ch.shape == (3,):
+                    facc, frec = ev_of(cw, ch)
+                    if _sel_bonus(facc, frec, draw_w) > _sel_bonus(best, best_rec, draw_w):
+                        return ("adopted", cw.tolist(), ch.tolist(), facc, frec)
+        except (OSError, ValueError):
+            pass
+        try:
+            cur0 = json.load(open(model_path(league, ver)))
+            if cur0.get("W") == bestW and cur0.get("b") == bestHfa:
+                return ("same", bestW, bestHfa, best, best_rec)
+        except (OSError, ValueError):
+            pass
+        art["W"] = [[float(x) for x in row] for row in bestW]
+        art["b"] = [float(x) for x in bestHfa]
+        save_artifact(league, ver, art)
+        return ("saved", bestW, bestHfa, best, best_rec)
+
+    def commit(tag):
+        nonlocal W, b, best, bestW, bestHfa, best_rec, improved_any
+        improved_any = True
+        st, bw, bh, ba, br = persist()
+        if st == "adopted":
+            best, W, b, bestW, bestHfa, best_rec = ba, _np.asarray(bw), _np.asarray(bh), bw, bh, br
+        ise = season_acc(bestW, bestHfa)
+        log(f"{tag} acc={best:.3f} rec={best_rec:.3f} " +
+            " ".join(f"{s}={ise[s]:.3f}" for s in sorted(ise)) +
+            (" → 외부파일 채택" if st == "adopted" else
+             " → 동일, 저장 생략" if st == "same" else " → 저장"))
+
+    def cname(cc):
+        return (FEATURES[cc[1]] + "/" if cc[0] == "w" else "b/") + ("홈", "무", "원")[cc[2]]
+
+    flat = [(("w", j, c), abs(float(W[j, c]))) for j in range(nw) for c in range(3)]
+    flat += [(("b", -1, c), abs(float(b[c]))) for c in range(3)]
+    flat.sort(key=lambda t: -t[1])
+    order = [t[0] for t in flat]
+    best, best_rec = ev_of(W, b)
+    bestW = W.tolist()
+    bestHfa = b.tolist()
+    improved_any = False
+    se = season_acc(W, b)
+    log(f"랜덤탐색 시작(softmax): acc={best:.3f} " +
+        " ".join(f"{s}={se[s]:.3f}" for s in sorted(se)))
+    rng = random.Random(seed)
+    time_up = False
+    try:
+        for sw in range(max(0, seq_sweeps)):
+            for cc in order:
+                fname = cname(cc)
+                t0 = time.time()
+
+                def try_delta(delta):
+                    nonlocal W, b, best, bestW, bestHfa, best_rec, time_up
+                    if cc[0] == "b":
+                        cand = clamp(b[cc[2]] + sgn * delta)
+                        if cand == b[cc[2]]:
+                            return "stop"
+                    else:
+                        cand = clamp(W[cc[1], cc[2]] + sgn * delta)
+                        if cand == W[cc[1], cc[2]]:
+                            return "stop"
+                    if max_minutes > 0 and (time.time() - _START) / 60 > max_minutes:
+                        time_up = True
+                        return "stop"
+                    Wc = W.copy()
+                    bc = b.copy()
+                    if cc[0] == "b":
+                        bc[cc[2]] = cand
+                    else:
+                        Wc[cc[1], cc[2]] = cand
+                    a, r = ev_of(Wc, bc)
+                    if _sel_bonus(a, r, draw_w) > _sel_bonus(best, best_rec, draw_w):
+                        best, best_rec = a, r
+                        W, b = Wc, bc
+                        bestW, bestHfa = W.tolist(), b.tolist()
+                        disp = bc[cc[2]] if cc[0] == "b" else Wc[cc[1], cc[2]]
+                        commit(f"★ 순차 {fname} {sgn:+.0f} 값={disp:+.3f}")
+                        return "hit"
+                    return "miss"
+
+                for sgn in (1.0, -1.0):
+                    prev = 0.0
+                    for delta in _TUNE_LADDER:
+                        if time_up:
+                            break
+                        before = best
+                        r = try_delta(delta)
+                        if r == "stop":
+                            break
+                        if best > before:
+                            gap = delta - prev
+                            if gap > 0.0015:
+                                rd = max(0.001, gap / 8)
+                                dd = prev + rd
+                                while dd < delta - 1e-9:
+                                    if time_up:
+                                        break
+                                    rr = try_delta(round(dd, 4))
+                                    if rr == "stop":
+                                        break
+                                    dd += rd
+                        prev = delta
+                    if time_up:
+                        break
+                if time_up:
+                    break
+                cur_v = b[cc[2]] if cc[0] == "b" else W[cc[1], cc[2]]
+                log(f"순차 {fname} 완료 ({time.time() - t0:.1f}s) 현재={cur_v:+.3f} best={best:.3f}")
+            if time_up:
+                break
+            log(f"순차 {sw + 1}바퀴 완료 best={best:.3f}")
+        rnd = 0
+        log(f"랜덤워크 시작 (noise={noise} hfa_noise={hfa_noise} grid_step={grid_step} rounds=" +
+            ("무한" if random_rounds <= 0 else str(random_rounds)) + ", Ctrl+C로 중지)")
+        RK = 16
+        last_prog = 0.0
+        try:
+            gs = float(grid_step)
+        except (TypeError, ValueError):
+            gs = 0.0
+        gvals = None
+        if gs > 0:
+            gvals = []
+            gv = wmin
+            while gv <= wmax + 1e-9 and len(gvals) < 100000:
+                gvals.append(round(gv, 4))
+                gv = round(gv + gs, 4)
+            if not gvals:
+                gvals = None
+        while not time_up:
+            n = RK
+            if random_rounds > 0:
+                n = min(RK, random_rounds - rnd)
+                if n <= 0:
+                    log(f"라운드 {random_rounds} 도달 → 종료")
+                    break
+            if max_minutes > 0 and (time.time() - _START) / 60 > max_minutes:
+                log(f"{max_minutes}분 제한 도달 → 종료")
+                break
+            cand_W, cand_b, cw_, cb_ = [], [], W.copy(), b.copy()
+            for _ in range(n):
+                if gvals is not None:
+                    cw_ = _np.asarray(rng.choices(gvals, k=nw * 3), dtype=float).reshape(nw, 3)
+                    cb_ = _np.asarray(rng.choices(gvals, k=3), dtype=float)
+                else:
+                    nz_w = _np.asarray([[rng.uniform(-noise, noise) for _ in range(3)] for _ in range(nw)])
+                    nz_b = _np.asarray([rng.uniform(-hfa_noise, hfa_noise) for _ in range(3)])
+                    cw_ = _np.clip(cw_ + nz_w, wmin, wmax)
+                    cb_ = _np.clip(cb_ + nz_b, wmin, wmax)
+                cand_W.append(cw_.copy())
+                cand_b.append(cb_.copy())
+            accs, recs = _softmax_batch_acc(Xn, yn, PP, _np.asarray(cand_W), _np.asarray(cand_b))
+            for t in range(n):
+                rnd += 1
+                a = float(accs[t])
+                r = float(recs[t])
+                W, b = cand_W[t], cand_b[t]
+                if _sel_bonus(a, r, draw_w) > _sel_bonus(best, best_rec, draw_w):
+                    best, best_rec = a, r
+                    bestW, bestHfa = W.tolist(), b.tolist()
+                    commit(f"★ 랜덤 #{rnd}")
+                elif rnd % max(1, log_every) == 0:
+                    log(f"랜덤 #{rnd} 진행중 best={best:.3f} 현재={a:.3f}")
+            if time.time() - last_prog >= 0.016:
+                last_prog = time.time()
+                write_auto_prog(league, ver, rnd, best, bestW, W.tolist(), a, tune_s)
+    except KeyboardInterrupt:
+        log("중단됨(Ctrl+C) → 최고점 유지 후 종료")
+    if time_up:
+        log(f"{max_minutes}분 제한 도달 → 종료")
+    if improved_any:
+        st, bw, bh, ba, br = persist()
+        if st == "adopted":
+            best, bestW, bestHfa, best_rec = ba, bw, bh, br
+            log(f"종료 시점 외부파일 채택 acc={best:.3f}")
+    fin_se = season_acc(bestW, bestHfa)
+    log(f"랜덤탐색 종료 best={best:.3f} " +
+        " ".join(f"{s}={fin_se[s]:.3f}" for s in sorted(fin_se)) +
+        (" (개선 저장됨)" if improved_any else " (개선 없음)"))
+    return improved_any
+
+
+def _softmax_batch_acc(Xn, yn, PP, Wmats, bvecs, chunk=256):
+    """softmax 후보 묶음 평가. Wmats:(M,F,3), bvecs:(M,3) → (accs, draw_recs)."""
+    import numpy as _np
+    M = int(Wmats.shape[0])
+    N = int(Xn.shape[0])
+    yv = _np.asarray(yn, dtype=int)
+    dm = yv == 1
+    accs = _np.empty(M)
+    recs = _np.zeros(M)
+    use_pp = PP is not None
+    for a in range(0, M, chunk):
+        Wc = Wmats[a:a + chunk]
+        bc = bvecs[a:a + chunk]
+        L = _np.einsum("nf,mfc->mnc", Xn, Wc) + bc[:, None, :]
+        P = _softmax3_proba(L.reshape(-1, 3)).reshape(-1, N, 3)
+        if use_pp:
+            P = 0.5 * P + 0.5 * PP[None, :, :]
+        picks = P.argmax(axis=2)
+        accs[a:a + chunk] = (picks == yv[None, :]).mean(axis=1)
+        if dm.sum():
+            recs[a:a + chunk] = (picks[:, dm] == 1).mean(axis=1)
+    return accs, recs
+
+
+def _sm_coord_key(cc):
+    return (cc[0], cc[1], cc[2])
+
+
+def grid_search_softmax(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
+                        max_combos: int = 0, max_minutes: float = 0.0,
+                        ckpt_every: int = 5000, log_every: int = 20000,
+                        wmin: float = -3.0, wmax: float = 3.0,
+                        batch: int = 4096, log_secs: float = 10.0,
+                        split: int = 1, part: int = 0,
+                        fresh: bool = False, use_cache: bool = True,
+                        jobs: int = 1, draw_w: float = 0.0):
+    import numpy as _np
+    p = model_path(league, ver)
+    if not os.path.exists(p):
+        log(f"아티팩트 없음: {p} (먼저 학습 필요)")
+        return False
+    art = json.load(open(p))
+    if not is_softmax(art):
+        log(f"softmax 아티팩트 아님: {p} (--model legacy로 실행)")
+        return False
+    afeats = art.get("features")
+    if isinstance(afeats, list) and afeats:
+        global FEATURES, SEL
+        FEATURES = [n for n in afeats if n in FEATURES13]
+        SEL = [FEATURES13.index(n) for n in FEATURES]
+        log(f"피처를 아티팩트 기준으로 사용: {','.join(FEATURES)}")
+    nw = len(FEATURES)
+    mu, sd = art["mu"], art["sd"]
+    e = art.get("emphasis", [1.0] * nw)
+    pats = art.get("patterns")
+    tau = art.get("pattern_tau", 0.0) or 0.0
+    if split < 1:
+        split = 1
+    part = max(0, min(part, split - 1))
+    ckpt_p = f"ml/permatch/{league}_{ver}.grid.json"
+    if split > 1:
+        ckpt_p = f"ml/permatch/{league}_{ver}.grid.p{part}.json"
+    if fresh and os.path.exists(ckpt_p):
+        os.remove(ckpt_p)
+        log("--new: 체크포인트 삭제, 처음부터 좌표탐색")
+    if not tune_s:
+        tune_s = all_nontrain_seasons(league, set(art.get("train_seasons", [])))
+        log(f"조절 시즌 자동선택(미학습): {sorted(tune_s)}")
+    _, rows = load_seasons(league, sorted(tune_s), use_cache=use_cache)
+    feats, labels, ssn = [], [], []
+    for r in rows:
+        hs, aws = parse_score(r.get("home_score")), parse_score(r.get("away_score"))
+        if hs is None or aws is None:
+            continue
+        feats.append(apply_emphasis(apply_std(row_features(r), mu, sd), e))
+        labels.append(0 if hs > aws else (1 if hs == aws else 2))
+        ssn.append(str(r.get("season")))
+    if not feats:
+        log("조절용 데이터 없음")
+        return False
+    Xn = _np.asarray(feats, dtype=float)
+    yn = _np.asarray(labels, dtype=int)
+    PP = None
+    if pats and tau and tau > 0:
+        try:
+            PP = _np.asarray([pattern_proba(x, pats, tau) for x in feats], dtype=float)
+        except (KeyError, TypeError, ValueError):
+            PP = None
+    vals = []
+    v = wmin
+    while v <= wmax + 1e-9:
+        vals.append(round(v, 4))
+        v = round(v + grid_step, 4)
+    W0 = _np.asarray(art["W"], dtype=float)
+    b0 = _np.asarray(art["b"], dtype=float)
+    full_order = [(("w", j, c), abs(float(W0[j, c]))) for j in range(nw) for c in range(3)]
+    full_order += [(("b", -1, c), abs(float(b0[c]))) for c in range(3)]
+    full_order.sort(key=lambda t: -t[1])
+    order = [_sm_coord_key(t[0]) for t in full_order]
+    order = [cc for i, cc in enumerate(order) if i % split == part]
+    seg_total = len(order) * len(vals)
+    if max_combos > 0:
+        seg_total = min(seg_total, max_combos)
+
+    def acc_of(Wv, bv):
+        return float(_softmax_batch_acc(Xn, yn, PP,
+                                        _np.asarray(Wv, dtype=float)[None, :, :],
+                                        _np.asarray(bv, dtype=float)[None, :])[0][0])
+
+    def ev_of(Wv, bv):
+        a, r = _softmax_batch_acc(Xn, yn, PP,
+                                  _np.asarray(Wv, dtype=float)[None, :, :],
+                                  _np.asarray(bv, dtype=float)[None, :])
+        return float(a[0]), float(r[0])
+
+    def season_acc(Wv, bv):
+        out = {}
+        Wm = _np.asarray(Wv, dtype=float)
+        bm = _np.asarray(bv, dtype=float)
+        for s in sorted(set(ssn)):
+            m = _np.asarray([a == s for a in ssn])
+            if m.sum() == 0:
+                continue
+            P = _softmax3_proba(Xn[m] @ Wm + bm)
+            if PP is not None:
+                P = 0.5 * P + 0.5 * PP[m]
+            out[s] = float((P.argmax(axis=1) == yn[m]).mean())
+        return out
+
+    def persist():
+        try:
+            cur = json.load(open(model_path(league, ver)))
+            if is_softmax(cur):
+                cw = _np.asarray(cur.get("W"), dtype=float)
+                ch = _np.asarray(cur.get("b"), dtype=float)
+                if cw.shape == (nw, 3) and ch.shape == (3,):
+                    facc, frec = ev_of(cw, ch)
+                    if _sel_bonus(facc, frec, draw_w) > _sel_bonus(best, best_rec, draw_w):
+                        return ("adopted", cw.tolist(), ch.tolist(), facc, frec)
+        except (OSError, ValueError):
+            pass
+        try:
+            cur0 = json.load(open(model_path(league, ver)))
+            if cur0.get("W") == bestW and cur0.get("b") == bestHfa:
+                return ("same", bestW, bestHfa, best, best_rec)
+        except (OSError, ValueError):
+            pass
+        art["W"] = [list(map(float, row)) for row in bestW]
+        art["b"] = list(map(float, bestHfa))
+        save_artifact(league, ver, art)
+        return ("saved", bestW, bestHfa, best, best_rec)
+
+    sweep, start_k, ndone = 0, 0, 0
+    best, best_rec = ev_of(W0, b0)
+    bestW, bestHfa = W0.tolist(), b0.tolist()
+    curW, curHfa, curAcc = list(bestW), list(bestHfa), best
+    if os.path.exists(ckpt_p) and not fresh:
+        try:
+            c = json.load(open(ckpt_p))
+        except (OSError, ValueError):
+            c = None
+        if (isinstance(c, dict) and c.get("mode") == "coord-sweep" and c.get("vals") == vals
+                and c.get("order") == [list(cc) for cc in order]
+                and set(c.get("tune", [])) == set(tune_s)
+                and c.get("split", 1) == split and c.get("part", 0) == part
+                and c.get("total") == seg_total):
+            try:
+                bw = _np.asarray(c["bestW"], dtype=float)
+                bh = _np.asarray(c["bestHfa"], dtype=float)
+                if bw.shape == (nw, 3) and bh.shape == (3,):
+                    cb, cr = ev_of(bw, bh)
+                    if _sel_bonus(cb, cr, draw_w) > _sel_bonus(best, best_rec, draw_w):
+                        best, bestW, bestHfa, best_rec = cb, bw.tolist(), bh.tolist(), cr
+            except (KeyError, TypeError, ValueError):
+                pass
+            sweep = int(c.get("sweep", 0))
+            start_k = int(c.get("coord", 0))
+            ndone = int(c.get("ndone", 0))
+            log(f"체크포인트 계속학습: sweep {sweep} 좌표 {start_k}/{len(order)} best={best:.3f}")
+        else:
+            log("구 체크포인트 형식 → 처음부터 좌표탐색")
+
+    def write_ckpt():
+        with open(ckpt_p, "w") as f:
+            json.dump({"mode": "coord-sweep", "sweep": sweep, "coord": start_k,
+                       "ndone": ndone, "done": ndone, "total": seg_total, "num0": 0,
+                       "best": best, "bestW": bestW, "bestHfa": bestHfa,
+                       "curW": curW, "curHfa": curHfa, "curAcc": curAcc,
+                       "vals": vals, "order": [list(cc) for cc in order],
+                       "tune": sorted(tune_s), "split": split, "part": part}, f)
+
+    se = season_acc(bestW, bestHfa)
+    log(f"좌표탐색 시작(softmax): dim={len(order)} 값/축={len(vals)} sweep당={seg_total:,}가지 " +
+        " ".join(f"{s}={se[s]:.3f}" for s in sorted(se)) + f" base={best:.3f}")
+    t0 = time.time()
+    last_log = t0
+    complete = False
+    B = max(1, batch)
+    try:
+        import signal
+
+        def _on_term(signum, frame):
+            raise _GridStop()
+
+        _prev_sigterm = signal.signal(signal.SIGTERM, _on_term)
+    except (ValueError, RuntimeError, OSError, AttributeError):
+        _prev_sigterm = None
+    try:
+        while True:
+            improved = False
+            for k in range(start_k, len(order)):
+                start_k = k
+                if max_combos > 0 and ndone >= max_combos:
+                    log(f"최대 {max_combos:,}가지 도달 → 종료")
+                    break
+                if max_minutes > 0 and (time.time() - _START) / 60 > max_minutes:
+                    log(f"{max_minutes}분 제한 도달 → 종료")
+                    break
+                cc = order[k]
+                M = len(vals)
+                base_W = _np.asarray(curW, dtype=float)
+                base_b = _np.asarray(curHfa, dtype=float)
+                if cc[0] == "b":
+                    Wc = _np.repeat(base_W[None, :, :], M, axis=0)
+                    bc = _np.repeat(base_b[None, :], M, axis=0)
+                    bc[:, cc[2]] = _np.asarray(vals)
+                else:
+                    Wc = _np.repeat(base_W[None, :, :], M, axis=0)
+                    Wc[:, cc[1], cc[2]] = _np.asarray(vals)
+                    bc = _np.repeat(base_b[None, :], M, axis=0)
+                accs, recs = _softmax_batch_acc(Xn, yn, PP, Wc, bc)
+                keys = accs + draw_w * recs
+                bi = int(_np.argmax(keys))
+                ba = float(accs[bi])
+                br = float(recs[bi])
+                if cc[0] == "b":
+                    curHfa = bc[bi].tolist()
+                else:
+                    curW = Wc[bi].tolist()
+                curAcc = ba
+                ndone += M
+                if _sel_bonus(ba, br, draw_w) > _sel_bonus(best, best_rec, draw_w):
+                    best, best_rec = ba, br
+                    bestW = [list(map(float, row)) for row in (Wc[bi].tolist())]
+                    bestHfa = [float(x) for x in (bc[bi].tolist())]
+                    curW, curHfa = list(bestW), list(bestHfa)
+                    improved = True
+                    st, bw2, bh2, ba2, br2 = persist()
+                    if st == "adopted":
+                        best, bestW, bestHfa, best_rec = ba2, bw2, bh2, br2
+                    ise = season_acc(bestW, bestHfa)
+                    log(f"★ sweep{sweep} #{ndone:,} acc={best:.3f} rec={best_rec:.3f} " +
+                        " ".join(f"{s}={ise[s]:.3f}" for s in sorted(ise)) +
+                        (" → 외부파일 채택" if st == "adopted" else
+                         " → 동일, 저장 생략" if st == "same" else " → 저장"))
+                    last_log = time.time()
+                    write_ckpt()
+                now = time.time()
+                if now - last_log >= log_secs:
+                    last_log = now
+                    el = now - t0
+                    cps = ndone / max(el, 1e-6)
+                    pct = ndone / seg_total * 100 if seg_total else 100.0
+                    eta_s = (seg_total - ndone) / cps if cps > 0 else float("inf")
+                    eta_txt = f"{eta_s / 31557600:,.0f}년" if eta_s > 31557600 * 2 else f"{eta_s / 3600:,.1f}h"
+                    log(f"진행 {ndone:,}/{seg_total:,} ({pct:.4f}%) {cps:,.0f}/s 남은≈{eta_txt} best={best:.3f}")
+                if ndone % max(1, ckpt_every) == 0:
+                    write_ckpt()
+            else:
+                if not improved:
+                    complete = True
+                    break
+                sweep += 1
+                start_k = 0
+                ndone = 0
+                log(f"sweep {sweep} 시작 best={best:.3f}")
+                continue
+            break
+    except KeyboardInterrupt:
+        log("중단됨(Ctrl+C) → 체크포인트 저장 후 종료")
+    except _GridStop:
+        log("중지 요청 → 체크포인트 저장 후 종료")
+    finally:
+        try:
+            if _prev_sigterm is not None:
+                import signal
+
+                signal.signal(signal.SIGTERM, _prev_sigterm)
+        except (ValueError, RuntimeError, OSError, AttributeError):
+            pass
+    write_ckpt()
+    log(f"좌표탐색 종료 sweep={sweep} best={best:.3f}" + (" (수렴 완료)" if complete else ""))
+    return True
 
 
 class _GridStop(Exception):
@@ -810,7 +1432,7 @@ class _GridStop(Exception):
 def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
                 max_combos: int = 0, max_minutes: float = 0.0,
                 ckpt_every: int = 5000, log_every: int = 20000,
-                wmin: float = -2.0, wmax: float = 2.0,
+                wmin: float = -3.0, wmax: float = 3.0,
                 batch: int = 4096, log_secs: float = 10.0,
                 split: int = 1, part: int = 0,
                 fresh: bool = False, use_cache: bool = True,
@@ -937,7 +1559,7 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
 
     def write_ckpt():
         with open(ckpt_p, "w") as f:
-            json.dump({"mode": "odometer", "num": num, "ndone": ndone, "done": ndone,
+            json.dump({"mode": "odometer-top", "num": num, "ndone": ndone, "done": ndone,
                        "total": seg_len, "num0": num0, "best": best,
                        "bestW": bestW, "bestHfa": bestHfa, "vals": vals,
                        "order": order, "tune": sorted(tune_s),
@@ -975,7 +1597,7 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
             c = json.load(open(ckpt_p))
         except (OSError, ValueError):
             c = None
-        if (isinstance(c, dict) and c.get("mode") == "odometer" and c.get("vals") == vals
+        if (isinstance(c, dict) and c.get("mode") == "odometer-top" and c.get("vals") == vals
                 and c.get("order") == order and set(c.get("tune", [])) == set(tune_s)
                 and c.get("split", 1) == split and c.get("part", 0) == part
                 and c.get("total") == seg_len and c.get("num0") == num0):
@@ -994,7 +1616,7 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
                         best, bestW, bestHfa = facc, list(cw), float(chh)
             except (OSError, ValueError):
                 pass
-            log(f"체크포인트 이어하기: {ndone:,}/{seg_len:,} 완료 best={best:.3f}")
+            log(f"체크포인트 계속학습: {ndone:,}/{seg_len:,} 완료 best={best:.3f}")
         else:
             if isinstance(c, dict) and isinstance(c.get("bestW"), list) and len(c["bestW"]) == nw:
                 try:
@@ -1029,7 +1651,7 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
 
     def num_to_idx(n):
         dd = [0] * nf
-        for k in range(nf - 1, -1, -1):
+        for k in range(nf):
             dd[k] = n % nv
             n //= nv
         return dd
@@ -1063,7 +1685,7 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
     _pows = None
     _vals_arr = None
     if total <= 9_000_000_000_000_000_000:
-        _pows = _np.array([nv ** (nf - 1 - k) for k in range(nf)], dtype=_np.int64)
+        _pows = _np.array([nv ** k for k in range(nf)], dtype=_np.int64)
         _vals_arr = _np.asarray(vals, dtype=float)
     try:
         while ndone < seg_len:
@@ -1421,14 +2043,18 @@ def drawfit(league: str, ver: str, extra_s: set, use_cache: bool = True):
         log(f"아티팩트 없음: {p}")
         return False
     art = json.load(open(p))
+    if is_softmax(art):
+        log(f"drawfit은 legacy 전용 (softmax 불필요): {p}")
+        return False
     w, hfa = list(art["weights"]), art["hfa"]
     d = art["draw_prior"]
     mu, sd = art["mu"], art["sd"]
     e = art.get("emphasis", [1.0] * len(w))
     T0 = art.get("T", 1.0)
     train_s = set(art.get("train_seasons", []))
-    valid = art.get("valid", "")
-    key_s = set(extra_s) | ({valid} if valid else set())
+    raw_v = art.get("valid", "")
+    valid_l = raw_v if isinstance(raw_v, list) else ([raw_v] if raw_v else [])
+    key_s = set(extra_s) | {str(s) for s in valid_l}
     if not train_s or not key_s:
         log("학습/기준 시즌 정보 없음")
         return False
@@ -1503,11 +2129,11 @@ def drawfit(league: str, ver: str, extra_s: set, use_cache: bool = True):
     return True
 
 
-def train_model(matches, train_s: set, valid: str, ver: str, test: str = ""):
+def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = ""):
     feats, splits, labels, rounds, dfeats = [], [], [], [], []
     for r in matches:
         s = str(r["season"])
-        if s not in train_s and s != valid and s != (test or ""):
+        if s not in train_s and s not in valid_s and s != (test or ""):
             continue
         hs, aws = parse_score(r.get("home_score")), parse_score(r.get("away_score"))
         label = None
@@ -1515,13 +2141,13 @@ def train_model(matches, train_s: set, valid: str, ver: str, test: str = ""):
             label = 0 if hs > aws else (1 if hs == aws else 2)
         feats.append(row_features(r))
         dfeats.append(draw_row_features(r))
-        splits.append("train" if s in train_s else ("valid" if s == valid else "test"))
+        splits.append("train" if s in train_s else ("valid" if s in valid_s else "test"))
         labels.append(label)
         try:
             rounds.append(int(r.get("round") or 0))
         except (TypeError, ValueError):
             rounds.append(0)
-    if train_s == {valid} or (len(train_s) == 1 and valid in train_s):
+    if train_s == valid_s:
         for i, s in enumerate(splits):
             if s in ("train", "valid"):
                 splits[i] = "train" if rounds[i] <= 22 else "valid"
@@ -1577,22 +2203,90 @@ def train_model(matches, train_s: set, valid: str, ver: str, test: str = ""):
                 "draw_mu": mu_d, "draw_sd": sd_d, "draw_features": DRAW_FEATURES,
                 "features": FEATURES, "patterns": patterns, "pattern_tau": pattern_tau,
                 "pattern_stats": pattern_stats, "contrib_cap": contrib_cap,
-                "train_seasons": sorted(train_s), "valid": valid}
+                "train_seasons": sorted(train_s), "valid": sorted(valid_s)}
     return artifact, metrics
 
 
-def eval_artifact(matches, train_s: set, valid: str, artifact: dict):
-    w, hfa, T, d = (artifact["weights"], artifact["hfa"], artifact["T"], artifact["draw_prior"])
-    mu, sd, e = artifact["mu"], artifact["sd"], artifact.get("emphasis", [1.0] * len(w))
+def train_model_softmax(matches, train_s: set, valid_s: set, draw_w: float = 0.0):
+    feats, splits, labels = [], [], []
+    for r in matches:
+        s = str(r.get("season"))
+        if s not in train_s and s not in valid_s:
+            continue
+        hs, aws = parse_score(r.get("home_score")), parse_score(r.get("away_score"))
+        label = None
+        if hs is not None and aws is not None:
+            label = 0 if hs > aws else (1 if hs == aws else 2)
+        feats.append(row_features(r))
+        splits.append("train" if s in train_s else "valid")
+        labels.append(label)
+    trX = [x for x, s, y in zip(feats, splits, labels) if s == "train" and y is not None]
+    ty = [y for s, y in zip(splits, labels) if s == "train" and y is not None]
+    vaX = [x for x, s, y in zip(feats, splits, labels) if s == "valid" and y is not None]
+    vy = [y for s, y in zip(splits, labels) if s == "valid" and y is not None]
+    W, b, T, mu, sd, e = fit_linear_softmax(trX, ty, vaX, vy, dw=draw_w)
+    log(f"softmax Wrow0={[round(v, 3) for v in W[0]]} b={[round(v, 3) for v in b]} T={T:.1f}")
+    pats, tau, pstats = build_patterns(
+        [x for x, s, y in zip(feats, splits, labels) if s == "train" and y is not None],
+        [y for s, y in zip(splits, labels) if s == "train" and y is not None],
+        mu, sd, e)
+    log(f"patterns: home/draw/away x 5, tau={tau:.3f}")
+    art = {"model_type": "softmax3", "W": W, "b": b, "T": T,
+           "mu": mu, "sd": sd, "emphasis": e, "features": FEATURES,
+           "patterns": pats, "pattern_tau": tau, "pattern_stats": pstats,
+           "train_seasons": sorted(train_s), "valid": sorted(valid_s)}
+    metrics = {}
+    for split in ("train", "valid"):
+        cond = train_s if split == "train" else valid_s
+        met = eval_artifact([r for r in matches if str(r.get("season")) in cond],
+                            train_s, valid_s, art)
+        metrics[split] = {"n": met[split]["n"], "acc": met[split]["acc"], "ll": met[split]["ll"]}
+        log(f"[{split}] n={metrics[split]['n']} acc={metrics[split]['acc']:.3f} logloss={metrics[split]['ll']:.4f}")
+    return art, metrics
+
+
+def is_softmax(art: dict) -> bool:
+    return isinstance(art, dict) and art.get("model_type") == "softmax3"
+
+
+def eval_artifact(matches, train_s: set, valid_s: set, artifact: dict):
+    mu, sd = artifact["mu"], artifact["sd"]
     pats, tau = artifact.get("patterns"), artifact.get("pattern_tau", 0.0) or 0.0
+    T = artifact.get("T", 1.0)
+    out = {}
+    if is_softmax(artifact):
+        import numpy as _np
+        W = _np.asarray(artifact["W"], dtype=float)
+        b = _np.asarray(artifact["b"], dtype=float)
+        e = artifact.get("emphasis", [1.0] * W.shape[0])
+        for split, cond in (("train", lambda s: s in train_s), ("valid", lambda s: s in valid_s)):
+            n = hit = tot = 0.0
+            for r in matches:
+                s = str(r.get("season"))
+                if not cond(s):
+                    continue
+                try:
+                    hs, aws = float(r.get("home_score")), float(r.get("away_score"))
+                except (TypeError, ValueError):
+                    continue
+                y = 0 if hs > aws else (1 if hs == aws else 2)
+                x = apply_emphasis(apply_std(row_features(r), mu, sd), e)
+                L = _np.asarray(x, dtype=float) @ W + b
+                p = apply_temp(blend_proba(list(_softmax3_proba(L[None, :])[0]), x, pats, tau), T)
+                n += 1
+                hit += (p.index(max(p)) == y)
+                tot += -math.log(max(p[y], 1e-12))
+            out[split] = {"n": n, "acc": hit / max(n, 1), "ll": tot / max(n, 1)}
+        return out
+    w, hfa, d = (artifact["weights"], artifact["hfa"], artifact["draw_prior"])
+    e = artifact.get("emphasis", [1.0] * len(w))
     cap = artifact.get("contrib_cap")
     dw, db = artifact.get("draw_weights"), artifact.get("draw_bias", 0.0)
     mu_d, sd_d = artifact.get("draw_mu"), artifact.get("draw_sd")
-    out = {}
-    for split, cond in (("train", lambda s: s in train_s), ("valid", lambda s: s == valid)):
+    for split, cond in (("train", lambda s: s in train_s), ("valid", lambda s: s in valid_s)):
         n = hit = tot = 0.0
         for r in matches:
-            s = str(r["season"])
+            s = str(r.get("season"))
             if not cond(s):
                 continue
             try:
@@ -1691,6 +2385,106 @@ def _temp_acc(P1, y, t):
     pick = _np.where((home >= dr) & (home >= away), 0, _np.where(dr >= away, 1, 2))
     yy = _np.asarray(y, dtype=int)
     return float((pick == yy).mean())
+
+
+def _softmax3_proba(L):
+    """3-way softmax 직접분류. L: (N,3) logit 행렬 → (N,3) 확률."""
+    import numpy as _np
+    La = _np.asarray(L, dtype=float)
+    Lc = _np.clip(La - La.max(axis=1, keepdims=True), -30.0, 30.0)
+    E = _np.exp(Lc)
+    return E / E.sum(axis=1, keepdims=True)
+
+
+def _softmax3_ll(P, y, l2pen=0.0):
+    """softmax3 NLL+l2. P: (N,3)."""
+    import numpy as _np
+    Pa = _np.asarray(P, dtype=float)
+    yy = _np.asarray(y, dtype=int)
+    return float(-_np.log(_np.maximum(Pa[_np.arange(len(yy)), yy], 1e-12)).mean()) + float(_np.asarray(l2pen, dtype=float))
+
+
+def _softmax3_acc(P, y):
+    """softmax3 정확도. argmax pick."""
+    import numpy as _np
+    Pa = _np.asarray(P, dtype=float)
+    pick = _np.argmax(Pa, axis=1)
+    return float((pick == _np.asarray(y, dtype=int)).mean())
+
+
+def _sm_draw_stats(P, y):
+    """무승부 리콜/정밀도. P:(N,3), y:(N,)."""
+    import numpy as _np
+    Pa = _np.asarray(P, dtype=float)
+    yy = _np.asarray(y, dtype=int)
+    pick = _np.argmax(Pa, axis=1)
+    dm = yy == 1
+    pm = pick == 1
+    rec = float((pick[dm] == 1).mean()) if dm.sum() else 0.0
+    prec = float((pick[pm] == yy[pm]).mean()) if pm.sum() else 0.0
+    return rec, prec
+
+
+def _sel_bonus(acc, rec, draw_w):
+    return acc + draw_w * rec
+
+
+def _snap_grid(v, lo, hi, step):
+    try:
+        step = float(step)
+    except (TypeError, ValueError):
+        return v
+    if not step > 0:
+        return v
+    import math as _m
+    return min(hi, max(lo, round(lo + _m.floor((v - lo) / step + 0.5) * step, 4)))
+
+
+def _fit_softmax_restart(Xa, ya, W0, b0, l2, steps, sweeps, dw=0.0):
+    """softmax3 좌표 하강. Xa:(N,F), W:(F,3), b:(3,). 목적식 NLL+l2. dw>0이면 무승부 샘플 가중."""
+    import numpy as _np
+    F = Xa.shape[1]
+    ya = _np.asarray(ya, dtype=int)
+    sw = _np.where(ya == 1, 1.0 + dw, 1.0)
+    W = _np.asarray(W0, dtype=float).reshape(F, 3)
+    b = _np.asarray(b0, dtype=float).reshape(3)
+    L = Xa @ W + b[None, :]
+
+    def _obj(Lm):
+        P = _softmax3_proba(Lm)
+        nll = -_np.log(_np.maximum(P[_np.arange(len(ya)), ya], 1e-12))
+        return float((sw * nll).sum() / sw.sum())
+
+    wnorm2 = float((W ** 2).sum())
+    best = _obj(L) + l2 * wnorm2
+    coords = [(j, c) for j in range(F) for c in range(3)] + [("b", c) for c in range(3)]
+    for _ in range(max(1, int(sweeps))):
+        improved = False
+        for j in coords:
+            for step in steps:
+                for sign in (1.0, -1.0):
+                    if j[0] == "b":
+                        Lb = L + 0.0
+                        Lb[:, j[1]] += sign * step
+                        pen = l2 * wnorm2
+                    else:
+                        jj, cc = j
+                        Lb = L + 0.0
+                        Lb[:, cc] += Xa[:, jj] * (sign * step)
+                        nwc = wnorm2 - W[jj, cc] ** 2 + (W[jj, cc] + sign * step) ** 2
+                        pen = l2 * nwc
+                    ll = _obj(Lb) + pen
+                    if ll < best - 1e-6:
+                        best = ll
+                        L = Lb
+                        if j[0] == "b":
+                            b[j[1]] += sign * step
+                        else:
+                            W[jj, cc] += sign * step
+                        improved = True
+        if not improved:
+            break
+    return W, b, best
 
 
 def _sweep_fit_w(Xa, ya, w0, hfa0, d, l2, steps, max_sweeps):
@@ -1966,7 +2760,120 @@ def fit_trial(Xn, ty, Vn, vy, d, mu, sd, cfg):
     return w, hfa, T, e
 
 
-def load_existing_best(league: str, ver: str, matches, train_s: set, valid: str):
+def fit_trial_softmax(Xn, ty, Vn, vy, cfg):
+    import numpy as _np
+    Xn = _np.asarray(Xn, dtype=float)
+    nf = Xn.shape[1]
+    Vn = _np.asarray(Vn if Vn else [], dtype=float).reshape(-1, nf) if len(Vn) else _np.zeros((0, nf))
+    ty = _np.asarray(ty, dtype=int)
+    vy = _np.asarray(vy, dtype=int)
+    rng = random.Random()
+    inits = []
+    for restart in range(cfg["restarts"]):
+        rng.seed(1000 + restart)
+        inits.append(([[rng.gauss(0, 0.3) for _ in range(3)] for _ in range(nf)],
+                      [rng.gauss(0, 0.2) for _ in range(3)]))
+    halving = not cfg.get("no_halving", False) and len(inits) > 2
+    phase1 = min(2, int(cfg["sweeps"])) if halving else int(cfg["sweeps"])
+    states = []
+    for W0, b0 in inits:
+        W, b, ll = _fit_softmax_restart(Xn, ty, W0, b0, cfg["l2"], cfg["steps"], phase1,
+                                        cfg.get("draw_w", 0.0))
+        states.append([W, b, ll])
+    if halving:
+        states.sort(key=lambda s: s[2])
+        keep = max(int(cfg["top_k"]), len(states) // 2, 2)
+        states = states[:keep]
+        rest = int(cfg["sweeps"]) - phase1
+        if rest > 0:
+            for s in states:
+                s[0], s[1], s[2] = _fit_softmax_restart(Xn, ty, s[0], s[1], cfg["l2"], cfg["steps"], rest,
+                                                        cfg.get("draw_w", 0.0))
+    scored = []
+    for W, b, best_ll in states:
+        P = _softmax3_proba(Xn @ _np.asarray(W, dtype=float) + _np.asarray(b, dtype=float))
+        if len(Vn) and len(vy):
+            Pv = _softmax3_proba(Vn @ _np.asarray(W, dtype=float) + _np.asarray(b, dtype=float))
+            rec, _ = _sm_draw_stats(Pv, vy)
+            key = (_sel_bonus(_softmax3_acc(Pv, vy), rec, cfg.get("draw_w", 0.0)),
+                   -_softmax3_ll(Pv, vy))
+        else:
+            key = (-best_ll,)
+        scored.append((key, _np.asarray(W, dtype=float), _np.asarray(b, dtype=float)))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    top = scored[:max(cfg["top_k"], 1)]
+    W = sum(s[1] for s in top) / len(top)
+    b = sum(s[2] for s in top) / len(top)
+    P1 = _softmax3_proba(Xn @ W + b)
+    T, best_t = 1.0, None
+    t = 0.5
+    while t <= 10.001:
+        ll = _temp_ll(P1, ty, t)
+        if best_t is None or ll < best_t:
+            best_t, T = ll, t
+        t += 0.1
+    if len(Vn) and len(vy):
+        best_T, best_key = T, None
+        V1 = _softmax3_proba(Vn @ W + b)
+        t = 0.5
+        while t <= 10.001:
+            key = (_temp_acc(V1, vy, t), -_temp_ll(V1, vy, t))
+            if best_key is None or key > best_key:
+                best_key, best_T = key, t
+            t += 0.1
+        T = best_T
+    return W.tolist(), b.tolist(), T
+
+
+def fit_linear_softmax(train_X, train_y, valid_X=None, valid_y=None,
+                       restarts: int = 40, top_k: int = 5, l2: float = 0.01,
+                       dw: float = 0.0):
+    import numpy as _np
+    mu, sd = standardize(train_X if train_X else [[0.0] * len(FEATURES)])
+    Xn = _np.asarray([apply_std(x, mu, sd) for x in train_X], dtype=float)
+    Vn = _np.asarray([apply_std(x, mu, sd) for x in (valid_X or [])], dtype=float)
+    train_y = _np.asarray(train_y if train_y else [], dtype=int)
+    valid_y = _np.asarray(valid_y if valid_y else [], dtype=int)
+    nf = len(FEATURES)
+    import random as _rnd
+    scored = []
+    for restart in range(restarts):
+        _rnd.seed(restart)
+        W0 = [[_rnd.gauss(0, 0.3) for _ in range(3)] for _ in range(nf)]
+        b0 = [_rnd.gauss(0, 0.2) for _ in range(3)]
+        W, b, ll = _fit_softmax_restart(Xn, train_y, W0, b0, l2,
+                                        (0.02, 0.05, 0.15, 0.4), 6, dw)
+        if len(Vn) and len(valid_y):
+            Pv = _softmax3_proba(Vn @ W + b)
+            key = (_softmax3_acc(Pv, valid_y), -_softmax3_ll(Pv, valid_y))
+        else:
+            key = (-ll,)
+        scored.append((key, W, b))
+    scored.sort(key=lambda t: t[0], reverse=True)
+    top = scored[:max(top_k, 1)]
+    W = sum(s[1] for s in top) / len(top)
+    b = sum(s[2] for s in top) / len(top)
+    P1 = _softmax3_proba(Xn @ W + b)
+    T, best_t = 1.0, None
+    t = 0.5
+    while t <= 10.001:
+        ll = _temp_ll(P1, train_y, t)
+        if best_t is None or ll < best_t:
+            best_t, T = ll, t
+        t += 0.1
+    e = [1.0] * nf
+    return W.tolist(), b.tolist(), T, mu, sd, e
+
+
+def save_softmax_artifact(league: str, ver: str, W, b, T, mu, sd, e,
+                          train_s: set, valid_s: set, trial: int):
+    save_artifact(league, ver, {"model_type": "softmax3", "W": W, "b": b, "T": T,
+                                "mu": mu, "sd": sd, "emphasis": e, "features": FEATURES,
+                                "train_seasons": sorted(train_s), "valid": sorted(valid_s),
+                                "trials": trial, "best_trial": trial})
+
+
+def load_existing_best(league: str, ver: str, matches, train_s: set, valid_s: set, softmax: bool = False):
     """--new가 아닐 때 기존 아티팩트를 최고점으로 복원. 없으면 None."""
     p = model_path(league, ver)
     if not os.path.exists(p):
@@ -1975,10 +2882,30 @@ def load_existing_best(league: str, ver: str, matches, train_s: set, valid: str)
         art = json.load(open(p))
     except (OSError, ValueError):
         return None, None
+    if softmax:
+        if not is_softmax(art):
+            log(f"기존 아티팩트가 legacy 형식, softmax 처음부터: {p}")
+            return None, None
+        import numpy as _np
+        W = _np.asarray(art.get("W"), dtype=float)
+        b = _np.asarray(art.get("b"), dtype=float)
+        if W.shape != (len(FEATURES), 3) or b.shape != (3,):
+            log(f"기존 아티팩트 형식 불일치, 무시: {p}")
+            return None, None
+        met = eval_artifact(matches, train_s, valid_s, art)
+        vacc = met.get("valid", {}).get("acc", 0.0)
+        vll = met.get("valid", {}).get("ll", 0.0)
+        log(f"기존 best 로드(softmax): {p} valid acc={vacc:.3f} ll={vll:.4f}")
+        best = {"acc": vacc, "ll": vll, "cfg": None,
+                "W": W.tolist(), "b": b.tolist(), "T": art["T"],
+                "e": art.get("emphasis", [1.0] * len(FEATURES)),
+                "mu": art["mu"], "sd": art["sd"],
+                "trial": art.get("best_trial", 0)}
+        return best, art
     if not isinstance(art.get("weights"), list) or len(art["weights"]) != len(FEATURES):
         log(f"기존 아티팩트 형식 불일치, 무시: {p}")
         return None, None
-    met = eval_artifact(matches, train_s, valid, art)
+    met = eval_artifact(matches, train_s, valid_s, art)
     vacc = met.get("valid", {}).get("acc", 0.0)
     vll = met.get("valid", {}).get("ll", 0.0)
     log(f"기존 best 로드: {p} valid acc={vacc:.3f} ll={vll:.4f}")
@@ -1999,13 +2926,16 @@ def main():
     ap.add_argument("--tune", default="", help="조절용 시즌, 콤마 구분 (auto에서 비우면 미학습 전체)")
     ap.add_argument("--league", required=True)
     ap.add_argument("--train", default="", help="학습 시즌, 콤마 구분")
-    ap.add_argument("--valid", default="", help="검증 시즌 (단일)")
+    ap.add_argument("--valid", default="", help="검증 시즌, 콤마 구분 (비우면 미학습 전체)")
     ap.add_argument("--test", default="", help="테스트 시즌 (참고용)")
     ap.add_argument("--predict", default="", help="--mode predict일 때 대상 시즌")
     ap.add_argument("--ver", required=True)
     ap.add_argument("--fast", action="store_true", help="단발 학습 (autotune 없이 1회 fit)")
     ap.add_argument("--new", action="store_true", help="기존 아티팩트 무시하고 처음부터")
     ap.add_argument("--five", action="store_true", help="5피처(rank,power,val,form5,market) 모드 (ver 뒤에 -f5 자동 추가)")
+    ap.add_argument("--features", default="", help="임의 피처 선택, 콤마 구분 (예: rank,power,att). 지정 시 --five보다 우선")
+    ap.add_argument("--model", default="legacy", choices=["legacy", "softmax"], help="모델 구조 (softmax=3-way 직접분류)")
+    ap.add_argument("--draw-w", type=float, default=0.0, help="softmax 무승부 학습 (선발 리콜가중 + 샘플가중, 0=끄기, 예: 0.5)")
     ap.add_argument("--trials", type=int, default=20)
     ap.add_argument("--sweeps", type=int, default=6, help="tune 모드용 최대 sweep 수")
     ap.add_argument("--seq-sweeps", type=int, default=1, help="auto 모드 순차 패스 수")
@@ -2013,8 +2943,9 @@ def main():
     ap.add_argument("--max-minutes", type=float, default=0.0, help="auto 모드 시간 제한(분, 0=무제한)")
     ap.add_argument("--noise", type=float, default=0.1, help="auto 랜덤 가중치 이동폭")
     ap.add_argument("--hfa-noise", type=float, default=0.05, help="auto 랜덤 hfa 이동폭")
-    ap.add_argument("--wmin", type=float, default=-2.0)
-    ap.add_argument("--wmax", type=float, default=2.0)
+    ap.add_argument("--auto-step", type=float, default=0.0, help="auto 랜덤 격자 간격(wmin/wmax 구간 스냅, 0=연속)")
+    ap.add_argument("--wmin", type=float, default=-3.0)
+    ap.add_argument("--wmax", type=float, default=3.0)
     ap.add_argument("--log-every", type=int, default=200, help="auto 랜덤 진행 로그 간격")
     ap.add_argument("--grid-step", type=float, default=0.5, help="grid 모드 축 간격")
     ap.add_argument("--max-combos", type=int, default=0, help="grid 모드 최대 평가 수 (0=끝까지)")
@@ -2033,8 +2964,17 @@ def main():
     league, ver = args.league, args.ver
     global _LEAGUE_TAG
     _LEAGUE_TAG = league_tag(league)
-    if args.five:
+    if args.features:
+        names = [s.strip() for s in args.features.split(",") if s.strip()]
+        bad = [n for n in names if n not in FEATURES13]
+        assert bad == [] and len(names) >= 1, f"--features 오류: {bad or names} (가능: {','.join(FEATURES13)})"
+        seen = set()
+        uniq = [n for n in names if not (n in seen or seen.add(n))]
         global FEATURES, SEL
+        FEATURES = list(uniq)
+        SEL = [FEATURES13.index(n) for n in uniq]
+        log(f"피처 선택: {','.join(FEATURES)} ver={ver}")
+    elif args.five:
         FEATURES = list(FIVE)
         SEL = list(FIVE_IDX)
         if not ver.endswith("-f5"):
@@ -2045,26 +2985,36 @@ def main():
         assert args.predict, "--predict 필요"
         with open(model_path(league, ver)) as f:
             art = json.load(f)
-        w, hfa, T, d = art["weights"], art["hfa"], art["T"], art["draw_prior"]
+        T = art["T"]
         mu, sd = art.get("mu"), art.get("sd")
-        e = art.get("emphasis", [1.0] * len(w))
-        dw = art.get("draw_weights")
-        db = art.get("draw_bias", 0.0)
-        mu_d, sd_d = art.get("draw_mu"), art.get("draw_sd")
+        e = art.get("emphasis", [1.0] * len(art.get("features", [])))
         pats, tau = art.get("patterns"), art.get("pattern_tau", 0.0) or 0.0
-        cap = art.get("contrib_cap")
+        if is_softmax(art):
+            w = hfa = d = dw = db = mu_d = sd_d = cap = None
+        else:
+            w, hfa, d = art["weights"], art["hfa"], art["draw_prior"]
+            dw = art.get("draw_weights")
+            db = art.get("draw_bias", 0.0)
+            mu_d, sd_d = art.get("draw_mu"), art.get("draw_sd")
+            cap = art.get("contrib_cap")
         _, matches = load_seasons(league, [args.predict], use_cache=not args.no_cache)
         pred_s = set(args.predict.split(","))
         targets = [r for r in matches if str(r["season"]) in pred_s]
 
         def _px(r):
+            import numpy as _np
             x = row_features(r)
             if mu and sd:
                 x = apply_std(x, mu, sd)
+            xe = apply_emphasis(x, e)
+            if is_softmax(art):
+                W = _np.asarray(art["W"], dtype=float)
+                b = _np.asarray(art["b"], dtype=float)
+                return apply_temp(blend_proba(list(_softmax3_proba(
+                    (_np.asarray(xe, dtype=float) @ W + b)[None, :])[0]), xe, pats, tau), T)
             xd = draw_row_features(r)
             if mu_d and sd_d:
                 xd = [(a - b) / s for a, b, s in zip(xd, mu_d, sd_d)]
-            xe = apply_emphasis(x, e)
             return apply_temp(blend_proba(full_proba(xe, w, hfa, d, dw, db, xd, cap), xe, pats, tau), T)
         probas = [_px(r) for r in targets]
         n, hit = len(targets), 0
@@ -2081,6 +3031,9 @@ def main():
 
     if args.mode == "tune":
         assert args.tune and args.ver, "--tune과 --ver 필요"
+        if args.model == "softmax":
+            log("tune 모드는 legacy 전용 (softmax는 auto/grid 사용)")
+            return
         tune_s = {s.strip() for s in args.tune.split(",") if s.strip()}
         tune_weights(league, ver, tune_s, args.sweeps, use_cache=not args.no_cache)
         return
@@ -2091,19 +3044,47 @@ def main():
         drawfit(league, ver, extra_s, use_cache=not args.no_cache)
         return
 
+    if args.model == "legacy" and args.mode in ("auto", "grid"):
+        try:
+            _chk = json.load(open(model_path(league, ver)))
+            if is_softmax(_chk):
+                log(f"softmax 아티팩트에 legacy {args.mode} 불가: --model softmax로 실행")
+                return
+        except (OSError, ValueError):
+            pass
+
     if args.mode == "auto":
         assert args.ver, "--ver 필요"
         tune_s = {s.strip() for s in (args.tune or "").split(",") if s.strip()}
+        if args.model == "softmax":
+            auto_tune_softmax(league, ver, tune_s, seq_sweeps=args.seq_sweeps,
+                              random_rounds=args.random_rounds, max_minutes=args.max_minutes,
+                              noise=args.noise, hfa_noise=args.hfa_noise,
+                              wmin=args.wmin, wmax=args.wmax, log_every=args.log_every,
+                              seed=args.seed, fresh=args.new, use_cache=not args.no_cache,
+                              draw_w=args.draw_w, grid_step=args.auto_step)
+            return
         auto_tune(league, ver, tune_s, seq_sweeps=args.seq_sweeps,
                   random_rounds=args.random_rounds, max_minutes=args.max_minutes,
                   noise=args.noise, hfa_noise=args.hfa_noise,
                   wmin=args.wmin, wmax=args.wmax, log_every=args.log_every,
-                  seed=args.seed, fresh=args.new, use_cache=not args.no_cache)
+                  seed=args.seed, fresh=args.new, use_cache=not args.no_cache,
+                  grid_step=args.auto_step)
         return
 
     if args.mode == "grid":
         assert args.ver, "--ver 필요"
         tune_s = {s.strip() for s in (args.tune or "").split(",") if s.strip()}
+        if args.model == "softmax":
+            grid_search_softmax(league, ver, tune_s, grid_step=args.grid_step,
+                                max_combos=args.max_combos, max_minutes=args.max_minutes,
+                                ckpt_every=args.ckpt_every, log_every=args.log_every,
+                                wmin=args.wmin, wmax=args.wmax,
+                                batch=args.batch, log_secs=args.log_secs,
+                                split=args.split, part=args.part,
+                                fresh=args.new, use_cache=not args.no_cache,
+                                jobs=args.jobs, draw_w=args.draw_w)
+            return
         grid_search(league, ver, tune_s, grid_step=args.grid_step,
                     max_combos=args.max_combos, max_minutes=args.max_minutes,
                     ckpt_every=args.ckpt_every, log_every=args.log_every,
@@ -2114,27 +3095,46 @@ def main():
                     jobs=args.jobs)
         return
 
-    assert args.train and args.valid, "--train과 --valid 필요"
+    assert args.train, "--train 필요"
     train_s = {s.strip() for s in args.train.split(",") if s.strip()}
-    valid = args.valid.strip()
-    if valid in train_s and not (len(train_s) == 1):
+    raw_valid = args.valid.strip()
+    if raw_valid == "" or raw_valid.lower() in ("auto", "all", "*"):
+        valid_s = all_nontrain_seasons(league, train_s)
+        log(f"검증시즌 자동선택(미학습): {sorted(valid_s)}")
+    else:
+        valid_s = {s.strip() for s in raw_valid.split(",") if s.strip()}
+    if not valid_s:
+        log("검증시즌 없음 (미학습 시즌이 비어있음). 종료")
+        sys.exit(2)
+    overlap = valid_s & train_s
+    if overlap and train_s != valid_s:
         log("테스트 시즌이 학습시즌과 겹침. 종료")
         sys.exit(2)
+    if args.model == "softmax" and not args.new and os.path.exists(model_path(league, ver)):
+        try:
+            _ex = json.load(open(model_path(league, ver)))
+        except (OSError, ValueError):
+            _ex = None
+        if isinstance(_ex, dict) and not is_softmax(_ex):
+            log(f"버전 충돌: 기존 legacy 아티팩트 존재 ({model_path(league, ver)}). 다른 ver 또는 --new 사용")
+            return
 
-    _, rows = load_seasons(league, sorted(train_s | ({valid} if valid else set()) | ({args.test} if args.test else set())),
+    _, rows = load_seasons(league, sorted(train_s | valid_s | ({args.test} if args.test else set())),
                            use_cache=not args.no_cache)
 
     # ---- 단발 모드
     if args.fast:
-        artifact, metrics = train_model(rows, train_s, valid, ver, args.test)
+        use_sm = args.model == "softmax"
+        artifact, metrics = (train_model_softmax(rows, train_s, valid_s, args.draw_w)
+                             if use_sm else train_model(rows, train_s, valid_s, ver, args.test))
         for split in ("train", "valid", "test"):
             m = metrics.get(split, {})
             if m.get("n"):
-                log(f"[{split}] n={m['n']} acc={m['acc']:.3f} logloss={m['ll']:.3f}")
+                log(f"[{split}] n={m['n']} acc={m['acc']:.3f} logloss={m['ll']:.4f}")
         if not args.new:
             try:
                 old = json.load(open(model_path(league, ver)))
-                old_met = eval_artifact(rows, train_s, valid, old)
+                old_met = eval_artifact(rows, train_s, valid_s, old)
                 new_acc = metrics.get("valid", {}).get("acc", 0.0)
                 old_acc = old_met.get("valid", {}).get("acc", 0.0)
                 log(f"기존 {ver}: valid acc={old_acc:.3f} / 신규: valid acc={new_acc:.3f}")
@@ -2144,8 +3144,11 @@ def main():
             except FileNotFoundError:
                 pass
         save_artifact(league, ver, artifact)
-        w = artifact["weights"]
-        log(f"FINAL W {{{', '.join(f'{n}:{v:+.3f}' for n, v in zip(FEATURES, w))}}} T={artifact['T']}")
+        if use_sm:
+            log(f"FINAL softmax b={[f'{v:+.3f}' for v in artifact['b']]} T={artifact['T']}")
+        else:
+            w = artifact["weights"]
+            log(f"FINAL W {{{', '.join(f'{n}:{v:+.3f}' for n, v in zip(FEATURES, w))}}} T={artifact['T']}")
         return
 
     # ---- autotune 모드
@@ -2165,23 +3168,26 @@ def main():
     ty = labels
     vX, vy = [], []
     for r in rows:
-        if str(r.get("season")) != valid:
+        if str(r.get("season")) not in valid_s:
             continue
         hs, aws = parse_score(r.get("home_score")), parse_score(r.get("away_score"))
         if hs is None or aws is None:
             continue
         vX.append(apply_std(row_features(r), mu, sd))
         vy.append(0 if hs > aws else (1 if hs == aws else 2))
-    log(f"league={league} train={sorted(train_s)}({len(Xn)}) valid={valid}({len(vX)}) ver={ver}")
+    log(f"league={league} train={sorted(train_s)}({len(Xn)}) valid={sorted(valid_s)}({len(vX)}) ver={ver}")
     log(f"trials={args.trials} jobs={args.jobs} seed={args.seed} mode={'new' if args.new else 'resume'}")
+    use_sm = args.model == "softmax"
+    if use_sm:
+        log("모델 구조: softmax 3-way 직접분류")
 
-    best, old_art = (None, None) if args.new else load_existing_best(league, ver, rows, train_s, valid)
+    best, old_art = (None, None) if args.new else load_existing_best(league, ver, rows, train_s, valid_s, softmax=use_sm)
     if args.new:
         log("--new: 기존 무시, 처음부터 탐색")
         start_trial = 0
     elif best:
         start_trial = int((old_art or {}).get("trials", 0) or 0)
-        log(f"이어하기: best_acc={best['acc']:.3f} trial {start_trial}부터 계속")
+        log(f"계속학습: best_acc={best['acc']:.3f} trial {start_trial}부터 계속")
     else:
         log("기존 없음: 처음부터 탐색")
         start_trial = 0
@@ -2199,13 +3205,28 @@ def main():
         _, ll = metrics_of(w_, hfa_, T_, d, Xe, ty)
         return 0.0, ll
 
+    def ev_metrics_sm(W_, b_, T_):
+        import numpy as _np
+        Wm = _np.asarray(W_, dtype=float)
+        bm = _np.asarray(b_, dtype=float)
+        if len(vX) and len(vy):
+            Pv = _softmax3_proba(_np.asarray(vX, dtype=float) @ Wm + bm)
+            rec, prec = _sm_draw_stats(Pv, vy)
+            return _temp_acc(Pv, vy, T_), _temp_ll(Pv, vy, T_), rec, prec
+        Pt = _softmax3_proba(_np.asarray(Xn, dtype=float) @ Wm + bm)
+        return 0.0, _temp_ll(Pt, ty, T_), 0.0, 0.0
+
     trial_ids = list(range(start_trial + 1, start_trial + args.trials + 1))
     cfgs = [sample_cfg(rng) for _ in trial_ids]
     for c in cfgs:
         c["no_halving"] = args.no_halving
+        c["draw_w"] = args.draw_w
 
     from functools import partial
-    _run = partial(fit_trial, Xn, ty, vX, vy, d, mu, sd)
+    if use_sm:
+        _run = partial(fit_trial_softmax, Xn, ty, vX, vy)
+    else:
+        _run = partial(fit_trial, Xn, ty, vX, vy, d, mu, sd)
     log(f"trials 계산 시작: {len(trial_ids)}건 jobs={args.jobs}")
     results: list = [None] * len(cfgs)
     if args.jobs > 1:
@@ -2223,44 +3244,69 @@ def main():
             log(f"trial {trial_ids[i]} 계산 시작 ({i + 1}/{len(cfgs)})")
             results[i] = _run(c)
 
-    for t, cfg, (w, hfa, T, e) in zip(trial_ids, cfgs, results):
-        acc, ll = ev_metrics(w, hfa, T, e)
-        key = (acc, -ll)
+    for t, cfg, res in zip(trial_ids, cfgs, results):
+        if use_sm:
+            W_, b_, T_ = res
+            acc, ll, rec, prec = ev_metrics_sm(W_, b_, T_)
+            key = (_sel_bonus(acc, rec, args.draw_w), -ll)
+        else:
+            w, hfa, T, e = res
+            acc, ll = ev_metrics(w, hfa, T, e)
+            rec, prec = 0.0, 0.0
+            key = (acc, -ll)
         cur_key = (best["acc"], -best["ll"]) if best else None
         tag = ""
         if cur_key is None or key > cur_key:
             if len(vX) and len(vy):
                 import numpy as _np
-                _Vn = _np.asarray(vX, dtype=float).reshape(-1, len(FEATURES))
-                _vy = _np.asarray(vy, dtype=int)
-                _nw = len(FEATURES)
-                null_key = (batch_acc(_Vn, _vy, [0.0] * _nw, 0.0, d),
-                            -batch_ll(_Vn, _vy, [0.0] * _nw, 0.0, d))
+                if use_sm:
+                    _Vn = _np.asarray(vX, dtype=float)
+                    _Pn = _softmax3_proba(_Vn @ _np.zeros((len(FEATURES), 3)))
+                    _vy = _np.asarray(vy, dtype=int)
+                    null_key = (_softmax3_acc(_Pn, _vy), -_softmax3_ll(_Pn, _vy))
+                else:
+                    _Vn = _np.asarray(vX, dtype=float).reshape(-1, len(FEATURES))
+                    _vy = _np.asarray(vy, dtype=int)
+                    _nw = len(FEATURES)
+                    null_key = (batch_acc(_Vn, _vy, [0.0] * _nw, 0.0, d),
+                                -batch_ll(_Vn, _vy, [0.0] * _nw, 0.0, d))
                 if null_key > key:
                     log(f"⚠ 경고: null 기준(acc={null_key[0]:.3f} ll={-null_key[1]:.4f})보다 낮음 "
                         f"(acc={acc:.3f} ll={ll:.4f}) — 저장하되 서빙 주의")
-            best = {"acc": acc, "ll": ll, "cfg": cfg,
-                    "weights": w, "hfa": hfa, "T": T, "e": e,
-                    "draw_prior": d, "mu": mu, "sd": sd, "trial": t}
-            save_artifact(league, ver, {"weights": w, "hfa": hfa, "T": T, "draw_prior": d,
-                                        "mu": mu, "sd": sd, "emphasis": e, "features": FEATURES,
-                                        "train_seasons": sorted(train_s),
-                                        "valid": valid, "trials": t, "best_trial": t})
+            if use_sm:
+                best = {"acc": acc, "ll": ll, "cfg": cfg,
+                        "W": W_, "b": b_, "T": T_, "e": [1.0] * len(FEATURES),
+                        "mu": mu, "sd": sd, "trial": t}
+                save_softmax_artifact(league, ver, W_, b_, T_, mu, sd,
+                                      [1.0] * len(FEATURES), train_s, valid_s, t)
+            else:
+                best = {"acc": acc, "ll": ll, "cfg": cfg,
+                        "weights": w, "hfa": hfa, "T": T, "e": e,
+                        "draw_prior": d, "mu": mu, "sd": sd, "trial": t}
+                save_artifact(league, ver, {"weights": w, "hfa": hfa, "T": T, "draw_prior": d,
+                                            "mu": mu, "sd": sd, "emphasis": e, "features": FEATURES,
+                                            "train_seasons": sorted(train_s),
+                                            "valid": sorted(valid_s), "trials": t, "best_trial": t})
             tag = " ★ NEW BEST 저장"
             no_improve = 0
         else:
             no_improve += 1
         done_el = time.time() - _START
         eta = max(0.0, done_el / t * (trial_ids[-1] - t))
-        log(f"[trial {t}/{trial_ids[-1]}] valid acc={acc:.3f} ll={ll:.4f} best={best['acc']:.3f} eta={eta / 60:.1f}m cfg={json.dumps(cfg)}{tag}")
+        reclog = f" rec={rec:.3f}/{prec:.3f}" if use_sm else ""
+        log(f"[trial {t}/{trial_ids[-1]}] valid acc={acc:.3f} ll={ll:.4f}{reclog} best={best['acc']:.3f} eta={eta / 60:.1f}m cfg={json.dumps(cfg)}{tag}")
         if args.patience > 0 and no_improve >= args.patience:
             log(f"{args.patience}회 연속 미개선 → 조기 종료")
             break
     Xe_best = [apply_emphasis(x, best["e"]) for x in Xn]
     Ve_best = [apply_emphasis(x, best["e"]) for x in vX]
-    contrib_cap, best_T = tune_contrib(Xe_best, ty, Ve_best, vy, best["weights"], best["hfa"], d)
-    best["T"] = best_T
-    log(f"contrib_cap={contrib_cap} T={best_T}")
+    if use_sm:
+        contrib_cap, best_T = None, best["T"]
+        log(f"contrib_cap={contrib_cap} T={best_T}")
+    else:
+        contrib_cap, best_T = tune_contrib(Xe_best, ty, Ve_best, vy, best["weights"], best["hfa"], d)
+        best["T"] = best_T
+        log(f"contrib_cap={contrib_cap} T={best_T}")
     pats, tau, pstats = build_patterns(feats, labels, mu, sd, best["e"])
     log(f"patterns: home/draw/away x 5, tau={tau:.3f}")
     try:

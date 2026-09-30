@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import type { SoccerMatch, League } from "@/lib/queries";
-import { applyTemp, blendProbs, cappedDot, drawFeatures, patternProbs, rowFeatures, selectFeatures, sigmoid } from "@/lib/permatch-math";
+import { applyTemp, blendProbs, cappedDot, drawFeatures, patternProbs, rowFeatures, selectFeatures, sigmoid, softmaxLogits, softmaxProbs } from "@/lib/permatch-math";
 import type { PermatchArtifact } from "@/lib/predict";
 import { SoccerMatchesTable, COLUMNS, CORE_COLUMNS, FIELD_GROUPS, SINGLE_COLUMNS, type ColumnId } from "@/components/data/SoccerMatchesTable";
 import { EmptyState } from "@/components/ui/Badge";
@@ -32,21 +32,29 @@ function parseScoreLocal(v: string | null | undefined): number | null {
 
 function predictLocal(m: SoccerMatch, art: PermatchArtifact, ver: string) {
   try {
-    const e = art.emphasis ?? new Array(art.weights.length).fill(1);
+    const e = art.emphasis ?? new Array(art.features?.length ?? art.mu.length).fill(1);
     const rf = selectFeatures(rowFeatures(m), art.features);
     const x = rf.map((v, i) => (v - art.mu[i]) / art.sd[i]).map((v, i) => v * (e[i] ?? 1));
-    const s = cappedDot(x, art.weights, art.hfa, art.contrib_cap ?? null);
-    const ph = sigmoid(s);
-    let dd: number;
-    if (art.draw_weights && art.draw_mu && art.draw_sd) {
-      const df = drawFeatures(m);
-      const xd = art.draw_mu.map((mu, i) => (df[i] - mu) / (art.draw_sd as number[])[i]);
-      const ds = xd.reduce((a, v, i) => a + v * (art.draw_weights as number[])[i], 0) + (art.draw_bias ?? 0);
-      dd = sigmoid(ds);
+    let lin: number[];
+    if (art.model_type === "softmax3" && art.W && art.b) {
+      lin = softmaxProbs(softmaxLogits(x, art.W, art.b));
+    } else if (art.weights && art.hfa != null && art.draw_prior != null) {
+      const s = cappedDot(x, art.weights, art.hfa, art.contrib_cap ?? null);
+      const ph = sigmoid(s);
+      let dd: number;
+      if (art.draw_weights && art.draw_mu && art.draw_sd) {
+        const df = drawFeatures(m);
+        const xd = art.draw_mu.map((mu, i) => (df[i] - mu) / (art.draw_sd as number[])[i]);
+        const ds = xd.reduce((a, v, i) => a + v * (art.draw_weights as number[])[i], 0) + (art.draw_bias ?? 0);
+        dd = sigmoid(ds);
+      } else {
+        dd = art.draw_prior;
+      }
+      lin = [ph * (1 - dd), dd, (1 - ph) * (1 - dd)];
     } else {
-      dd = art.draw_prior;
+      return null;
     }
-    const p = applyTemp(blendProbs([ph * (1 - dd), dd, (1 - ph) * (1 - dd)], x, art.patterns, art.pattern_tau ?? 0), art.T);
+    const p = applyTemp(blendProbs(lin, x, art.patterns, art.pattern_tau ?? 0), art.T);
     if (p.some((v) => !Number.isFinite(v))) return null;
     return { home: p[0], draw: p[1], away: p[2], ver };
   } catch {
@@ -106,8 +114,11 @@ export function DashboardExplorer() {
   type ModelDetail = {
     model_type: string;
     detail: {
+      model_type?: string;
       features: string[];
-      weights: number[];
+      weights?: number[];
+      W?: number[][];
+      b?: number[];
       emphasis: number[] | null;
       hfa: number | null;
       T: number | null;
@@ -121,7 +132,7 @@ export function DashboardExplorer() {
       patterns: { home: number[][]; draw: number[][]; away: number[][] } | null;
       contrib_cap: number | null;
       train_seasons: string[];
-      valid: string | null;
+      valid: string | string[] | null;
       trials: number | null;
       pattern_tau: number | null;
       pattern_stats: Record<string, { rank: number; freq: number; acc: number }[]> | null;
@@ -600,6 +611,10 @@ export function DashboardExplorer() {
     }
     const d = modelDetail?.detail;
     if (!d || !d.mu || !d.sd) return;
+    if (!d.weights || (d as { model_type?: string }).model_type === "softmax3") {
+      setError("softmax 구조는 직접미세조정 미지원");
+      return;
+    }
     const train = new Set(d.train_seasons);
     const scored = rawMatches.filter((m) => {
       if (!checked.includes(String(m.season)) || train.has(String(m.season))) return false;
@@ -680,8 +695,8 @@ export function DashboardExplorer() {
     setTuneInfo({ sweeps, base, best, stale });
     previewWith(w, hfa);
     const order = (wOrder && wOrder.length === nw ? [...wOrder] : [...Array(nw).keys()]).concat(-1);
-    const WMIN = -2;
-    const WMAX = 2;
+  const WMIN = -3;
+  const WMAX = 3;
     const clamp4 = (v: number) => Math.min(WMAX, Math.max(WMIN, Math.round(v * 10000) / 10000));
     while (tuningRef.current) {
       let improved = false;
@@ -874,6 +889,10 @@ export function DashboardExplorer() {
     }
     const d = modelDetail?.detail;
     if (!d || !league || !selVer) return;
+    if (!d.weights || (d as { model_type?: string }).model_type === "softmax3") {
+      setError("softmax 구조는 직접미세조정 미지원");
+      return;
+    }
     const train = new Set(d.train_seasons);
     const tune = [...new Set(rawMatches.filter((m) => {
       if (!checked.includes(String(m.season)) || train.has(String(m.season))) return false;
@@ -1213,11 +1232,18 @@ export function DashboardExplorer() {
           </button>
           {modelDetail?.model_type === "permatch" && modelDetail.detail && (() => {
             const d = modelDetail.detail;
-            const eff = gridding && gridLive ? gridLive.weights : (tweaked ?? d.weights);
+            const isSm = (d as { model_type?: string }).model_type === "softmax3";
+            const smW = (d as { W?: number[][] }).W;
+            const CLASS_KO = ["홈", "무", "원"];
+            const eff = !isSm && gridding && gridLive ? gridLive.weights : (tweaked ?? d.weights);
             const orderIdx = wOrder ?? d.features.map((_, i) => i);
-            const rows = orderIdx
-              .map((i) => ({ name: d.features[i], w: eff[i] ?? 0, fi: i }))
-              .filter((r) => r.name !== undefined && Number.isFinite(r.w));
+            const rows = isSm && smW
+              ? d.features.flatMap((nm, i) => (smW[i] ?? []).map((wv, c) => ({
+                  name: `${nm}/${CLASS_KO[c] ?? c}`, w: wv, fi: -1,
+                })))
+              : orderIdx
+                .map((i) => ({ name: d.features[i], w: eff?.[i] ?? 0, fi: i }))
+                .filter((r) => r.name !== undefined && Number.isFinite(r.w));
             if (rows.length === 0) return null;
             const max = Math.max(...rows.map((r) => Math.abs(r.w)), 1e-9);
             return (
@@ -1270,7 +1296,8 @@ export function DashboardExplorer() {
                           }
                         }}
                         aria-label={`${r.name} 감소`}
-                        className="w-5 shrink-0 touch-none rounded border border-zinc-300 text-zinc-600 select-none hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                        disabled={isSm}
+                        className="w-5 shrink-0 touch-none rounded border border-zinc-300 text-zinc-600 select-none hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
                       >
                         −
                       </button>
@@ -1291,13 +1318,19 @@ export function DashboardExplorer() {
                           }
                         }}
                         aria-label={`${r.name} 증가`}
-                        className="w-5 shrink-0 touch-none rounded border border-zinc-300 text-zinc-600 select-none hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+                        disabled={isSm}
+                        className="w-5 shrink-0 touch-none rounded border border-zinc-300 text-zinc-600 select-none hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
                       >
                         +
                       </button>
                     </div>
                   ))}
                 </div>
+                {isSm && (
+                  <p className="mt-1 text-[11px] text-zinc-500">
+                    softmax 구조: 홈/무/원 3열 표시 · 직접미세조정 미지원 (예측·예측율은 정상)
+                  </p>
+                )}
                 {curOverall != null && (
                   <p className="mt-1 text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
                     예측율 {(curOverall * 100).toFixed(1)}%
@@ -1320,8 +1353,8 @@ export function DashboardExplorer() {
                 <div className="mt-1.5 flex gap-1.5">
                   <button
                     onClick={autoTune}
-                    disabled={gridding}
-                    title="미학습 시즌 적중률이 오르면 자동 저장. 다시 누르면 중지"
+                    disabled={gridding || isSm}
+                    title={isSm ? "softmax 구조 미지원" : "미학습 시즌 적중률이 오르면 자동 저장. 다시 누르면 중지"}
                     className={`flex-1 rounded-lg px-2 py-1 text-[11px] text-white hover:brightness-110 disabled:opacity-40 dark:text-black ${tuning ? "bg-red-500 dark:bg-red-400" : "bg-green-600 dark:bg-green-500"
                       }`}
                   >
@@ -1329,8 +1362,8 @@ export function DashboardExplorer() {
                   </button>
                   <button
                     onClick={gridTune}
-                    disabled={tuning}
-                    title="전수탐색으로 가중치를 탐색. 다시 누르면 중지"
+                    disabled={tuning || isSm}
+                    title={isSm ? "softmax 구조 미지원" : "전수탐색으로 가중치를 탐색. 다시 누르면 중지"}
                     className={`flex-1 rounded-lg px-2 py-1 text-[11px] text-white hover:brightness-110 disabled:opacity-40 dark:text-black ${gridding ? "bg-red-500 dark:bg-red-400" : "bg-purple-600 dark:bg-purple-400"
                       }`}
                   >

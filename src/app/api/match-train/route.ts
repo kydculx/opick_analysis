@@ -12,7 +12,6 @@ export async function POST(req: Request) {
   const p = (n: number) => String(n).padStart(2, "0");
   const ver = `match-${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())}_${p(now.getHours())}-${p(now.getMinutes())}-${p(now.getSeconds())}`;
   const sorted = [...new Set(seasons)].sort() as string[];
-  const last = sorted[sorted.length - 1];
   const job = startJob({
     kind: "train",
     league,
@@ -22,7 +21,7 @@ export async function POST(req: Request) {
     argv: [
       "--league", league,
       "--train", sorted.join(","),
-      "--valid", last,
+      "--valid", "auto",
       "--ver", ver,
       "--fast",
     ],
