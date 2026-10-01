@@ -1,12 +1,9 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { SoccerMatch } from "@/lib/queries";
-import { applyTemp, blendProbs, cappedDot, drawFeatures, rowFeatures, selectFeatures, sigmoid, softmaxLogits, softmaxProbs } from "./permatch-math";
+import { applyTemp, blendProbs, cappedDot, drawFeatures, rowFeatures, selectFeatures, sigmoid } from "./permatch-math";
 
 export type PermatchArtifact = {
-  model_type?: string;
   weights?: number[];
-  W?: number[][];
-  b?: number[];
   hfa?: number;
   T: number;
   draw_prior?: number;
@@ -30,14 +27,9 @@ export function loadArtifact(league: string, ver: string): PermatchArtifact | nu
     const p = `${process.cwd()}/ml/permatch/${league}_${ver}.json`;
     if (!existsSync(p)) return null;
     const a = JSON.parse(readFileSync(p, "utf-8"));
+    if (!Array.isArray(a.weights) || (a.weights as unknown[]).length === 0) return null;
     if (!Array.isArray(a.mu) || !Array.isArray(a.sd)) return null;
-    if (a.model_type === "softmax3") {
-      if (!Array.isArray(a.W) || !Array.isArray(a.b) || a.b.length !== 3) return null;
-      const n = a.features?.length ?? a.mu.length;
-      if (a.W.length !== n || a.mu.length !== n || a.sd.length !== n) return null;
-      return a as PermatchArtifact;
-    }
-    const n = Array.isArray(a.weights) ? a.weights.length : 0;
+    const n = (a.weights as unknown[]).length;
     if (n === 0 || a.mu.length !== n || a.sd.length !== n) return null;
     if (Array.isArray(a.features) && a.features.length !== n) return null;
     return a as PermatchArtifact;
@@ -55,9 +47,7 @@ export function predictForRow(m: SoccerMatch, art: PermatchArtifact, ver: string
     const e = art.emphasis ?? new Array(art.features?.length ?? art.mu.length).fill(1);
     const x = std(selectFeatures(rowFeatures(m), art.features), art.mu, art.sd).map((v, i) => v * e[i]);
     let lin: number[];
-    if (art.model_type === "softmax3" && art.W && art.b) {
-      lin = softmaxProbs(softmaxLogits(x, art.W, art.b));
-    } else if (art.weights && art.hfa != null && art.draw_prior != null) {
+    if (art.weights && art.hfa != null && art.draw_prior != null) {
       const s = cappedDot(x, art.weights, art.hfa, art.contrib_cap ?? null);
       const ph = sigmoid(s);
       let dd: number;

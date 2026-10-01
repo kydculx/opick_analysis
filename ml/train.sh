@@ -130,9 +130,6 @@ run_permatch() {
   [ -z "$FEATS" ] && FEATS="$ALL_FEATS"
   VER=$(make_ver "$TRAIN" "$FEATS")
   case "$extra" in
-    *--model*softmax*) VER="${VER}-s3" ;;
-  esac
-  case "$extra" in
     *--features*) echo "→ permatch autotune: [$(league_short "$league")] train=[$TRAIN] valid=[미학습전체] ver=$VER feats=[$FEATS] trials=$trials" ;;
     *) echo "→ permatch autotune: [$(league_short "$league")] train=[$TRAIN] valid=[미학습전체] ver=$VER trials=$trials $extra" ;;
   esac

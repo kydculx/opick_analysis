@@ -9,7 +9,7 @@ function diskVersions(league: string): { ver: string; model_type: string }[] {
   const out: { ver: string; model_type: string }[] = [];
   for (const f of readdirSync(dir)) {
     if (!f.startsWith(prefix) || !f.endsWith(".json")) continue;
-    if (f.includes(".grid")) continue;
+    if (f.endsWith(".grid.json") || f.endsWith(".live.json") || f.endsWith(".auto.json") || f.endsWith(".whist.json")) continue;
     out.push({ ver: f.slice(prefix.length, -5), model_type: "permatch" });
   }
   return out;

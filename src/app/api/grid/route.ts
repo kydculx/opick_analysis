@@ -54,6 +54,18 @@ export async function POST(req: Request) {
   }
   const five = body.five === true;
   const argv = ["--mode", "grid", "--league", league, "--ver", ver, "--tune", tune.join(",")];
+  try {
+    const art = JSON.parse(
+      readFileSync(join(process.cwd(), "ml", "permatch", `${league}_${gridVer(ver, five)}.json`), "utf-8")
+    ) as { features?: unknown };
+    if (Array.isArray(art.features) && art.features.length > 0) {
+      const names = (art.features as unknown[]).filter(
+        (f): f is string => typeof f === "string" && f.length > 0
+      );
+      if (names.length > 0 && names.length !== 13) argv.push("--features", names.join(","));
+    }
+  } catch {
+  }
   const step = Number(body.grid_step);
   if (Number.isFinite(step) && step > 0) argv.push("--grid-step", String(step));
   if (five) argv.push("--five");

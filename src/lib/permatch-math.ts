@@ -115,17 +115,6 @@ export function cappedDot(x: number[], w: number[], hfa: number, cap: number | n
   return x.reduce((a, v, i) => a + cap * Math.tanh((v * w[i]) / (cap as number)), hfa);
 }
 
-export function softmaxLogits(x: number[], W: number[][], b: number[]): number[] {
-  return [0, 1, 2].map((c) => x.reduce((a, v, i) => a + v * (W[i]?.[c] ?? 0), b[c] ?? 0));
-}
-
-export function softmaxProbs(logits: number[]): number[] {
-  const mx = Math.max(...logits);
-  const ex = logits.map((v) => Math.exp(Math.max(-30, Math.min(30, v - mx))));
-  const s = ex.reduce((a, v) => a + v, 0);
-  return ex.map((v) => v / s);
-}
-
 export function applyTemp(p: number[], T: number): number[] {
   if (T === 1) return p;
   const L = p.map((v) => Math.log(Math.max(v, 1e-9)) / T);

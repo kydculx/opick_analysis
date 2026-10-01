@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import type { SoccerMatch, League } from "@/lib/queries";
-import { applyTemp, blendProbs, cappedDot, drawFeatures, patternProbs, rowFeatures, selectFeatures, sigmoid, softmaxLogits, softmaxProbs } from "@/lib/permatch-math";
+import { ALL_FEATURES, applyTemp, blendProbs, cappedDot, drawFeatures, patternProbs, rowFeatures, selectFeatures, sigmoid } from "@/lib/permatch-math";
 import type { PermatchArtifact } from "@/lib/predict";
 import { SoccerMatchesTable, COLUMNS, CORE_COLUMNS, FIELD_GROUPS, SINGLE_COLUMNS, type ColumnId } from "@/components/data/SoccerMatchesTable";
 import { EmptyState } from "@/components/ui/Badge";
@@ -36,9 +36,7 @@ function predictLocal(m: SoccerMatch, art: PermatchArtifact, ver: string) {
     const rf = selectFeatures(rowFeatures(m), art.features);
     const x = rf.map((v, i) => (v - art.mu[i]) / art.sd[i]).map((v, i) => v * (e[i] ?? 1));
     let lin: number[];
-    if (art.model_type === "softmax3" && art.W && art.b) {
-      lin = softmaxProbs(softmaxLogits(x, art.W, art.b));
-    } else if (art.weights && art.hfa != null && art.draw_prior != null) {
+    if (art.weights && art.hfa != null && art.draw_prior != null) {
       const s = cappedDot(x, art.weights, art.hfa, art.contrib_cap ?? null);
       const ph = sigmoid(s);
       let dd: number;
@@ -67,7 +65,8 @@ export function DashboardExplorer() {
   const [league, setLeague] = useState("");
   const [seasons, setSeasons] = useState<string[]>([]);
   const [checked, setChecked] = useState<string[]>([]);
-  const [training, setTraining] = useState<string[]>([]);
+  const [trainCount, setTrainCount] = useState("6");
+  const [featSel, setFeatSel] = useState<string[]>([...ALL_FEATURES]);
   const [matches, setMatches] = useState<SoccerMatch[]>([]);
   const [hiddenCols, setHiddenCols] = useState<ColumnId[]>([]);
   const [loadingLeagues, setLoadingLeagues] = useState(true);
@@ -80,30 +79,6 @@ export function DashboardExplorer() {
   const [predMap, setPredMap] = useState<Record<string, PredMapEntry>>({});
   const rawCacheRef = useRef<Record<string, SoccerMatch[]>>({});
   const tweakedRef = useRef<number[] | null>(null);
-  const holdTimer = useRef<{ t: ReturnType<typeof setTimeout> | null; i: ReturnType<typeof setInterval> | null }>({ t: null, i: null });
-
-  function stopHold() {
-    if (holdTimer.current.t) clearTimeout(holdTimer.current.t);
-    if (holdTimer.current.i) clearInterval(holdTimer.current.i);
-    holdTimer.current = { t: null, i: null };
-  }
-
-  function startHold(fi: number, dir: 1 | -1) {
-    stopHold();
-    nudge(fi, dir);
-    holdTimer.current.t = setTimeout(() => {
-      holdTimer.current.i = setInterval(() => nudge(fi, dir), 120);
-    }, 400);
-  }
-
-  useEffect(() => {
-    window.addEventListener("pointerup", stopHold);
-    window.addEventListener("pointercancel", stopHold);
-    return () => {
-      window.removeEventListener("pointerup", stopHold);
-      window.removeEventListener("pointercancel", stopHold);
-    };
-  }, []);
   const predCacheRef = useRef<Record<string, Record<string, PredMapEntry>>>({});
   const accCacheRef = useRef<Record<string, AccuracyMap>>({});
   const baseMapRef = useRef<AccuracyMap | null>(null);
@@ -139,7 +114,6 @@ export function DashboardExplorer() {
     } | null;
   };
   const [modelDetail, setModelDetail] = useState<ModelDetail | null>(null);
-  const [tweakStep, setTweakStep] = useState(0.01);
   const [tweaked, setTweaked] = useState<number[] | null>(null);
   const [wOrder, setWOrder] = useState<number[] | null>(null);
   const tuningRef = useRef(false);
@@ -184,7 +158,6 @@ export function DashboardExplorer() {
     setLeague(lg);
     setSeasons([]);
     setChecked([]);
-    setTraining([]);
     setTrainState("idle");
     setApplyState("idle");
     setAppliedVer("");
@@ -217,7 +190,6 @@ export function DashboardExplorer() {
     const gen = ++genRef.current;
     setLoadingSeasons(true);
     setChecked([]);
-    setTraining([]);
     setTrainState("idle");
     setApplyState("idle");
     setAppliedVer("");
@@ -358,27 +330,8 @@ export function DashboardExplorer() {
     );
   }, [rawMatches, checked, predMap]);
 
-  function accLabel(s: string): string {
-    if (applyState !== "done" || !checked.includes(s)) return "";
-    const a = accuracy[s];
-    if (!a || a.acc == null) return "";
-    return ` (${Math.round(a.acc * 100)}%)`;
-  }
-
   function toggleColumn(id: ColumnId) {
     setHiddenCols((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  }
-
-  function moveToTraining(s: string) {
-    setTraining((prev) => (prev.includes(s) ? prev : [...prev, s]));
-    setChecked((prev) => prev.filter((x) => x !== s));
-    setTrainState("idle");
-  }
-
-  function moveToView(s: string) {
-    setTraining((prev) => prev.filter((x) => x !== s));
-    setChecked((prev) => (prev.includes(s) ? prev : [...prev, s]));
-    setTrainState("idle");
   }
 
   async function pollJob(base: string, jobId: string): Promise<"done" | "error"> {
@@ -415,6 +368,10 @@ export function DashboardExplorer() {
 
   async function handleTrain() {
     if (trainingOrdered.length === 0 || trainState === "running") return;
+    if (featSel.length === 0) {
+      setError("피처를 1개 이상 선택하세요");
+      return;
+    }
     setTrainState("running");
     setAppliedVer("");
     setPredMap({});
@@ -423,7 +380,11 @@ export function DashboardExplorer() {
       const res = await fetch("/api/match-train", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ league, seasons: trainingOrdered }),
+        body: JSON.stringify({
+          league,
+          seasons: trainingOrdered,
+          ...(featSel.length !== ALL_FEATURES.length ? { features: featSel } : {}),
+        }),
       }).then((r) => r.json());
       if (!res.ok) {
         setTrainState("error");
@@ -488,6 +449,12 @@ export function DashboardExplorer() {
         if (gen !== genRef.current) return;
         if (j.ok) {
           setModelDetail({ model_type: j.model_type, detail: j.detail });
+          const feats = j.detail?.features;
+          if (Array.isArray(feats) && feats.length > 0) {
+            setFeatSel(feats.filter((f: unknown) => typeof f === "string" && (ALL_FEATURES as string[]).includes(f as string)) as string[]);
+          } else {
+            setFeatSel([...ALL_FEATURES]);
+          }
           const ws = j.detail?.weights;
           if (Array.isArray(ws)) {
             setWOrder(ws.map((_, i) => i).sort((a, b) => Math.abs((ws as number[])[b]) - Math.abs((ws as number[])[a])));
@@ -589,11 +556,28 @@ export function DashboardExplorer() {
     return ov;
   }
 
+  function nudgeStep(): number {
+    const s = Number.parseFloat(gridStepText);
+    return Number.isFinite(s) && s > 0 ? s : 0.01;
+  }
+
   function nudge(fi: number, dir: 1 | -1) {
     const base = tweakedRef.current ?? modelDetail?.detail?.weights ?? null;
     if (!base) return;
     const next = [...base];
-    next[fi] = Math.round((next[fi] + dir * tweakStep) * 10000) / 10000;
+    next[fi] = Math.round((next[fi] + dir * nudgeStep()) * 10000) / 10000;
+    tweakedRef.current = next;
+    setTweaked(next);
+    previewWith(next);
+  }
+
+  function setWeight(fi: number, text: string) {
+    const v = Number(text);
+    if (!Number.isFinite(v)) return;
+    const base = tweakedRef.current ?? modelDetail?.detail?.weights ?? null;
+    if (!base) return;
+    const next = [...base];
+    next[fi] = Math.round(v * 10000) / 10000;
     tweakedRef.current = next;
     setTweaked(next);
     previewWith(next);
@@ -611,8 +595,8 @@ export function DashboardExplorer() {
     }
     const d = modelDetail?.detail;
     if (!d || !d.mu || !d.sd) return;
-    if (!d.weights || (d as { model_type?: string }).model_type === "softmax3") {
-      setError("softmax 구조는 직접미세조정 미지원");
+    if (!d.weights) {
+      setError("가중치 없는 모델은 직접미세조정 미지원");
       return;
     }
     const train = new Set(d.train_seasons);
@@ -889,8 +873,8 @@ export function DashboardExplorer() {
     }
     const d = modelDetail?.detail;
     if (!d || !league || !selVer) return;
-    if (!d.weights || (d as { model_type?: string }).model_type === "softmax3") {
-      setError("softmax 구조는 직접미세조정 미지원");
+    if (!d.weights) {
+      setError("가중치 없는 모델은 직접미세조정 미지원");
       return;
     }
     const train = new Set(d.train_seasons);
@@ -902,7 +886,7 @@ export function DashboardExplorer() {
       setError("조절용 미학습 시즌을 체크하세요");
       return;
     }
-    const five = selVer.endsWith("-f5");
+    const five = selVer.includes("-f5");
     const step = parseFloat(gridStepText);
     if (!Number.isFinite(step) || step < 0.001 || step > 2) {
       setError("축간격은 0.001~2 사이 숫자로 입력하세요");
@@ -1019,7 +1003,10 @@ export function DashboardExplorer() {
     setTweaked(null);
   }
 
-  const viewSeasons = seasons.filter((s) => !training.includes(s));
+  const ascSeasons = [...seasons].sort();
+  const trainN = Math.max(0, Math.min(Number.parseInt(trainCount, 10) || 0, Math.max(0, seasons.length - 1)));
+  const trainingOrdered = ascSeasons.slice(0, trainN);
+  const viewSeasons = ascSeasons;
 
   function toggleGroup(cols: ColumnId[]) {
     const allVisible = cols.every((id) => !hiddenCols.includes(id));
@@ -1034,7 +1021,6 @@ export function DashboardExplorer() {
   const predSingles = singleCols.filter((c) => predGroupCols.includes(c.id));
   const detailSingles = singleCols.filter((c) => detailSingleIds.includes(c.id));
   const detailGroupCols: ColumnId[] = [...FIELD_GROUPS.flatMap((g) => g.cols), ...detailSingleIds];
-  const trainingOrdered = seasons.filter((s) => training.includes(s));
   const applying =
     loadingLeagues || loadingSeasons || loadingMatches || applyState === "running";
   const trainSet = new Set(modelDetail?.detail?.train_seasons ?? []);
@@ -1077,32 +1063,35 @@ export function DashboardExplorer() {
         <div>
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-zinc-500">
-              조회시즌 (전체 {viewSeasons.length})
+              시즌 적중률 (전체 {viewSeasons.length})
             </span>
           </div>
-          <div className="mt-2 space-y-1">
+          <div className="mt-1 space-y-0.5">
             {loadingSeasons ? (
               <p className="text-sm text-zinc-500">시즌 불러오는 중...</p>
             ) : viewSeasons.length === 0 ? (
-              <p className="px-2 py-1.5 text-sm text-zinc-500">조회할 시즌이 없습니다.</p>
+              <p className="px-2 py-1 text-sm text-zinc-500">조회할 시즌이 없습니다.</p>
             ) : (
-              viewSeasons.map((s) => (
-                <div
-                  key={s}
-                  className="flex items-center gap-2 rounded-lg px-2 py-0.5 text-sm hover:bg-zinc-50 dark:hover:bg-zinc-900"
-                >
-                  <span className="flex-1 whitespace-nowrap font-mono">
-                    {s}
-                    {accLabel(s)}
-                  </span>
-                  <button
-                    onClick={() => moveToTraining(s)}
-                    className="shrink-0 whitespace-nowrap rounded-full border border-blue-600 px-2 py-0.5 text-[11px] text-blue-600 hover:bg-blue-600/10 dark:border-blue-400 dark:text-blue-400 dark:hover:bg-blue-400/10"
-                  >
-                    학습
-                  </button>
-                </div>
-              ))
+              viewSeasons.map((s) => {
+                const a = applyState === "done" ? accuracy[s] : undefined;
+                const pct = a?.acc != null ? a.acc * 100 : null;
+                return (
+                  <div key={s} className="rounded px-2 py-0.5 hover:bg-zinc-50 dark:hover:bg-zinc-900">
+                    <div className="flex items-baseline justify-between gap-2 text-xs">
+                      <span className="whitespace-nowrap font-mono">{s}</span>
+                      <span className="shrink-0 font-mono text-[10px] text-zinc-500">
+                        {pct != null ? `${pct.toFixed(1)}%` : "−"}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
+                      <div
+                        className="h-full rounded-full bg-blue-600 dark:bg-blue-400"
+                        style={{ width: `${pct != null ? Math.max(0, Math.min(100, pct)) : 0}%` }}
+                      />
+                    </div>
+                  </div>
+                );
+              })
             )}
           </div>
         </div>
@@ -1110,7 +1099,20 @@ export function DashboardExplorer() {
         <hr className="border-zinc-200 dark:border-zinc-800" />
 
         <div>
-          <span className="text-xs font-medium text-zinc-500">학습시즌 ({trainingOrdered.length})</span>
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-zinc-500">학습시즌 ({trainingOrdered.length})</span>
+            <label className="flex items-center gap-1 text-xs text-zinc-500">
+              학습시즌수
+              <input
+                value={trainCount}
+                onChange={(e) => setTrainCount(e.target.value.replace(/[^0-9]/g, ""))}
+                disabled={trainState === "running"}
+                inputMode="numeric"
+                aria-label="학습시즌수"
+                className="w-12 rounded-lg border border-zinc-300 bg-white px-2 py-0.5 text-right font-mono text-xs text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
+              />
+            </label>
+          </div>
             <div className="mt-2 flex gap-4 text-sm" role="radiogroup" aria-label="학습 모드">
               <label className="flex cursor-pointer items-center gap-1.5">
               <input
@@ -1127,30 +1129,36 @@ export function DashboardExplorer() {
               <span>누적(준비중)</span>
             </label>
           </div>
-          <div className="mt-2 max-h-72 space-y-1 overflow-y-auto">
-            {trainingOrdered.length === 0 ? (
-              <p className="px-2 py-1.5 text-sm text-zinc-500">학습 버튼으로 시즌을 옮기세요.</p>
-            ) : (
-              trainingOrdered.map((s) => (
-                <div
-                  key={s}
-                  className="flex items-center gap-2 rounded-lg bg-zinc-50 px-2 py-0.5 text-sm dark:bg-zinc-900"
-                >
-                  <span className="flex-1 whitespace-nowrap font-mono">
-                    {s}
-                    {accLabel(s)}
-                  </span>
-                  <button
-                    onClick={() => moveToView(s)}
-                    aria-label={`${s} 조회로 이동`}
-                    className="shrink-0 rounded-full border border-red-500 px-2 py-0.5 text-[11px] text-red-500 hover:bg-red-500/10 dark:border-red-400 dark:text-red-400 dark:hover:bg-red-400/10"
-                  >
-                    ✕
-                  </button>
-                </div>
-              ))
-            )}
-          </div>
+          <details open className="mt-2 rounded-xl border border-zinc-200 dark:border-zinc-800">
+            <summary className="cursor-pointer px-2.5 py-1.5 text-xs font-medium text-zinc-500">
+              피처 선택 ({featSel.length}/{ALL_FEATURES.length})
+            </summary>
+            <div className="flex flex-wrap gap-x-3 gap-y-1.5 px-2.5 pb-1">
+              {ALL_FEATURES.map((f) => (
+                <label key={f} className="flex cursor-pointer items-center gap-1 text-xs hover:opacity-80" title={f}>
+                  <input
+                    type="checkbox"
+                    checked={featSel.includes(f)}
+                    onChange={() =>
+                      setFeatSel((prev) => (prev.includes(f) ? prev.filter((x) => x !== f) : [...prev, f]))
+                    }
+                    disabled={trainState === "running"}
+                    className="h-3.5 w-3.5 accent-blue-600 disabled:opacity-40 dark:accent-blue-400"
+                  />
+                  <span>{FEATURE_KO[f] ?? f}</span>
+                </label>
+              ))}
+            </div>
+            <div className="px-2.5 pb-2">
+              <button
+                onClick={() => setFeatSel([...ALL_FEATURES])}
+                disabled={trainState === "running"}
+                className="text-[11px] text-blue-600 underline underline-offset-2 disabled:opacity-40 dark:text-blue-400"
+              >
+                전체 선택
+              </button>
+            </div>
+          </details>
           <Button
             size="sm"
             disabled={trainingOrdered.length === 0 || trainState === "running" || trainState === "done"}
@@ -1232,18 +1240,11 @@ export function DashboardExplorer() {
           </button>
           {modelDetail?.model_type === "permatch" && modelDetail.detail && (() => {
             const d = modelDetail.detail;
-            const isSm = (d as { model_type?: string }).model_type === "softmax3";
-            const smW = (d as { W?: number[][] }).W;
-            const CLASS_KO = ["홈", "무", "원"];
-            const eff = !isSm && gridding && gridLive ? gridLive.weights : (tweaked ?? d.weights);
+            const eff = gridding && gridLive ? gridLive.weights : (tweaked ?? d.weights);
             const orderIdx = wOrder ?? d.features.map((_, i) => i);
-            const rows = isSm && smW
-              ? d.features.flatMap((nm, i) => (smW[i] ?? []).map((wv, c) => ({
-                  name: `${nm}/${CLASS_KO[c] ?? c}`, w: wv, fi: -1,
-                })))
-              : orderIdx
-                .map((i) => ({ name: d.features[i], w: eff?.[i] ?? 0, fi: i }))
-                .filter((r) => r.name !== undefined && Number.isFinite(r.w));
+            const rows = orderIdx
+              .map((i) => ({ name: d.features[i], w: eff?.[i] ?? 0, fi: i }))
+              .filter((r) => r.name !== undefined && Number.isFinite(r.w));
             if (rows.length === 0) return null;
             const max = Math.max(...rows.map((r) => Math.abs(r.w)), 1e-9);
             return (
@@ -1252,20 +1253,7 @@ export function DashboardExplorer() {
                   <span className="text-xs font-medium text-zinc-500">
                     {gridding && gridLive ? `피처 가중치 · 탐색 중 ${(gridLive.acc * 100).toFixed(1)}%` : "피처 가중치"}
                   </span>
-                  <span className="flex gap-1">
-                    {[0.001, 0.01, 0.05].map((s) => (
-                      <button
-                        key={s}
-                        onClick={() => setTweakStep(s)}
-                        className={`rounded-full border px-1.5 py-px text-[10px] ${tweakStep === s
-                            ? "border-blue-600 text-blue-600 dark:border-blue-400 dark:text-blue-400"
-                            : "border-zinc-300 text-zinc-500 dark:border-zinc-700"
-                          }`}
-                      >
-                        {s}
-                      </button>
-                    ))}
-                  </span>
+                  <span className="text-[10px] text-zinc-500">± 클릭: 축간격만큼 · 값 직접 입력 가능</span>
                 </div>
                 <div className="space-y-1">
                   {rows.map((r) => (
@@ -1283,42 +1271,26 @@ export function DashboardExplorer() {
                         />
                       </div>
                       <button
-                        onPointerDown={(e) => {
-                          e.preventDefault();
-                          startHold(r.fi, -1);
-                        }}
-                        onPointerUp={stopHold}
-                        onPointerLeave={stopHold}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            nudge(r.fi, -1);
-                          }
-                        }}
+                        onClick={() => nudge(r.fi, -1)}
                         aria-label={`${r.name} 감소`}
-                        disabled={isSm}
                         className="w-5 shrink-0 touch-none rounded border border-zinc-300 text-zinc-600 select-none hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
                       >
                         −
                       </button>
-                      <span className="w-12 shrink-0 text-right font-mono text-zinc-700 dark:text-zinc-300">
-                        {r.w >= 0 ? "+" : ""}{r.w.toFixed(3)}
-                      </span>
-                      <button
-                        onPointerDown={(e) => {
-                          e.preventDefault();
-                          startHold(r.fi, 1);
-                        }}
-                        onPointerUp={stopHold}
-                        onPointerLeave={stopHold}
+                      <input
+                        key={`${r.name}:${r.w.toFixed(4)}`}
+                        defaultValue={`${r.w >= 0 ? "+" : ""}${r.w.toFixed(3)}`}
+                        onBlur={(e) => setWeight(r.fi, e.target.value)}
                         onKeyDown={(e) => {
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            nudge(r.fi, 1);
-                          }
+                          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
                         }}
+                        aria-label={`${r.name} 직접 입력`}
+                        inputMode="decimal"
+                        className="w-14 shrink-0 rounded border border-zinc-300 bg-white px-1 py-px text-right font-mono text-zinc-700 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
+                      />
+                      <button
+                        onClick={() => nudge(r.fi, 1)}
                         aria-label={`${r.name} 증가`}
-                        disabled={isSm}
                         className="w-5 shrink-0 touch-none rounded border border-zinc-300 text-zinc-600 select-none hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
                       >
                         +
@@ -1326,11 +1298,6 @@ export function DashboardExplorer() {
                     </div>
                   ))}
                 </div>
-                {isSm && (
-                  <p className="mt-1 text-[11px] text-zinc-500">
-                    softmax 구조: 홈/무/원 3열 표시 · 직접미세조정 미지원 (예측·예측율은 정상)
-                  </p>
-                )}
                 {curOverall != null && (
                   <p className="mt-1 text-[11px] font-medium text-zinc-700 dark:text-zinc-300">
                     예측율 {(curOverall * 100).toFixed(1)}%
@@ -1353,8 +1320,8 @@ export function DashboardExplorer() {
                 <div className="mt-1.5 flex gap-1.5">
                   <button
                     onClick={autoTune}
-                    disabled={gridding || isSm}
-                    title={isSm ? "softmax 구조 미지원" : "미학습 시즌 적중률이 오르면 자동 저장. 다시 누르면 중지"}
+                    disabled={gridding}
+                    title="미학습 시즌 적중률이 오르면 자동 저장. 다시 누르면 중지"
                     className={`flex-1 rounded-lg px-2 py-1 text-[11px] text-white hover:brightness-110 disabled:opacity-40 dark:text-black ${tuning ? "bg-red-500 dark:bg-red-400" : "bg-green-600 dark:bg-green-500"
                       }`}
                   >
@@ -1362,8 +1329,8 @@ export function DashboardExplorer() {
                   </button>
                   <button
                     onClick={gridTune}
-                    disabled={tuning || isSm}
-                    title={isSm ? "softmax 구조 미지원" : "전수탐색으로 가중치를 탐색. 다시 누르면 중지"}
+                    disabled={tuning}
+                    title="전수탐색으로 가중치를 탐색. 다시 누르면 중지"
                     className={`flex-1 rounded-lg px-2 py-1 text-[11px] text-white hover:brightness-110 disabled:opacity-40 dark:text-black ${gridding ? "bg-red-500 dark:bg-red-400" : "bg-purple-600 dark:bg-purple-400"
                       }`}
                   >
