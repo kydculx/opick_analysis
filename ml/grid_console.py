@@ -801,7 +801,8 @@ def main():
     gfx = {"labels": None, "bars": None, "texts": [],
            "step_lines": [],
            "last_mtime": 0.0, "last_sig": None,
-           "last_amtime": 0.0, "last_asig": None}
+           "last_amtime": 0.0, "last_asig": None,
+           "last_render": 0.0}
     chart_state = {"kind": None, "labels": None, "vals": None, "title": None}
     ui_state = {"last_status_t": 0.0, "last_prog_draw": 0.0}
 
@@ -928,8 +929,11 @@ def main():
     def _draw_progress():
         _hide_cursor()
         xs, yb, yc = hist["x"], hist["best"], hist["cur"]
-        line_best.set_data(xs, yb)
-        line_cur.set_data(xs, yc)
+        n = len(xs)
+        st = max(1, -(-n // 2000))
+        dxs, dyb, dyc = xs[::st], yb[::st], yc[::st]
+        line_best.set_data(dxs, dyb)
+        line_cur.set_data(dxs, dyc)
         if hist_state.get("xmode") == "s":
             win = WIN_SEC
             ax_p.set_xlabel("경과시간(초)")
@@ -943,8 +947,8 @@ def main():
             hi = max(win, xs[-1])
             lo = hi - win
             ax_p.set_xlim(lo, hi)
-            vis_b = [v for x, v in zip(xs, yb) if x >= lo]
-            vis_c = [v for x, v in zip(xs, yc) if x >= lo]
+            vis_b = [vv for xx, vv in zip(dxs, dyb) if xx >= lo]
+            vis_c = [vv for xx, vv in zip(dxs, dyc) if xx >= lo]
             _fit_y(vis_b + vis_c)
         canvas.draw_idle()
         hist_state["last_draw"] = time.monotonic()
@@ -964,15 +968,8 @@ def main():
             hist["x"].append(x)
             hist["best"].append(best)
             hist["cur"].append(cur if isinstance(cur, (int, float)) else best)
-            lo = max(WIN_PCT, x) - WIN_PCT
-            for _ in range(2):
-                if not (len(hist["x"]) > 2 and hist["x"][1] < lo):
-                    break
-                del hist["x"][0]
-                del hist["best"][0]
-                del hist["cur"][0]
-            if len(hist["x"]) > 5000:
-                cut = len(hist["x"]) - 5000
+            if len(hist["x"]) > 200000:
+                cut = len(hist["x"]) - 200000
                 del hist["x"][:cut]
                 del hist["best"][:cut]
                 del hist["cur"][:cut]
@@ -1072,16 +1069,14 @@ def main():
         if n < 2 or not ver:
             return
         try:
-            stride = max(1, -(-n // 5000))
-            idx = list(range(0, n, stride))
             data = {"mode": "whist", "league": league, "ver": ver,
-                    "x": [whist["x"][i] for i in idx],
-                    "W": [whist["W"][i] for i in idx],
-                    "O": [whist["O"][i] for i in idx],
-                    "a": [whist["a"][i] for i in idx],
-                    "n": [whist["n"][i] for i in idx],
-                    "N": [whist["N"][i] for i in idx],
-                    "t": [whist["t"][i] for i in idx],
+                    "x": list(whist["x"]),
+                    "W": [list(r) for r in whist["W"]],
+                    "O": [(list(r) if isinstance(r, list) else None) for r in whist["O"]],
+                    "a": list(whist["a"]),
+                    "n": list(whist["n"]),
+                    "N": list(whist["N"]),
+                    "t": list(whist["t"]),
                     "names": whist["names"]}
             with open(whist_path(league, ver), "w") as f:
                 json.dump(data, f)
@@ -1257,13 +1252,8 @@ def main():
         hist["x"].append(x)
         hist["best"].append(best)
         hist["cur"].append(cur if isinstance(cur, (int, float)) and cur == cur else best)
-        cutoff = x - WIN_SEC
-        while len(hist["x"]) > 2 and hist["x"][1] < cutoff:
-            del hist["x"][0]
-            del hist["best"][0]
-            del hist["cur"][0]
-        if len(hist["x"]) > 20000:
-            cut = len(hist["x"]) - 20000
+        if len(hist["x"]) > 200000:
+            cut = len(hist["x"]) - 200000
             del hist["x"][:cut]
             del hist["best"][:cut]
             del hist["cur"][:cut]
@@ -1372,12 +1362,14 @@ def main():
                             if now - ui_state["last_prog_draw"] >= 0.016:
                                 ui_state["last_prog_draw"] = now
                                 bw2 = pd.get("bestW")
-                                try:
-                                    redraw_graphs(cw, _feat_names_for(o["league"], o["ver"]),
-                                                  title_acc=float(ca) if isinstance(ca, (int, float)) else None,
-                                                  order_w=bw2 if isinstance(bw2, list) else None)
-                                except Exception:
-                                    pass
+                                if now - gfx.get("last_render", 0.0) >= 0.05:
+                                    gfx["last_render"] = now
+                                    try:
+                                        redraw_graphs(cw, _feat_names_for(o["league"], o["ver"]),
+                                                      title_acc=float(ca) if isinstance(ca, (int, float)) else None,
+                                                      order_w=bw2 if isinstance(bw2, list) else None)
+                                    except Exception:
+                                        pass
                                 _push_time(pd.get("best"), ca)
                     except (OSError, ValueError, TypeError):
                         pass
@@ -1415,21 +1407,26 @@ def main():
                         running = runner["obj"] is not None
                         fnames = _feat_names_for(o["league"], o["ver"])
                         shown = None
-                        try:
-                            if running and isinstance(cur_w, list) and cur_w and isinstance(cur_acc, (int, float)):
-                                redraw_graphs(cur_w, fnames, title_acc=float(cur_acc), order_w=best_w)
-                                shown = (cur_w, best_w if isinstance(best_w, list) else None, float(cur_acc))
-                            elif isinstance(best_w, list) and best_w:
-                                redraw_graphs(best_w, fnames)
-                                bb = d.get("best")
-                                shown = (best_w, None, float(bb) if isinstance(bb, (int, float)) else None)
-                        except Exception:
-                            pass
+                        rargs = None
+                        if running and isinstance(cur_w, list) and cur_w and isinstance(cur_acc, (int, float)):
+                            rargs = (cur_w, fnames, float(cur_acc), best_w)
+                            shown = (cur_w, best_w if isinstance(best_w, list) else None, float(cur_acc))
+                        elif isinstance(best_w, list) and best_w:
+                            rargs = (best_w, fnames, None, None)
+                            bb = d.get("best")
+                            shown = (best_w, None, float(bb) if isinstance(bb, (int, float)) else None)
                         if shown is not None:
                             try:
                                 _record_w(d, shown, fnames, o["league"], o["ver"])
                             except Exception:
                                 pass
+                            now = time.monotonic()
+                            if now - gfx.get("last_render", 0.0) >= 0.05:
+                                gfx["last_render"] = now
+                                try:
+                                    redraw_graphs(rargs[0], rargs[1], title_acc=rargs[2], order_w=rargs[3])
+                                except Exception:
+                                    pass
             except (OSError, ValueError):
                 pass
         if runner["obj"] is not None:
