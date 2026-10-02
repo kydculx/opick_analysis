@@ -127,6 +127,11 @@ export function DashboardExplorer() {
   const [gridInfo, setGridInfo] = useState<{ done: number; total: number; best: number | null; sweep: number | null; curAcc: number | null } | null>(null);
   const [gridLive, setGridLive] = useState<{ weights: number[]; hfa: number; acc: number } | null>(null);
   const [gridStepText, setGridStepText] = useState("0.01");
+  const [gridJobsText, setGridJobsText] = useState("4");
+  const [gridBatchText, setGridBatchText] = useState("4096");
+  const [gridWminText, setGridWminText] = useState("-3.0");
+  const [gridWmaxText, setGridWmaxText] = useState("3.0");
+  const [gridDrawWText, setGridDrawWText] = useState("0");
   const FEATURE_KO: Record<string, string> = {
     rank: "순위차", power: "전력", hstr: "H2H강도", cond: "컨디션", att: "공격", def: "수비",
     val: "가치", form5: "최근폼", h2h5: "H2H5", avg_goals: "평균득점", avg_conceded: "평균실점",
@@ -892,6 +897,27 @@ export function DashboardExplorer() {
       setError("축간격은 0.001~2 사이 숫자로 입력하세요");
       return;
     }
+    const jobs = Math.floor(Number(gridJobsText));
+    if (!Number.isFinite(jobs) || jobs < 1) {
+      setError("jobs는 1 이상 정수로 입력하세요");
+      return;
+    }
+    const batch = Math.floor(Number(gridBatchText));
+    if (!Number.isFinite(batch) || batch < 1) {
+      setError("묶음은 1 이상 정수로 입력하세요");
+      return;
+    }
+    const wmin = Number(gridWminText);
+    const wmax = Number(gridWmaxText);
+    if (!Number.isFinite(wmin) || !Number.isFinite(wmax) || !(wmin < wmax)) {
+      setError("wmin < wmax 숫자로 입력하세요");
+      return;
+    }
+    const drawW = Number(gridDrawWText);
+    if (!Number.isFinite(drawW) || drawW < 0) {
+      setError("무가중은 0 이상 숫자로 입력하세요");
+      return;
+    }
     gridRef.current = true;
     setGridding(true);
     setGridInfo(null);
@@ -917,7 +943,10 @@ export function DashboardExplorer() {
       const res = await fetch("/api/grid", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ league, ver: selVer, tune, five, jobs: 4, grid_step: step }),
+        body: JSON.stringify({
+          league, ver: selVer, tune, five, jobs, grid_step: step,
+          batch, wmin, wmax, draw_w: drawW,
+        }),
       }).then((r) => r.json());
       if (!res.ok) {
         gridRef.current = false;
@@ -1371,19 +1400,28 @@ export function DashboardExplorer() {
                     예측율 {(curOverall * 100).toFixed(1)}%
                   </p>
                 )}
-                <div className="mb-1.5 flex items-center justify-between">
-                  <span className="text-xs font-medium text-zinc-500">
-                    축간격
-                  </span>
-                  <input
-                    value={gridStepText}
-                    onChange={(e) => setGridStepText(e.target.value)}
-                    disabled={gridding}
-                    inputMode="decimal"
-                    placeholder="0.01"
-                    aria-label="축간격"
-                    className="w-20 rounded-lg border border-zinc-300 bg-white px-2 py-0.5 text-right font-mono text-[11px] text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
-                  />
+                <div className="mb-1.5 grid grid-cols-2 gap-1">
+                  {[
+                    { label: "축간격", value: gridStepText, set: setGridStepText, ph: "0.01" },
+                    { label: "jobs", value: gridJobsText, set: setGridJobsText, ph: "4" },
+                    { label: "묶음", value: gridBatchText, set: setGridBatchText, ph: "4096" },
+                    { label: "무가중", value: gridDrawWText, set: setGridDrawWText, ph: "0" },
+                    { label: "wmin", value: gridWminText, set: setGridWminText, ph: "-3.0" },
+                    { label: "wmax", value: gridWmaxText, set: setGridWmaxText, ph: "3.0" },
+                  ].map((f) => (
+                    <label key={f.label} className="flex items-center gap-1 text-[11px] text-zinc-500">
+                      <span className="shrink-0">{f.label}</span>
+                      <input
+                        value={f.value}
+                        onChange={(e) => f.set(e.target.value)}
+                        disabled={gridding}
+                        inputMode="decimal"
+                        placeholder={f.ph}
+                        aria-label={f.label}
+                        className="w-full min-w-0 rounded-lg border border-zinc-300 bg-white px-1.5 py-0.5 text-right font-mono text-[11px] text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
+                      />
+                    </label>
+                  ))}
                 </div>
                 <div className="mt-1.5 flex gap-1.5">
                   <button

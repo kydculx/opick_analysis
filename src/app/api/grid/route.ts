@@ -43,6 +43,10 @@ export async function POST(req: Request) {
     grid_step?: unknown;
     five?: unknown;
     jobs?: unknown;
+    batch?: unknown;
+    wmin?: unknown;
+    wmax?: unknown;
+    draw_w?: unknown;
     max_combos?: unknown;
     max_minutes?: unknown;
   };
@@ -71,6 +75,15 @@ export async function POST(req: Request) {
   if (five) argv.push("--five");
   const jobs = Math.floor(Number(body.jobs));
   argv.push("--jobs", String(Number.isFinite(jobs) && jobs > 0 ? jobs : 4));
+  const batch = Math.floor(Number(body.batch));
+  if (Number.isFinite(batch) && batch > 0) argv.push("--batch", String(batch));
+  const wmin = Number(body.wmin);
+  const wmax = Number(body.wmax);
+  if (Number.isFinite(wmin) && Number.isFinite(wmax) && wmin < wmax) {
+    argv.push("--wmin", String(wmin), "--wmax", String(wmax));
+  }
+  const drawW = Number(body.draw_w);
+  if (Number.isFinite(drawW) && drawW !== 0) argv.push("--draw-w", String(drawW));
   const maxCombos = Math.floor(Number(body.max_combos));
   if (Number.isFinite(maxCombos) && maxCombos > 0) argv.push("--max-combos", String(maxCombos));
   const maxMinutes = Number(body.max_minutes);

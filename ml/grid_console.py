@@ -1064,25 +1064,6 @@ def main():
             pass
         return False
 
-    def _save_whist(league, ver):
-        n = len(whist["x"])
-        if n < 2 or not ver:
-            return
-        try:
-            data = {"mode": "whist", "league": league, "ver": ver,
-                    "x": list(whist["x"]),
-                    "W": [list(r) for r in whist["W"]],
-                    "O": [(list(r) if isinstance(r, list) else None) for r in whist["O"]],
-                    "a": list(whist["a"]),
-                    "n": list(whist["n"]),
-                    "N": list(whist["N"]),
-                    "t": list(whist["t"]),
-                    "names": whist["names"]}
-            with open(whist_path(league, ver), "w") as f:
-                json.dump(data, f)
-        except (OSError, ValueError, TypeError):
-            pass
-
     def _refresh_whist(league, ver):
         tag = f"{league}|{ver}" if ver else ""
         if tag and whist.get("ver") == tag and len(whist["x"]) >= 2:
@@ -1518,8 +1499,10 @@ def main():
             request_acc()
             poll_once()
             _draw_progress()
-            _save_whist(v_league.get(), v_ver.get().strip())
-            _enable_scrub()
+            if len(whist["x"]) >= 2:
+                _enable_scrub()
+            else:
+                _refresh_whist(v_league.get(), v_ver.get().strip())
         app.after(0, _ui)
 
     def poll_once():

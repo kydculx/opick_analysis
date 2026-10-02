@@ -472,6 +472,22 @@ def read_live_draw_w(league, ver, cur):
     return v
 
 
+def whist_path(league: str, ver: str) -> str:
+    return f"ml/permatch/{league}_{ver}.whist.json"
+
+
+def write_whist(league, ver, xs, W, O, a, nn, NN, tt, names):
+    try:
+        with open(whist_path(league, ver), "w") as f:
+            json.dump({"mode": "whist", "league": league, "ver": ver,
+                       "x": list(xs), "W": [list(map(float, r)) for r in W],
+                       "O": [(list(map(float, r)) if isinstance(r, list) else None) for r in O],
+                       "a": list(a), "n": list(nn), "N": list(NN), "t": list(tt),
+                       "names": list(names) if names else None}, f)
+    except (OSError, ValueError, TypeError):
+        pass
+
+
 def write_auto_prog(league, ver, rnd, best, bestW, curW, curAcc, tune_s):
     try:
         with open(auto_prog_path(league, ver), "w") as f:
@@ -1197,6 +1213,17 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
     t0 = time.time()
     last_log = t0
     last_cur = 0.0
+    last_wh = 0.0
+    last_wsave = 0.0
+    whx, whW, whO, wha, whn, whN, wht = [], [], [], [], [], [], []
+    eff0 = max_combos if max_combos > 0 else seg_len
+    whx.append(min(100.0, ndone / eff0 * 100) if eff0 else 0.0)
+    whW.append(list(curW))
+    whO.append(list(bestW))
+    wha.append(curAcc)
+    whn.append(ndone)
+    whN.append(eff0)
+    wht.append(0.0)
     complete = False
     B = max(1, batch)
 
@@ -1309,6 +1336,29 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
             if now - last_cur >= 0.016:
                 last_cur = now
                 write_ckpt()
+            eff = max_combos if max_combos > 0 else seg_len
+            if now - last_wh >= 0.5:
+                last_wh = now
+                if not whW or list(curW) != whW[-1]:
+                    whx.append(min(100.0, ndone / eff * 100) if eff else 0.0)
+                    whW.append(list(curW))
+                    whO.append(list(bestW))
+                    wha.append(curAcc)
+                    whn.append(ndone)
+                    whN.append(eff)
+                    wht.append(now - t0)
+                    if len(whx) > 100000:
+                        cut = len(whx) - 100000
+                        del whx[:cut]
+                        del whW[:cut]
+                        del whO[:cut]
+                        del wha[:cut]
+                        del whn[:cut]
+                        del whN[:cut]
+                        del wht[:cut]
+            if now - last_wsave >= 30 and len(whx) >= 2:
+                last_wsave = now
+                write_whist(league, ver, whx, whW, whO, wha, whn, whN, wht, FEATURES)
             if now - last_log >= log_secs:
                 last_log = now
                 el = now - t0
@@ -1341,6 +1391,8 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
         except (ValueError, RuntimeError, OSError, AttributeError):
             pass
     write_ckpt()
+    if len(whx) >= 2:
+        write_whist(league, ver, whx, whW, whO, wha, whn, whN, wht, FEATURES)
     if bestW != artW or bestHfa != artH:
         persist()
     log(f"전수탐색 종료 {ndone:,}/{seg_len:,} best={best:.3f}" + (" (전체 완료)" if complete else ""))
