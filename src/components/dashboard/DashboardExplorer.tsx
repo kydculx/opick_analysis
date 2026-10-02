@@ -1006,7 +1006,7 @@ export function DashboardExplorer() {
   const ascSeasons = [...seasons].sort();
   const trainN = Math.max(0, Math.min(Number.parseInt(trainCount, 10) || 0, Math.max(0, seasons.length - 1)));
   const trainingOrdered = ascSeasons.slice(0, trainN);
-  const viewSeasons = ascSeasons;
+  const viewSeasons = [...ascSeasons].reverse();
 
   function toggleGroup(cols: ColumnId[]) {
     const allVisible = cols.every((id) => !hiddenCols.includes(id));
@@ -1061,7 +1061,7 @@ export function DashboardExplorer() {
         </div>
 
         <div>
-          <div className="flex items-center justify-between">
+          <div className="flex items-baseline justify-between">
             <span className="text-xs font-medium text-zinc-500">
               시즌 적중률 (전체 {viewSeasons.length})
             </span>
@@ -1072,26 +1072,94 @@ export function DashboardExplorer() {
             ) : viewSeasons.length === 0 ? (
               <p className="px-2 py-1 text-sm text-zinc-500">조회할 시즌이 없습니다.</p>
             ) : (
-              viewSeasons.map((s) => {
-                const a = applyState === "done" ? accuracy[s] : undefined;
-                const pct = a?.acc != null ? a.acc * 100 : null;
+              (() => {
+                const isTrain = (s: string) => trainSet.has(s);
+                const chrono = [...viewSeasons].reverse();
+                const pts = chrono
+                  .map((s, i) => {
+                    const a = applyState === "done" ? accuracy[s] : undefined;
+                    return a?.acc != null ? { s, i, acc: a.acc, n: a.n, hit: a.hit } : null;
+                  })
+                  .filter((p): p is { s: string; i: number; acc: number; n: number; hit: number } => p !== null);
+                const W = 232, H = 118, PL = 3, PR = 3, PT = 8, PB = 14;
+                const n = chrono.length;
+                const X = (i: number) => (n <= 1 ? PL + (W - PL - PR) / 2 : PL + (i / (n - 1)) * (W - PL - PR));
+                const Y = (acc: number) => PT + (1 - Math.max(0, Math.min(1, acc))) * (H - PT - PB);
+                let totN = 0, totHit = 0;
+                for (const p of pts) { totN += p.n; totHit += p.hit; }
+                const overall = totN > 0 ? totHit / totN : null;
+                const line = pts.map((p) => `${X(p.i).toFixed(1)},${Y(p.acc).toFixed(1)}`).join(" ");
+                const dotColor = (acc: number) =>
+                  acc >= 0.6 ? "#10b981" : acc >= 0.5 ? "#2563eb" : "#f43f5e";
+                const best = pts.length > 0 ? pts.reduce((m, p) => (p.acc > m.acc ? p : m), pts[0]) : null;
+                const worst = pts.length > 0 ? pts.reduce((m, p) => (p.acc < m.acc ? p : m), pts[0]) : null;
+                const short = (s: string) => s.split("-").map((y) => y.slice(2, 4)).join("-");
+                const gid = "accArea";
                 return (
-                  <div key={s} className="rounded px-2 py-0.5 hover:bg-zinc-50 dark:hover:bg-zinc-900">
-                    <div className="flex items-baseline justify-between gap-2 text-xs">
-                      <span className="whitespace-nowrap font-mono">{s}</span>
-                      <span className="shrink-0 font-mono text-[10px] text-zinc-500">
-                        {pct != null ? `${pct.toFixed(1)}%` : "−"}
-                      </span>
+                  <div>
+                    <div className="flex items-end justify-between px-0.5">
+                      <div>
+                        <div className="font-mono text-[26px] font-bold leading-none text-zinc-900 dark:text-zinc-100">
+                          {overall != null ? `${(overall * 100).toFixed(1)}` : "−"}
+                          <span className="text-sm font-medium text-zinc-400">%</span>
+                        </div>
+                        <div className="mt-0.5 font-mono text-[10px] text-zinc-400">
+                          {totN > 0 ? `${totHit}/${totN} 적중` : "모델 적용 시 표시"}
+                        </div>
+                      </div>
+                      <div className="pb-0.5 text-right font-mono text-[10px] leading-tight">
+                        <div className="text-zinc-500">
+                          최고 <span className="font-semibold text-emerald-600 dark:text-emerald-400">{best ? `${(best.acc * 100).toFixed(1)}` : "−"}</span>
+                        </div>
+                        <div className="text-zinc-500">
+                          최저 <span className="font-semibold text-rose-500 dark:text-rose-400">{worst ? `${(worst.acc * 100).toFixed(1)}` : "−"}</span>
+                        </div>
+                      </div>
                     </div>
-                    <div className="mt-0.5 h-1 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
-                      <div
-                        className="h-full rounded-full bg-blue-600 dark:bg-blue-400"
-                        style={{ width: `${pct != null ? Math.max(0, Math.min(100, pct)) : 0}%` }}
-                      />
-                    </div>
+                    <svg viewBox={`0 0 ${W} ${H}`} className="mt-1 w-full" role="img" aria-label="시즌 적중률 추이">
+                      <defs>
+                        <linearGradient id={gid} x1="0" y1="0" x2="0" y2="1">
+                          <stop offset="0%" stopColor="#2563eb" stopOpacity={0.25} />
+                          <stop offset="100%" stopColor="#2563eb" stopOpacity={0.02} />
+                        </linearGradient>
+                      </defs>
+                      {[0, 0.5, 1].map((g) => (
+                        <line key={g} x1={PL} x2={W - PR} y1={Y(g)} y2={Y(g)} stroke="#52525b" strokeWidth={0.5} opacity={0.3} />
+                      ))}
+                      {overall != null && (
+                        <line x1={PL} x2={W - PR} y1={Y(overall)} y2={Y(overall)} stroke="#a1a1aa" strokeWidth={1} strokeDasharray="3 3" opacity={0.8}>
+                          <title>전체 {(overall * 100).toFixed(1)}% ({totHit}/{totN})</title>
+                        </line>
+                      )}
+                      {pts.length > 1 && (
+                        <polygon points={`${PL},${H - PB} ${line} ${W - PR},${H - PB}`} fill={`url(#${gid})`} />
+                      )}
+                      {pts.length > 1 && (
+                        <polyline points={line} fill="none" stroke="#2563eb" strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" />
+                      )}
+                      {pts.map((p) => (
+                        <g key={p.s}>
+                          <title>{`${p.s} ${(p.acc * 100).toFixed(1)}% (${p.hit}/${p.n})${isTrain(p.s) ? " · 학습시즌" : ""}${best && p.s === best.s ? " · 최고" : ""}${worst && p.s === worst.s ? " · 최저" : ""}`}</title>
+                          {best && p.s === best.s && (
+                            <circle cx={X(p.i)} cy={Y(p.acc)} r={5.5} fill="none" stroke="#10b981" strokeWidth={1.5} opacity={0.8} />
+                          )}
+                          <circle cx={X(p.i)} cy={Y(p.acc)} r={3} fill={dotColor(p.acc)} stroke="#fff" strokeWidth={1} />
+                        </g>
+                      ))}
+                      {chrono.map((s, i) => {
+                        const parts = short(s).split("-");
+                        return (
+                          <text key={s} x={X(i)} y={parts.length > 1 ? H - 11 : H - 3} textAnchor="middle" fontSize={7} fill="#71717a" fontFamily="monospace">
+                            {parts.map((part, k) => (
+                              <tspan key={k} x={X(i)} dy={k === 0 ? 0 : 8}>{part}</tspan>
+                            ))}
+                          </text>
+                        );
+                      })}
+                    </svg>
                   </div>
                 );
-              })
+              })()
             )}
           </div>
         </div>
