@@ -739,11 +739,19 @@ def main():
             ver_label.pack(side="left")
             lbl_acc.pack_forget()
             val_acc.pack_forget()
+            try:
+                scrub_scale.state(["disabled"])
+            except (tk.TclError, AttributeError):
+                pass
         else:
             ver_label.pack_forget()
             btn_del_ver.pack_forget()
             cb_ver.pack(side="left")
             btn_del_ver.pack(side="left", padx=(6, 0))
+            try:
+                scrub_scale.state(["!disabled"])
+            except (tk.TclError, AttributeError):
+                pass
             lbl_acc.pack(side="left", padx=(8, 2))
             val_acc.pack(side="left")
         hint.configure(text=HINTS.get(cur, ""))
@@ -779,6 +787,9 @@ def main():
     canvas = FigureCanvasTkAgg(fig, master=mid)
     canvas.get_tk_widget().pack(fill="both", expand=True)
     canvas.mpl_connect("button_press_event", lambda event: _on_ax_click(event))
+    canvas.mpl_connect("motion_notify_event", lambda event: _on_ax_motion(event))
+    canvas.mpl_connect("button_release_event", lambda event: _on_ax_release(event))
+    chart_drag = {"on": False}
     scrub_bar = ttk.Frame(mid)
     scrub_bar.pack(fill="x", pady=(4, 0))
     scrub_var = tk.DoubleVar(value=0)
@@ -786,9 +797,55 @@ def main():
                             variable=scrub_var, command=lambda *_: on_scrub())
     scrub_scale.pack(side="left", fill="x", expand=True)
     scrub_scale.state(["disabled"])
+    _scrub_drag = {"on": False}
+
+    def _scale_set_from_x(ev):
+        try:
+            n = len(whist["x"])
+            if n == 0:
+                return
+            w = scrub_scale.winfo_width()
+            if w <= 1:
+                return
+            frac = min(1.0, max(0.0, ev.x / w))
+            scrub_var.set(frac * (n - 1))
+        except (tk.TclError, AttributeError, ValueError, TypeError):
+            pass
+
+    def _on_scale_press(ev):
+        if runner["obj"] is not None:
+            return
+        _scrub_drag["on"] = True
+        try:
+            scrub_scale.grab_set()
+        except tk.TclError:
+            pass
+        _scale_set_from_x(ev)
+        on_scrub()
+        return "break"
+
+    def _on_scale_motion(ev):
+        if not _scrub_drag["on"]:
+            return
+        if runner["obj"] is not None:
+            return
+        _scale_set_from_x(ev)
+        on_scrub()
+        return "break"
+
+    def _on_scale_release(ev):
+        _scrub_drag["on"] = False
+        try:
+            scrub_scale.grab_release()
+        except tk.TclError:
+            pass
+    scrub_scale.bind("<ButtonPress-1>", _on_scale_press)
+    scrub_scale.bind("<B1-Motion>", _on_scale_motion)
+    scrub_scale.bind("<ButtonRelease-1>", _on_scale_release)
     scrub_label = ttk.Label(scrub_bar, text="—", width=46)
     scrub_label.pack(side="left", padx=(6, 0))
-    scrub = {"active": False, "cursor": None}
+    scrub = {"active": False, "cursor": None, "order": None,
+             "blit_bg": None, "blit_key": None}
 
     runner = {"obj": None}
     live = {"best": None, "cur_acc": None}
@@ -886,7 +943,7 @@ def main():
         gfx["labels"] = labels
         return True
 
-    def _update_bars(vals, title_acc=None):
+    def _update_bars(vals, title_acc=None, draw=True):
         wmin, wmax, pad = _lim()
         span = wmax - wmin
         ax_w.set_xlim(0, span)
@@ -912,7 +969,8 @@ def main():
                 txt.set_ha("left")
                 txt.set_color("#52525b")
                 txt.set_weight("normal")
-        canvas.draw_idle()
+        if draw:
+            canvas.draw_idle()
 
     WIN_PCT = 10.0
     WIN_SEC = 60.0
@@ -998,6 +1056,8 @@ def main():
         whist["last_best"] = None
         scrub["active"] = False
         scrub["order"] = None
+        scrub["blit_bg"] = None
+        scrub["blit_key"] = None
         scrub.pop("pending", None)
         _hide_cursor()
         try:
@@ -1041,22 +1101,11 @@ def main():
             pass
         scrub["cursor"] = None
 
-    def _show_cursor(x):
-        _hide_cursor()
-        try:
-            lo, hi = ax_p.get_xlim()
-            if not (lo <= x <= hi):
-                span = hi - lo if hi > lo else 10.0
-                ax_p.set_xlim(x - span / 2, x + span / 2)
-            scrub["cursor"] = ax_p.axvline(x, color="#f59e0b", linewidth=1.2, zorder=5)
-            canvas.draw_idle()
-        except Exception:
-            pass
-
     def _enable_scrub():
         try:
             if len(whist["x"]) >= 2:
                 scrub_scale.state(["!disabled"])
+                scrub_scale.configure(to=len(whist["x"]) - 1)
                 scrub_var.set(len(whist["x"]) - 1)
                 _update_scrub_label(len(whist["x"]) - 1)
                 return True
@@ -1092,6 +1141,97 @@ def main():
         except (OSError, ValueError, TypeError):
             _clear_whist()
 
+    def _blit_key(labels):
+        try:
+            wgt = canvas.get_tk_widget()
+            return (tuple(labels),
+                    tuple(ax_w.get_xlim()), tuple(ax_w.get_ylim()),
+                    tuple(ax_p.get_xlim()), tuple(ax_p.get_ylim()),
+                    (wgt.winfo_width(), wgt.winfo_height()))
+        except Exception:
+            return None
+
+    def _capture_bg():
+        try:
+            for art in list(gfx["bars"] or []) + list(gfx["texts"] or []):
+                art.set_visible(False)
+            ln = scrub.get("cursor")
+            if ln is not None:
+                try:
+                    ln.set_visible(False)
+                except Exception:
+                    pass
+            fig.canvas.draw()
+            scrub["blit_bg"] = fig.canvas.copy_from_bbox(fig.bbox)
+            for art in list(gfx["bars"] or []) + list(gfx["texts"] or []):
+                art.set_visible(True)
+            if ln is not None:
+                try:
+                    ln.set_visible(True)
+                except Exception:
+                    pass
+            return True
+        except Exception:
+            return False
+
+    def _blit_update():
+        try:
+            bg = scrub.get("blit_bg")
+            if bg is None:
+                return False
+            fig.canvas.restore_region(bg)
+            for art in list(gfx["bars"] or []) + list(gfx["texts"] or []):
+                ax_w.draw_artist(art)
+            ln = scrub.get("cursor")
+            if ln is not None and ln.axes is ax_p and ln.get_visible():
+                ax_p.draw_artist(ln)
+            fig.canvas.blit(fig.bbox)
+            return True
+        except Exception:
+            scrub["blit_bg"] = None
+            return False
+
+    def _move_cursor(x):
+        try:
+            ln = scrub.get("cursor")
+            if ln is None or ln.axes is not ax_p:
+                ln = ax_p.axvline(x, color="#f59e0b", linewidth=1.2, zorder=5)
+                scrub["cursor"] = ln
+                return False
+            ln.set_xdata([x, x])
+            lo, hi = ax_p.get_xlim()
+            if not (lo <= x <= hi):
+                span = hi - lo if hi > lo else 10.0
+                ax_p.set_xlim(x - span / 2, x + span / 2)
+                return False
+            return True
+        except Exception:
+            return False
+
+    def _capture_bg():
+        try:
+            for art in list(gfx["bars"] or []) + list(gfx["texts"] or []):
+                art.set_visible(False)
+            ln = scrub.get("cursor")
+            if ln is not None:
+                try:
+                    ln.set_visible(False)
+                except Exception:
+                    pass
+            fig.canvas.draw()
+            scrub["blit_bg"] = fig.canvas.copy_from_bbox(fig.bbox)
+            for art in list(gfx["bars"] or []) + list(gfx["texts"] or []):
+                art.set_visible(True)
+            if ln is not None:
+                try:
+                    ln.set_visible(True)
+                except Exception:
+                    pass
+            return True
+        except Exception:
+            scrub["blit_bg"] = None
+            return False
+
     def show_w_hist(i):
         n = len(whist["x"])
         if n == 0:
@@ -1113,12 +1253,14 @@ def main():
             labels = [FEATURE_KO.get(raw[j], raw[j]) if j < len(raw) else f"f{j}" for j in order]
             vals = [whist["W"][i][j] if j < len(whist["W"][i]) else 0.0 for j in order]
             _ensure_bars(labels)
-            _update_bars(vals, None)
-            a = whist["a"][i]
-            ax_w.set_title(f"피처 가중치 · 진행 {whist['x'][i]:.1f}%" +
-                           (f" · acc {a:.3f}" if isinstance(a, (int, float)) else ""))
-            _show_cursor(whist["x"][i])
-            canvas.draw_idle()
+            _update_bars(vals, None, draw=False)
+            moved = _move_cursor(whist["x"][i])
+            key = _blit_key(labels)
+            if (not moved) or scrub.get("blit_bg") is None or key != scrub.get("blit_key"):
+                if _capture_bg():
+                    scrub["blit_key"] = _blit_key(labels)
+            if not _blit_update():
+                canvas.draw_idle()
         except Exception:
             pass
         _update_scrub_label(i)
@@ -1135,19 +1277,12 @@ def main():
         except (tk.TclError, AttributeError):
             pass
 
-    def on_scrub(*_):
-        if runner["obj"] is not None:
-            return
-        if len(whist["x"]) == 0:
-            return
+    def _scrub_to(i):
         scrub["active"] = True
-        try:
-            scrub["pending"] = int(float(scrub_var.get()))
-        except (ValueError, TypeError):
-            return
+        scrub["pending"] = i
         now = time.monotonic()
         if now - scrub.get("last_show", 0.0) < 0.04:
-            _update_scrub_label(scrub["pending"])
+            _update_scrub_label(i)
             if not scrub.get("scheduled"):
                 scrub["scheduled"] = True
                 try:
@@ -1157,6 +1292,20 @@ def main():
             return
         scrub["last_show"] = now
         show_w_hist(scrub.pop("pending"))
+
+    def on_scrub(*_):
+        if runner["obj"] is not None:
+            return
+        if len(whist["x"]) == 0:
+            _refresh_whist(v_league.get(), v_ver.get().strip())
+            if len(whist["x"]) == 0:
+                v_status.set("기록 없음 — 전수탐색 실행 후 생성됨")
+                return
+        try:
+            want = int(float(scrub_var.get()))
+        except (ValueError, TypeError):
+            return
+        _scrub_to(want)
 
     def _record_w(d, shown, names, league="", ver=""):
         tot, nd = d.get("total"), d.get("ndone")
@@ -1211,10 +1360,43 @@ def main():
             if len(xs) == 0 or event.xdata is None:
                 return
             i = min(range(len(xs)), key=lambda k: abs(xs[k] - event.xdata))
-            scrub["active"] = True
+            try:
+                canvas.get_tk_widget().grab_set()
+            except tk.TclError:
+                pass
+            chart_drag["on"] = True
             scrub_var.set(i)
-            show_w_hist(i)
+            _scrub_to(i)
         except Exception:
+            pass
+
+    def _on_ax_motion(event):
+        try:
+            if not chart_drag["on"]:
+                return
+            if runner["obj"] is not None:
+                return
+            xs = whist["x"]
+            if len(xs) == 0:
+                return
+            if event.xdata is None:
+                try:
+                    bbox = ax_p.get_window_extent()
+                    i = 0 if event.x <= bbox.x0 else len(xs) - 1
+                except Exception:
+                    return
+            else:
+                i = min(range(len(xs)), key=lambda k: abs(xs[k] - event.xdata))
+            scrub_var.set(i)
+            _scrub_to(i)
+        except Exception:
+            pass
+
+    def _on_ax_release(event):
+        chart_drag["on"] = False
+        try:
+            canvas.get_tk_widget().grab_release()
+        except tk.TclError:
             pass
 
     def clear_train_view():
