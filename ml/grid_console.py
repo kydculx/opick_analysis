@@ -301,7 +301,9 @@ def main():
 
     app = tk.Tk()
     app.title("학습 콘솔")
-    app.geometry("880x820")
+    app.update_idletasks()
+    _sw, _sh, _ww, _wh = app.winfo_screenwidth(), app.winfo_screenheight(), 880, 1000
+    app.geometry(f"{_ww}x{_wh}+{max(0, (_sw - _ww) // 2)}+{max(0, (_sh - _wh) // 2)}")
 
     v_league = tk.StringVar(value="premier_league")
     v_league_ko = tk.StringVar(value=CODE2KO["premier_league"])
@@ -384,11 +386,16 @@ def main():
         return w
 
     def set_opts_enabled(on):
+        st_ttk = ["!disabled"] if on else ["disabled"]
+        st_tk = "normal" if on else "disabled"
         for w in opt_widgets:
             try:
                 if not w.winfo_exists():
                     continue
-                w.state(["!disabled"] if on else ["disabled"])
+                try:
+                    w.state(st_ttk)
+                except AttributeError:
+                    w.configure(state=st_tk)
             except tk.TclError:
                 pass
 
@@ -542,6 +549,7 @@ def main():
             ver_sync["on"] = False
         if v_mode.get() in ("grid", "auto"):
             fill_search_params(v_league.get(), ver)
+        refresh_wedit()
 
     def fill_search_params(league, ver):
         m = re.search(r"-d(\d+(?:_\d+)?)(?=-|$)", ver)
@@ -641,13 +649,8 @@ def main():
                 break
         return rows
 
-    def _acc_run(league, ver, tok):
+    def _acc_text_for(art, league, ver, allow_ckpt=True):
         txt = "−"
-        try:
-            tp = tune_path(league, ver)
-            art = json.load(open(tp, encoding="utf-8")) if ver and os.path.exists(tp) else None
-        except (OSError, ValueError):
-            art = None
         if isinstance(art, dict):
             vs = art.get("valid")
             valid_s = {str(s) for s in (vs if isinstance(vs, list) else ([vs] if vs else [])) if s and s != "auto"}
@@ -667,7 +670,7 @@ def main():
                             txt = f"검증 {vm['acc'] * 100:.1f}% (n={int(vm['n'])})"
                     except Exception:
                         pass
-            if txt == "−":
+            if txt == "−" and allow_ckpt:
                 try:
                     cp = ckpt_path(league, ver)
                     if os.path.exists(cp):
@@ -676,6 +679,15 @@ def main():
                             txt = f"조절 {b * 100:.1f}%"
                 except (OSError, ValueError):
                     pass
+        return txt
+
+    def _acc_run(league, ver, tok):
+        try:
+            tp = tune_path(league, ver)
+            art = json.load(open(tp, encoding="utf-8")) if ver and os.path.exists(tp) else None
+        except (OSError, ValueError):
+            art = None
+        txt = _acc_text_for(art, league, ver)
         def done():
             try:
                 if tok == acc_job["token"]:
@@ -686,6 +698,183 @@ def main():
             app.after(0, done)
         except tk.TclError:
             pass
+
+    def refresh_wedit():
+        if runner["obj"] is not None:
+            return
+        for ch in list(wedit_grid.winfo_children()):
+            try:
+                ch.destroy()
+            except tk.TclError:
+                pass
+        wedit_vars.clear()
+        wedit_names.clear()
+        wedit_pending["w"] = None
+        try:
+            wedit_info.configure(text="")
+        except tk.TclError:
+            pass
+        try:
+            old = preview_art.get("line")
+            if old is not None:
+                old.remove()
+            preview_art["line"] = None
+        except Exception:
+            pass
+        if v_mode.get() == "train":
+            return
+        lg, ver = v_league.get(), v_ver.get().strip()
+        if not ver:
+            return
+        try:
+            d = json.load(open(tune_path(lg, ver), encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        feats = d.get("features")
+        w = d.get("weights")
+        if not (isinstance(feats, list) and isinstance(w, list) and len(feats) == len(w) and w):
+            return
+        for idx, (fn, wv) in enumerate(zip(feats, w)):
+            var = tk.StringVar(value=f"{wv:.4f}" if isinstance(wv, (int, float)) else "0.0000")
+            r, c = divmod(idx, 3)
+            base = c * 4
+            ttk.Label(wedit_grid, text=FEATURE_KO.get(fn, fn), width=8).grid(
+                row=r, column=base, sticky="e", padx=(0, 2), pady=1)
+            bdn = _reg(tk.Button(wedit_grid, text="−", width=1, padx=0, pady=0,
+                               font=("TkDefaultFont", 8), takefocus=0))
+            bdn.grid(row=r, column=base + 1, padx=(0, 1), pady=1)
+            bdn.bind("<ButtonPress-1>", lambda e, v=var: wedit_hold_start(v, -1))
+            bdn.bind("<ButtonRelease-1>", lambda e: wedit_hold_end())
+            bdn.bind("<Leave>", lambda e: wedit_hold_stop())
+            ent = _reg(ttk.Entry(wedit_grid, textvariable=var, width=9))
+            ent.grid(row=r, column=base + 2, sticky="w", padx=(0, 1), pady=1)
+            ent.bind("<Return>", lambda _e: apply_wedit())
+            bup = _reg(tk.Button(wedit_grid, text="+", width=1, padx=0, pady=0,
+                               font=("TkDefaultFont", 8), takefocus=0))
+            bup.grid(row=r, column=base + 3, sticky="w", padx=(0, 8), pady=1)
+            bup.bind("<ButtonPress-1>", lambda e, v=var: wedit_hold_start(v, 1))
+            bup.bind("<ButtonRelease-1>", lambda e: wedit_hold_end())
+            bup.bind("<Leave>", lambda e: wedit_hold_stop())
+            wedit_vars.append((fn, var))
+            wedit_names.append(fn)
+
+    def apply_wedit():
+        if runner["obj"] is not None:
+            v_status.set("실행 중에는 편집할 수 없습니다")
+            return
+        vals = []
+        for fn, var in wedit_vars:
+            try:
+                vals.append(float(var.get().strip()))
+            except (ValueError, AttributeError):
+                v_status.set(f"숫자 입력 필요: {FEATURE_KO.get(fn, fn)}")
+                return
+        if not vals:
+            v_status.set("편집할 가중치 없음 (버전 확인)")
+            return
+        lg, ver = v_league.get(), v_ver.get().strip()
+        try:
+            d = json.load(open(tune_path(lg, ver), encoding="utf-8"))
+            feats = d.get("features")
+        except (OSError, ValueError):
+            feats = None
+        if not (isinstance(feats, list) and len(feats) == len(vals)):
+            v_status.set("버전 확인 필요")
+            return
+        wedit_pending["w"] = list(vals)
+        wedit_pending["seq"] += 1
+        seq = wedit_pending["seq"]
+        redraw_graphs(list(vals), list(feats))
+        v_status.set("미리보기 적용됨 — 저장하면 버전에 기록")
+        try:
+            wedit_info.configure(text="편집 미리보기 계산 중…")
+        except tk.TclError:
+            pass
+        threading.Thread(target=lambda: _wedit_preview(lg, ver, list(vals), seq),
+                         daemon=True).start()
+
+    def _show_preview_line(acc):
+        try:
+            old = preview_art.get("line")
+            if old is not None:
+                try:
+                    old.remove()
+                except Exception:
+                    pass
+                preview_art["line"] = None
+            if not isinstance(acc, (int, float)):
+                canvas.draw_idle()
+                return
+            lo, hi = ax_p.get_ylim()
+            if not (lo <= acc <= hi):
+                pad = 0.02
+                ax_p.set_ylim(min(lo, acc) - pad, max(hi, acc) + pad)
+            preview_art["line"] = ax_p.axhline(acc, color="#16a34a", linestyle="--", linewidth=1.0)
+            canvas.draw_idle()
+        except Exception:
+            pass
+
+    def _wedit_preview(league, ver, weights, seq):
+        txt = "편집 미리보기: 검증 시즌 없음"
+        acc = None
+        try:
+            art = json.load(open(tune_path(league, ver), encoding="utf-8"))
+            if isinstance(art, dict):
+                art = dict(art)
+                art["weights"] = list(weights)
+                t = _acc_text_for(art, league, ver, allow_ckpt=False)
+                if t != "−":
+                    txt = f"편집 미리보기 {t}"
+                    m = re.search(r"([\d.]+)%", t)
+                    if m:
+                        acc = float(m.group(1)) / 100.0
+        except (OSError, ValueError):
+            txt = "편집 미리보기: 계산 실패"
+        def done(acc=acc):
+            try:
+                if seq == wedit_pending.get("seq"):
+                    wedit_info.configure(text=txt)
+                    _show_preview_line(acc)
+            except tk.TclError:
+                pass
+        try:
+            app.after(0, done)
+        except tk.TclError:
+            pass
+
+    def save_wedit():
+        if runner["obj"] is not None:
+            v_status.set("실행 중에는 저장할 수 없습니다")
+            return
+        w = wedit_pending.get("w")
+        if not w:
+            v_status.set("먼저 적용을 누르세요")
+            return
+        lg, ver = v_league.get(), v_ver.get().strip()
+        if not ver:
+            v_status.set("버전 확인 필요")
+            return
+        try:
+            p = tune_path(lg, ver)
+            d = json.load(open(p, encoding="utf-8"))
+            if not (isinstance(d, dict) and isinstance(d.get("features"), list)
+                    and len(d["features"]) == len(w)):
+                v_status.set("버전 확인 필요 (피처 수 불일치)")
+                return
+            d["weights"] = list(w)
+            with open(p, "w", encoding="utf-8") as f:
+                json.dump(d, f)
+        except (OSError, ValueError) as e:
+            v_status.set(f"저장 실패: {e}")
+            return
+        wedit_pending["w"] = None
+        try:
+            wedit_info.configure(text="")
+        except tk.TclError:
+            pass
+        v_status.set(f"저장됨: {ver}")
+        request_acc()
+        poll_once()
 
     f_train = ttk.Frame(detail)
     fr_train_opt = ttk.Frame(f_train)
@@ -842,10 +1031,122 @@ def main():
     scrub_scale.bind("<ButtonPress-1>", _on_scale_press)
     scrub_scale.bind("<B1-Motion>", _on_scale_motion)
     scrub_scale.bind("<ButtonRelease-1>", _on_scale_release)
+
+    def _scrub_keystep(step):
+        if runner["obj"] is not None:
+            return
+        if len(whist["x"]) == 0:
+            return
+        try:
+            cur = int(float(scrub_var.get()))
+        except (ValueError, TypeError):
+            return
+        nxt = max(0, min(len(whist["x"]) - 1, cur + step))
+        scrub_var.set(nxt)
+        _scrub_to(nxt)
+
+    def _on_scale_key(ev, step):
+        _scrub_keystep(step)
+        return "break"
+
+    scrub_scale.bind("<Left>", lambda e: _on_scale_key(e, -1))
+    scrub_scale.bind("<Right>", lambda e: _on_scale_key(e, 1))
+
+    def _on_key_global(ev):
+        try:
+            focus = app.focus_get()
+            if focus is not None and focus.winfo_class() in ("TEntry", "Entry", "TCombobox", "Text"):
+                return
+        except tk.TclError:
+            pass
+        if ev.keysym == "Left":
+            _scrub_keystep(-1)
+        elif ev.keysym == "Right":
+            _scrub_keystep(1)
+    app.bind_all("<Left>", _on_key_global)
+    app.bind_all("<Right>", _on_key_global)
     scrub_label = ttk.Label(scrub_bar, text="—", width=46)
     scrub_label.pack(side="left", padx=(6, 0))
     scrub = {"active": False, "cursor": None, "order": None,
              "blit_bg": None, "blit_key": None}
+
+    wedit_frame = ttk.LabelFrame(mid, text="가중치 직접편집", padding=6)
+    wedit_frame.pack(fill="x", pady=(4, 0))
+    wedit_grid = ttk.Frame(wedit_frame)
+    wedit_grid.pack(fill="x")
+    wedit_vars: list = []
+    wedit_names: list = []
+    wedit_pending = {"w": None, "seq": 0}
+    preview_art = {"line": None}
+    wedit_hold = {"after": None, "var": None, "dir": 0, "t0": 0.0}
+
+    def wedit_step():
+        try:
+            step = float(v_gridstep.get().strip() or "0")
+        except (ValueError, AttributeError):
+            step = 0.0
+        return step if step > 0 else 0.01
+
+    def wedit_nudge(var, direction):
+        if runner["obj"] is not None:
+            return
+        try:
+            cur = float(var.get().strip())
+        except (ValueError, AttributeError):
+            cur = 0.0
+        try:
+            var.set(f"{cur + direction * wedit_step():.4f}")
+        except tk.TclError:
+            pass
+
+    def wedit_hold_stop(*_):
+        wedit_hold["var"] = None
+        try:
+            if wedit_hold.get("after") is not None:
+                app.after_cancel(wedit_hold["after"])
+        except (tk.TclError, ValueError):
+            pass
+        wedit_hold["after"] = None
+
+    def wedit_hold_start(var, direction):
+        if runner["obj"] is not None:
+            return
+        wedit_hold_stop()
+        wedit_nudge(var, direction)
+        wedit_hold["var"] = var
+        wedit_hold["dir"] = direction
+        wedit_hold["t0"] = time.monotonic()
+        def _rep():
+            wedit_hold["after"] = None
+            if wedit_hold.get("var") is not var:
+                return
+            if runner["obj"] is not None:
+                wedit_hold_stop()
+                return
+            if time.monotonic() - wedit_hold.get("t0", 0.0) > 30.0:
+                wedit_hold_stop()
+                return
+            wedit_nudge(var, direction)
+            try:
+                wedit_hold["after"] = app.after(90, _rep)
+            except tk.TclError:
+                pass
+        try:
+            wedit_hold["after"] = app.after(400, _rep)
+        except tk.TclError:
+            pass
+
+    def wedit_hold_end(*_):
+        wedit_hold_stop()
+        apply_wedit()
+    wedit_btnrow = ttk.Frame(wedit_frame)
+    wedit_btnrow.pack(fill="x", pady=(4, 0))
+    _reg(ttk.Button(wedit_btnrow, text="적용", width=8,
+                    command=lambda: apply_wedit())).pack(side="left")
+    _reg(ttk.Button(wedit_btnrow, text="저장", width=8,
+                    command=lambda: save_wedit())).pack(side="left", padx=(6, 0))
+    wedit_info = ttk.Label(wedit_btnrow, text="", foreground="gray")
+    wedit_info.pack(side="left", padx=(8, 0))
 
     runner = {"obj": None}
     live = {"best": None, "cur_acc": None}
@@ -1044,6 +1345,13 @@ def main():
         ax_p.set_ylim(0, 1)
         hist_state["t0"] = time.monotonic()
         hist_state["xmode"] = "%"
+        try:
+            old = preview_art.get("line")
+            if old is not None:
+                old.remove()
+            preview_art["line"] = None
+        except Exception:
+            pass
         _clear_whist()
 
     def _clear_whist():
@@ -1137,6 +1445,19 @@ def main():
             whist["t"] = [(float(v) if isinstance(v, (int, float)) else 0.0) for v in tt] if isinstance(tt, list) and len(tt) == len(xs) else [0.0] * len(xs)
             whist["names"] = list(d.get("names")) if isinstance(d.get("names"), list) else None
             whist["ver"] = tag
+            hist["x"].clear()
+            hist["best"].clear()
+            hist["cur"].clear()
+            _b = float("-inf")
+            for _i in range(len(whist["x"])):
+                _ca = whist["a"][_i]
+                _ca = _ca if isinstance(_ca, (int, float)) else 0.0
+                _b = max(_b, _ca)
+                hist["x"].append(whist["x"][_i])
+                hist["best"].append(_b)
+                hist["cur"].append(_ca)
+            hist_state["xmode"] = "%"
+            _draw_progress()
             _enable_scrub()
         except (OSError, ValueError, TypeError):
             _clear_whist()
@@ -1151,29 +1472,6 @@ def main():
         except Exception:
             return None
 
-    def _capture_bg():
-        try:
-            for art in list(gfx["bars"] or []) + list(gfx["texts"] or []):
-                art.set_visible(False)
-            ln = scrub.get("cursor")
-            if ln is not None:
-                try:
-                    ln.set_visible(False)
-                except Exception:
-                    pass
-            fig.canvas.draw()
-            scrub["blit_bg"] = fig.canvas.copy_from_bbox(fig.bbox)
-            for art in list(gfx["bars"] or []) + list(gfx["texts"] or []):
-                art.set_visible(True)
-            if ln is not None:
-                try:
-                    ln.set_visible(True)
-                except Exception:
-                    pass
-            return True
-        except Exception:
-            return False
-
     def _blit_update():
         try:
             bg = scrub.get("blit_bg")
@@ -1185,6 +1483,9 @@ def main():
             ln = scrub.get("cursor")
             if ln is not None and ln.axes is ax_p and ln.get_visible():
                 ax_p.draw_artist(ln)
+            pv = preview_art.get("line")
+            if pv is not None and pv.axes is ax_p and pv.get_visible():
+                ax_p.draw_artist(pv)
             fig.canvas.blit(fig.bbox)
             return True
         except Exception:
@@ -1218,6 +1519,12 @@ def main():
                     ln.set_visible(False)
                 except Exception:
                     pass
+            pv = preview_art.get("line")
+            if pv is not None:
+                try:
+                    pv.set_visible(False)
+                except Exception:
+                    pass
             fig.canvas.draw()
             scrub["blit_bg"] = fig.canvas.copy_from_bbox(fig.bbox)
             for art in list(gfx["bars"] or []) + list(gfx["texts"] or []):
@@ -1225,6 +1532,11 @@ def main():
             if ln is not None:
                 try:
                     ln.set_visible(True)
+                except Exception:
+                    pass
+            if pv is not None:
+                try:
+                    pv.set_visible(True)
                 except Exception:
                     pass
             return True
@@ -1262,6 +1574,21 @@ def main():
             if not _blit_update():
                 canvas.draw_idle()
         except Exception:
+            pass
+        try:
+            wrow = whist["W"][i]
+            if wedit_vars and len(wrow) == len(wedit_vars):
+                for (_, var), v in zip(wedit_vars, wrow):
+                    try:
+                        var.set(f"{v:.4f}" if isinstance(v, (int, float)) else "0.0000")
+                    except tk.TclError:
+                        pass
+                wedit_pending["w"] = None
+                try:
+                    wedit_info.configure(text="")
+                except tk.TclError:
+                    pass
+        except (IndexError, TypeError):
             pass
         _update_scrub_label(i)
 
@@ -1680,6 +2007,7 @@ def main():
             refresh_ver_list()
             request_acc()
             poll_once()
+            refresh_wedit()
             _draw_progress()
             if len(whist["x"]) >= 2:
                 _enable_scrub()
@@ -1857,6 +2185,7 @@ def main():
             apply_preset()
             ui_state["just_done"] = False
             clear_train_view()
+            refresh_wedit()
             request_acc()
         else:
             poll_once()
