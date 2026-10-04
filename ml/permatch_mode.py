@@ -41,8 +41,6 @@ import random
 import sys
 import time
 
-os.environ.setdefault("NUMBA_DISABLE_CACHING", "1")
-
 try:
     import numba as _numba
     import numpy as _np_nb
@@ -1442,7 +1440,7 @@ def _acc_batch32(X32, yn, dd32, PP32, cap, nw, Wmat, hvec):
 
 
 if _HAVE_NUMBA:
-    @_numba.njit(cache=True, nogil=True, parallel=True)
+    @_numba.njit(cache=False, nogil=True, parallel=True)
     def _grid_acc_nb(X, y, dd, PP, Wb, hb, cap, use_pp, out, out_rec):
         B = Wb.shape[0]
         N = X.shape[0]
@@ -2117,7 +2115,7 @@ def _sweep_fit_e(Va, ya, w, hfa, d, esteps, use_valid, l2=0.0, draw_w=0.0):
 
 
 if _HAVE_NUMBA:
-    @_numba.njit(cache=True)
+    @_numba.njit(cache=False)
     def _cd_ll_nb(X, y, w, hfa, d, l2, dw):
         n = X.shape[0]
         f = X.shape[1]
@@ -2150,7 +2148,7 @@ if _HAVE_NUMBA:
             sw_sum += sw
         return ll / sw_sum + l2 * wpen
 
-    @_numba.njit(cache=True)
+    @_numba.njit(cache=False)
     def _cd_fit_w_kernel(X, y, w, H, d, l2, steps, max_sweeps, dw):
         f = X.shape[1]
         ns = steps.shape[0]
