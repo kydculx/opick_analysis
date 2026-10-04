@@ -676,6 +676,22 @@ def main():
                             txt = f"검증 {vm['acc'] * 100:.1f}% (n={int(vm['n'])})"
                     except Exception:
                         pass
+            try:
+                train_set = {str(s) for s in (art.get("train_seasons") or [])}
+                valid_set = {str(s) for s in (vs if isinstance(vs, list) else ([vs] if vs else [])) if s and s != "auto"}
+                cands = [s for s in known_seasons(league) if s not in train_set and s not in valid_set]
+                if cands:
+                    newest = sorted(cands)[-1]
+                    nrows = [r for r in _acc_rows(league, [newest]) if str(r.get("season")) == newest]
+                    if nrows:
+                        import permatch_mode as _pm2
+                        with _eval_lock:
+                            _vm = _pm2.eval_artifact(nrows, set(), {newest}, art).get("valid", {})
+                        if _vm.get("n"):
+                            _nn, _aa = int(_vm["n"]), _vm["acc"]
+                            txt += f" · 진행중 {newest} {_aa * 100:.1f}% ({int(round(_aa * _nn))}/{_nn})"
+            except Exception:
+                pass
             if txt == "−" and allow_ckpt:
                 try:
                     cp = ckpt_path(league, ver)

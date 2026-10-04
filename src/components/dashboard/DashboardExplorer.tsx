@@ -1098,10 +1098,20 @@ export function DashboardExplorer() {
   const applying =
     loadingLeagues || loadingSeasons || loadingMatches || applyState === "running";
   const trainSet = new Set(modelDetail?.detail?.train_seasons ?? []);
-  const nonTrainOf = (m: Record<string, { n: number; hit: number }>) =>
-    Object.fromEntries(Object.entries(m).filter(([s]) => !trainSet.has(s)));
-  const curOverall = overallOf(nonTrainOf(accuracy));
-  const baseOverall = overallOf(nonTrainOf(baseMapRef.current ?? {}));
+  const validList = Array.isArray(modelDetail?.detail?.valid)
+    ? (modelDetail.detail.valid as unknown[]).map(String).filter((s) => s && s !== "auto")
+    : null;
+  const validSet = validList ? new Set(validList) : null;
+  const scopeOf = (m: Record<string, { n: number; hit: number }>) =>
+    Object.fromEntries(
+      Object.entries(m).filter(([s]) => (validSet ? validSet.has(s) : !trainSet.has(s)))
+    );
+  const upcomingOf = (m: Record<string, { n: number; hit: number; acc: number | null }>) =>
+    Object.entries(m)
+      .filter(([s]) => !trainSet.has(s) && !(validSet ? validSet.has(s) : false))
+      .sort(([a], [b]) => (a < b ? -1 : 1));
+  const curOverall = overallOf(scopeOf(accuracy));
+  const baseOverall = overallOf(scopeOf(baseMapRef.current ?? {}));
   const canSave =
     !!tweaked && curOverall != null && baseOverall != null && curOverall > baseOverall;
   const saveTitle = !tweaked
@@ -1137,9 +1147,23 @@ export function DashboardExplorer() {
         <div>
           <div className="flex items-baseline justify-between">
               <span className="text-xs font-medium text-zinc-500">
-                시즌 적중률 (미학습 {viewSeasons.filter((s) => !trainSet.has(s)).length}/{viewSeasons.length})
+                시즌 적중률 (검증 {validSet ? [...validSet].filter((s) => viewSeasons.includes(s)).length : viewSeasons.filter((s) => !trainSet.has(s)).length}/{viewSeasons.length})
               </span>
-          </div>
+            </div>
+            {(() => {
+              const upcoming = applyState === "done" ? upcomingOf(accuracy) : [];
+              if (upcoming.length === 0) return null;
+              return (
+                <div className="mt-1 space-y-0.5">
+                  {upcoming.map(([s, a]) => (
+                    <p key={s} className="px-0.5 font-mono text-[11px] text-zinc-500">
+                      진행 중 {s} <span className="font-semibold text-zinc-700 dark:text-zinc-300">{a.acc != null ? `${(a.acc * 100).toFixed(1)}%` : "−"}</span>
+                      <span className="text-zinc-400"> ({a.hit}/{a.n})</span>
+                    </p>
+                  ))}
+                </div>
+              );
+            })()}
           <div className="mt-1 space-y-0.5">
             {loadingSeasons ? (
               <p className="text-sm text-zinc-500">시즌 불러오는 중...</p>
@@ -1147,8 +1171,8 @@ export function DashboardExplorer() {
               <p className="px-2 py-1 text-sm text-zinc-500">조회할 시즌이 없습니다.</p>
             ) : (
               (() => {
-                const isTrain = (s: string) => trainSet.has(s);
-                const chrono = [...viewSeasons].reverse().filter((s) => !isTrain(s));
+                const inScope = (s: string) => (validSet ? validSet.has(s) : !trainSet.has(s));
+                const chrono = [...viewSeasons].reverse().filter(inScope);
                 const pts = chrono
                   .map((s, i) => {
                     const a = applyState === "done" ? accuracy[s] : undefined;
@@ -1213,7 +1237,7 @@ export function DashboardExplorer() {
                       )}
                       {pts.map((p) => (
                         <g key={p.s}>
-                          <title>{`${p.s} ${(p.acc * 100).toFixed(1)}% (${p.hit}/${p.n})${isTrain(p.s) ? " · 학습시즌" : ""}${best && p.s === best.s ? " · 최고" : ""}${worst && p.s === worst.s ? " · 최저" : ""}`}</title>
+                          <title>{`${p.s} ${(p.acc * 100).toFixed(1)}% (${p.hit}/${p.n})${best && p.s === best.s ? " · 최고" : ""}${worst && p.s === worst.s ? " · 최저" : ""}`}</title>
                           {best && p.s === best.s && (
                             <circle cx={X(p.i)} cy={Y(p.acc)} r={5.5} fill="none" stroke="#10b981" strokeWidth={1.5} opacity={0.8} />
                           )}
