@@ -93,7 +93,7 @@ export async function GET(req: Request) {
     const lines = readFileSync(join(JOB_DIR, `${id}.log`), "utf-8").split("\n").filter((l) => l.trim());
     tail = lines.slice(-3);
     for (let i = lines.length - 1; i >= 0; i--) {
-      const m = lines[i].match(/계산\s+([\d,]+)\/([\d,]+)/);
+      const m = lines[i].match(/계산\s+([\d,]+)\/([\d,]+)/) ?? lines[i].match(/\(([\d,]+)\/([\d,]+)\)/);
       if (m) {
         progress = {
           done: Number(m[1].replace(/,/g, "")),
