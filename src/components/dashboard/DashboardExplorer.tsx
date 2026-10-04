@@ -381,8 +381,8 @@ export function DashboardExplorer() {
     setHiddenCols((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
 
-  async function pollJob(base: string, jobId: string): Promise<"done" | "error"> {
-    for (let i = 0; i < 150; i++) {
+  async function pollJob(base: string, jobId: string, maxRounds = 150): Promise<"done" | "error"> {
+    for (let i = 0; i < maxRounds; i++) {
       await new Promise((r) => setTimeout(r, 2000));
       try {
         const st = await fetch(`${base}?jobId=${encodeURIComponent(jobId)}`).then((r) => r.json());
@@ -440,7 +440,7 @@ export function DashboardExplorer() {
         setTrainState("error");
         return;
       }
-      const done = await pollJob("/api/match-train", res.jobId as string);
+      const done = await pollJob("/api/match-train", res.jobId as string, fullTrain ? 1800 : 150);
       setTrainState(done);
       if (done === "done") {
         await fetchModels(league);

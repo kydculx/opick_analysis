@@ -41,6 +41,8 @@ import random
 import sys
 import time
 
+os.environ.setdefault("NUMBA_DISABLE_CACHING", "1")
+
 try:
     import numba as _numba
     import numpy as _np_nb
