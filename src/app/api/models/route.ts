@@ -244,13 +244,45 @@ export async function DELETE(req: Request) {
   const { searchParams } = new URL(req.url);
   const league = searchParams.get("league") ?? "";
   const ver = searchParams.get("ver") ?? "";
-  if (!league || !/^[A-Za-z0-9_-]+$/.test(ver)) {
+  if (!/^[A-Za-z0-9_-]+$/.test(league) || !/^[A-Za-z0-9_.-]+$/.test(ver)) {
     return NextResponse.json({ ok: false, error: "league와 ver가 필요" }, { status: 400 });
   }
   try {
-    const base = `${process.cwd()}/ml/permatch/${league}_${ver}`;
-    for (const ext of ["pkl", "txt", "json"]) rmSync(`${base}.${ext}`, { force: true });
-    return NextResponse.json({ ok: true, ver });
+    const dir = `${process.cwd()}/ml/permatch`;
+    const base = `${dir}/${league}_${ver}`;
+    const targets = new Set([
+      `${base}.json`,
+      `${base}.grid.json`,
+      `${base}.whist.json`,
+      `${base}.live.json`,
+      `${base}.auto.json`,
+      `${base}.xgb.json`,
+      `${base}.lstm.pt`,
+    ]);
+    if (ver.endsWith("-ens")) {
+      targets.add(`${base}.xgb.json`);
+    } else {
+      targets.add(`${base}-ens.json`);
+      targets.add(`${base}-ens.xgb.json`);
+    }
+    const deleted: string[] = [];
+    for (const p of targets) {
+      try {
+        if (!existsSync(p)) continue;
+        rmSync(p, { force: true });
+        if (!existsSync(p)) deleted.push(p.slice(dir.length + 1));
+      } catch {
+      }
+    }
+    try {
+      const supabase = createServerSupabaseClient();
+      await supabase.from("models").delete().eq("league_code", league).eq("ver", ver);
+      if (!ver.endsWith("-ens")) {
+        await supabase.from("models").delete().eq("league_code", league).eq("ver", `${ver}-ens`);
+      }
+    } catch {
+    }
+    return NextResponse.json({ ok: true, ver, deleted });
   } catch (e) {
     return NextResponse.json(
       { ok: false, error: e instanceof Error ? e.message : "Unknown error" },

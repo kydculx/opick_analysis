@@ -19,7 +19,10 @@ function nowTag(d = new Date()): string {
 }
 
 export async function POST(req: Request) {
-  const body = (await req.json().catch(() => ({}))) as { league?: unknown; seasons?: unknown; features?: unknown };
+  const body = (await req.json().catch(() => ({}))) as {
+    league?: unknown; seasons?: unknown; features?: unknown;
+    mode?: unknown; trials?: unknown; jobs?: unknown; drawW?: unknown; valid?: unknown;
+  };
   const league = typeof body.league === "string" ? body.league : "";
   const seasons = Array.isArray(body.seasons) ? body.seasons.map((s) => String(s)).filter(Boolean) : [];
   const features = Array.isArray(body.features)
@@ -28,24 +31,44 @@ export async function POST(req: Request) {
   if (features.length === 0) {
     return NextResponse.json({ ok: false, error: "피처를 1개 이상 선택하세요" }, { status: 400 });
   }
+  const full = typeof body.mode === "string" && body.mode === "full";
+  const trials = Math.max(1, Math.min(200000, Number.parseInt(String(body.trials ?? "10000"), 10) || 10000));
+  const jobs = Math.max(1, Math.min(16, Number.parseInt(String(body.jobs ?? "4"), 10) || 4));
+  const drawW = Number.parseFloat(String(body.drawW ?? "0")) || 0;
+  const valid = Array.isArray(body.valid)
+    ? body.valid.map((s) => String(s)).filter(Boolean)
+    : "auto";
   const sorted = [...new Set(seasons)].sort() as string[];
   const feats = features.length === ALL_FEATURES.length ? [...ALL_FEATURES] : [...features];
-  const ver = makeVer(sorted.join(","), feats, "0", nowTag());
+  const ver = makeVer(sorted.join(","), feats, String(drawW), nowTag());
+  const argv = full
+    ? [
+        "--league", league,
+        "--train", sorted.join(","),
+        "--valid", Array.isArray(valid) ? valid.join(",") : valid,
+        "--ver", ver,
+        "--trials", String(trials),
+        "--jobs", String(jobs),
+        "--auto-ensemble",
+        ...(drawW ? ["--draw-w", String(drawW)] : []),
+        ...(feats.length !== ALL_FEATURES.length ? ["--features", feats.join(",")] : []),
+      ]
+    : [
+        "--league", league,
+        "--train", sorted.join(","),
+        "--valid", "auto",
+        "--ver", ver,
+        "--fast",
+        "--auto-ensemble",
+        ...(feats.length !== ALL_FEATURES.length ? ["--features", feats.join(",")] : []),
+      ];
   const job = startJob({
     kind: "train",
     league,
     seasons: sorted,
     ver,
     script: "ml/permatch_mode.py",
-    argv: [
-      "--league", league,
-      "--train", sorted.join(","),
-      "--valid", "auto",
-      "--ver", ver,
-      "--fast",
-      "--auto-ensemble",
-      ...(feats.length !== ALL_FEATURES.length ? ["--features", feats.join(",")] : []),
-    ],
+    argv,
   });
   return NextResponse.json({ ok: true, jobId: job.id, ver: `${ver}-ens` });
 }

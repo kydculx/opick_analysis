@@ -102,6 +102,9 @@ export function DashboardExplorer() {
   const [checked, setChecked] = useState<string[]>([]);
   const [trainCount, setTrainCount] = useState("6");
   const [featSel, setFeatSel] = useState<string[]>([...ALL_FEATURES]);
+  const [fullTrain, setFullTrain] = useState(true);
+  const [trialsText, setTrialsText] = useState("10000");
+  const [jobsText, setJobsText] = useState("4");
   const [matches, setMatches] = useState<SoccerMatch[]>([]);
   const [hiddenCols, setHiddenCols] = useState<ColumnId[]>([]);
   const [loadingLeagues, setLoadingLeagues] = useState(true);
@@ -428,6 +431,9 @@ export function DashboardExplorer() {
           league,
           seasons: trainingOrdered,
           ...(featSel.length !== ALL_FEATURES.length ? { features: featSel } : {}),
+          ...(fullTrain
+            ? { mode: "full", trials: trialsText, jobs: jobsText }
+            : { mode: "fast" }),
         }),
       }).then((r) => r.json());
       if (!res.ok) {
@@ -1295,6 +1301,49 @@ export function DashboardExplorer() {
               </button>
             </div>
           </details>
+          <details open className="mt-2 rounded-xl border border-zinc-200 dark:border-zinc-800">
+            <summary className="cursor-pointer px-2.5 py-1.5 text-xs font-medium text-zinc-500">
+              학습 방식 ({fullTrain ? `전체 ${trialsText}회` : "빠른 단발"})
+            </summary>
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-2.5 pb-2">
+              <label className="flex cursor-pointer items-center gap-1 text-xs">
+                <input
+                  type="checkbox"
+                  checked={fullTrain}
+                  onChange={() => setFullTrain((v) => !v)}
+                  disabled={trainState === "running"}
+                  className="h-3.5 w-3.5 accent-blue-600 disabled:opacity-40 dark:accent-blue-400"
+                />
+                <span>새학습(전체탐색)</span>
+              </label>
+              {fullTrain && (
+                <>
+                  <label className="flex items-center gap-1 text-xs text-zinc-500">
+                    trials
+                    <input
+                      value={trialsText}
+                      onChange={(e) => setTrialsText(e.target.value.replace(/[^0-9]/g, ""))}
+                      disabled={trainState === "running"}
+                      inputMode="numeric"
+                      aria-label="trials"
+                      className="w-16 rounded-lg border border-zinc-300 bg-white px-2 py-0.5 text-right font-mono text-xs text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
+                    />
+                  </label>
+                  <label className="flex items-center gap-1 text-xs text-zinc-500">
+                    jobs
+                    <input
+                      value={jobsText}
+                      onChange={(e) => setJobsText(e.target.value.replace(/[^0-9]/g, ""))}
+                      disabled={trainState === "running"}
+                      inputMode="numeric"
+                      aria-label="jobs"
+                      className="w-10 rounded-lg border border-zinc-300 bg-white px-2 py-0.5 text-right font-mono text-xs text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
+                    />
+                  </label>
+                </>
+              )}
+            </div>
+          </details>
           <Button
             size="sm"
             disabled={trainingOrdered.length === 0 || trainState === "running" || trainState === "done"}
@@ -1368,6 +1417,8 @@ export function DashboardExplorer() {
                 delete predCacheRef.current[cacheKey(league, delVer)];
                 delete accCacheRef.current[cacheKey(league, delVer)];
                 await fetchModels(league);
+              } else {
+                setError(res.error ?? "모델 삭제 실패");
               }
             }}
             className="mt-2 w-full text-center text-xs text-red-500 underline underline-offset-2 disabled:opacity-40 dark:text-red-400"
