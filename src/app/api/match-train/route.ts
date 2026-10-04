@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { createHash } from "node:crypto";
-import { isJobId, readJob, startJob } from "@/lib/jobs";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { JOB_DIR, isJobId, readJob, startJob } from "@/lib/jobs";
 import { ALL_FEATURES } from "@/lib/permatch-math";
 
 // GUI ml/grid_console.py make_ver와 동일 규칙: tr{시즌수}-f{피처수}-d{무가중}-x{해시4}-{년월일시분}
@@ -85,5 +87,24 @@ export async function GET(req: Request) {
   if (!job) {
     return NextResponse.json({ ok: false, error: "작업을 찾을 수 없음" }, { status: 404 });
   }
-  return NextResponse.json({ ok: true, job });
+  let progress: { done: number; total: number } | null = null;
+  let tail: string[] = [];
+  try {
+    const lines = readFileSync(join(JOB_DIR, `${id}.log`), "utf-8").split("\n").filter((l) => l.trim());
+    tail = lines.slice(-3);
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const m = lines[i].match(/계산\s+([\d,]+)\/([\d,]+)/);
+      if (m) {
+        progress = {
+          done: Number(m[1].replace(/,/g, "")),
+          total: Number(m[2].replace(/,/g, "")),
+        };
+        break;
+      }
+      if (lines.length - i > 4000) break;
+    }
+  } catch {
+    progress = null;
+  }
+  return NextResponse.json({ ok: true, job, progress, tail });
 }

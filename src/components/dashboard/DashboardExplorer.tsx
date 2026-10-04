@@ -105,6 +105,7 @@ export function DashboardExplorer() {
   const [fullTrain, setFullTrain] = useState(true);
   const [trialsText, setTrialsText] = useState("10000");
   const [jobsText, setJobsText] = useState("4");
+  const [trainProg, setTrainProg] = useState<{ done: number; total: number; line?: string } | null>(null);
   const [matches, setMatches] = useState<SoccerMatch[]>([]);
   const [hiddenCols, setHiddenCols] = useState<ColumnId[]>([]);
   const [loadingLeagues, setLoadingLeagues] = useState(true);
@@ -381,11 +382,17 @@ export function DashboardExplorer() {
     setHiddenCols((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   }
 
-  async function pollJob(base: string, jobId: string, maxRounds = 150): Promise<"done" | "error"> {
+  async function pollJob(
+    base: string,
+    jobId: string,
+    maxRounds = 150,
+    onProgress?: (p: { done: number; total: number } | null, tail?: string[]) => void
+  ): Promise<"done" | "error"> {
     for (let i = 0; i < maxRounds; i++) {
       await new Promise((r) => setTimeout(r, 2000));
       try {
         const st = await fetch(`${base}?jobId=${encodeURIComponent(jobId)}`).then((r) => r.json());
+        if (st.ok && onProgress) onProgress(st.progress ?? null, st.tail ?? undefined);
         if (st.ok && st.job.status !== "running") {
           return st.job.status === "done" ? "done" : "error";
         }
@@ -420,6 +427,7 @@ export function DashboardExplorer() {
       return;
     }
     setTrainState("running");
+    setTrainProg(null);
     setAppliedVer("");
     setPredMap({});
     appliedKeyRef.current = "";
@@ -440,7 +448,12 @@ export function DashboardExplorer() {
         setTrainState("error");
         return;
       }
-      const done = await pollJob("/api/match-train", res.jobId as string, fullTrain ? 1800 : 150);
+      const done = await pollJob(
+        "/api/match-train",
+        res.jobId as string,
+        fullTrain ? 1800 : 150,
+        (p, tail) => setTrainProg(p ? { ...p, line: tail?.[tail.length - 1] } : null)
+      );
       setTrainState(done);
       if (done === "done") {
         await fetchModels(league);
@@ -1379,13 +1392,20 @@ export function DashboardExplorer() {
             }
           >
             {trainState === "running"
-              ? "학습 중..."
+              ? trainProg && trainProg.total > 0
+                ? `학습 중... ${trainProg.done.toLocaleString()}/${trainProg.total.toLocaleString()} (${((trainProg.done / trainProg.total) * 100).toFixed(0)}%)`
+                : "학습 중..."
               : trainState === "done"
                 ? "학습 완료"
                 : trainState === "error"
                   ? "실패 · 다시 시도"
                   : `학습하기${trainingOrdered.length > 0 ? ` (${trainingOrdered.length})` : ""}`}
           </Button>
+          {trainState === "running" && trainProg?.line && (
+            <p className="mt-1 truncate px-0.5 font-mono text-[10px] text-zinc-400" title={trainProg.line}>
+              {trainProg.line.length > 90 ? trainProg.line.slice(-90) : trainProg.line}
+            </p>
+          )}
         </div>
 
         <hr className="border-zinc-200 dark:border-zinc-800" />
