@@ -43,10 +43,11 @@ export async function POST(req: Request) {
       "--valid", "auto",
       "--ver", ver,
       "--fast",
+      "--auto-ensemble",
       ...(feats.length !== ALL_FEATURES.length ? ["--features", feats.join(",")] : []),
     ],
   });
-  return NextResponse.json({ ok: true, jobId: job.id, ver });
+  return NextResponse.json({ ok: true, jobId: job.id, ver: `${ver}-ens` });
 }
 
 export const dynamic = "force-dynamic";

@@ -179,7 +179,7 @@ def list_versions(league):
     for f in files:
         if not f.startswith(league + "_") or not f.endswith(".json"):
             continue
-        if f.endswith((".grid.json", ".live.json", ".auto.json", ".whist.json")):
+        if f.endswith((".grid.json", ".live.json", ".auto.json", ".whist.json", ".xgb.json")):
             continue
         ver = f[len(league) + 1:-5]
         out.append(ver)
@@ -271,7 +271,8 @@ def build_command(o):
     else:
         cmd += ["--train", o["train"], "--valid", o["valid"] or "auto",
                 "--trials", o.get("trials") or "10000",
-                "--jobs", o.get("jobs") or "1"]
+                "--jobs", o.get("jobs") or "1",
+                "--auto-ensemble"]
         if o.get("draw_w"):
             cmd += ["--draw-w", o["draw_w"]]
     if o.get("features"):
@@ -652,6 +653,11 @@ def main():
     def _acc_text_for(art, league, ver, allow_ckpt=True):
         txt = "−"
         if isinstance(art, dict):
+            mt = art.get("model_type") or "permatch"
+            if mt in ("poisson", "dixon", "logreg", "xgb", "lstm", "ensemble"):
+                mm = art.get("metrics") or {}
+                if isinstance(mm.get("acc"), (int, float)):
+                    return f"검증 {mm['acc'] * 100:.1f}% (n={int(mm.get('n', 0))})" if mm.get("n") else f"검증 {mm['acc'] * 100:.1f}%"
             vs = art.get("valid")
             valid_s = {str(s) for s in (vs if isinstance(vs, list) else ([vs] if vs else [])) if s and s != "auto"}
             feats = art.get("features")
@@ -2004,6 +2010,13 @@ def main():
             else:
                 v_status.set(f"종료 (코드 {rc})")
             ui_state["just_done"] = True
+            try:
+                if v_mode.get() == "train":
+                    ev = f"{v_ver.get().strip()}-ens"
+                    if ev and os.path.exists(tune_path(v_league.get(), ev)):
+                        v_ver.set(ev)
+            except tk.TclError:
+                pass
             refresh_ver_list()
             request_acc()
             poll_once()
@@ -2157,7 +2170,7 @@ def main():
             return
         base = os.path.join(ROOT, "ml", "permatch", f"{lg}_{ver}")
         gone = []
-        for ext in (".json", ".grid.json", ".auto.json", ".live.json", ".whist.json"):
+        for ext in (".json", ".grid.json", ".auto.json", ".live.json", ".whist.json", ".xgb.json"):
             try:
                 os.remove(base + ext)
                 gone.append(ext)
@@ -2206,6 +2219,35 @@ def main():
         except (OSError, ValueError):
             pass
 
+    def on_close():
+        r = runner.get("obj")
+        if r is not None:
+            try:
+                ok = messagebox.askyesno("종료", "학습이 실행 중입니다. 중지하고 종료할까요?")
+            except tk.TclError:
+                ok = True
+            if not ok:
+                return
+            try:
+                r.stop()
+            except Exception:
+                pass
+            try:
+                if r.proc is not None:
+                    r.proc.wait(timeout=5)
+            except Exception:
+                try:
+                    if r.proc is not None:
+                        r.proc.kill()
+                except Exception:
+                    pass
+            runner["obj"] = None
+        try:
+            app.destroy()
+        except tk.TclError:
+            pass
+
+    app.protocol("WM_DELETE_WINDOW", on_close)
     btn_start.configure(command=on_start)
     btn_stop.configure(command=on_stop)
     v_league_ko.trace_add("write", on_league_pick)

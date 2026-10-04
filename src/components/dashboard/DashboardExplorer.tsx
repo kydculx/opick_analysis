@@ -2,7 +2,8 @@
 
 import { useEffect, useState, useRef } from "react";
 import type { SoccerMatch, League } from "@/lib/queries";
-import { ALL_FEATURES, applyTemp, blendProbs, cappedDot, drawFeatures, patternProbs, rowFeatures, selectFeatures, sigmoid } from "@/lib/permatch-math";
+import { ALL_FEATURES, applyTemp, blendProbs, cappedDot, dcProba, drawFeatures, legacyParts, logregProba, patternProbs, rowFeatures, selectFeatures, sigmoid } from "@/lib/permatch-math";
+import { xgbProba, type XgbSlim } from "@/lib/xgb";
 import type { PermatchArtifact } from "@/lib/predict";
 import { SoccerMatchesTable, COLUMNS, CORE_COLUMNS, FIELD_GROUPS, SINGLE_COLUMNS, type ColumnId } from "@/components/data/SoccerMatchesTable";
 import { EmptyState } from "@/components/ui/Badge";
@@ -32,6 +33,40 @@ function parseScoreLocal(v: string | null | undefined): number | null {
 
 function predictLocal(m: SoccerMatch, art: PermatchArtifact, ver: string) {
   try {
+    if (art.model_type === "lstm") return null;
+    if (art.model_type === "xgb" && art.xgb) {
+      const p = xgbProba(art.xgb, selectFeatures(rowFeatures(m), art.features));
+      if (p.some((v) => !Number.isFinite(v))) return null;
+      return { home: p[0], draw: p[1], away: p[2], ver };
+    }
+    if (art.model_type === "logreg" && art.scaler_mean && art.scaler_scale && art.coef && art.intercept) {
+      const p = logregProba(selectFeatures(rowFeatures(m), art.features), art.scaler_mean, art.scaler_scale, art.coef, art.intercept);
+      if (p.some((v) => !Number.isFinite(v))) return null;
+      return { home: p[0], draw: p[1], away: p[2], ver };
+    }
+    if ((art.model_type === "poisson" || art.model_type === "dixon") && art.teams && art.att && art.def) {
+      const idx = new Map(art.teams.map((t, i) => [t, i]));
+      const hi = idx.get(String(m.home_team));
+      const ai = idx.get(String(m.away_team));
+      const lam = Math.exp((hi != null ? art.att[hi] : 0) + (ai != null ? art.def[ai] : 0) + (art.home ?? 0));
+      const mu = Math.exp((ai != null ? art.att[ai] : 0) + (hi != null ? art.def[hi] : 0));
+      const rho = art.model_type === "dixon" ? (art.rho ?? 0) : 0;
+      const p = dcProba(lam, mu, rho);
+      if (p.some((v) => !Number.isFinite(v))) return null;
+      return { home: p[0], draw: p[1], away: p[2], ver };
+    }
+    if (art.model_type === "ensemble" && art.base && art.xgb) {
+      const b = legacyParts(m, art.base);
+      if (!b) return null;
+      const qx = xgbProba(art.xgb, rowFeatures(m));
+      const alpha = art.blend_w ?? 1;
+      const dd = alpha * b.dd + (1 - alpha) * qx[1];
+      const lin = [b.ph * (1 - dd), dd, (1 - b.ph) * (1 - dd)];
+      const bb = art.base;
+      const p = applyTemp(blendProbs(lin, b.x, bb.patterns, bb.pattern_tau ?? 0), bb.T);
+      if (p.some((v) => !Number.isFinite(v))) return null;
+      return { home: p[0], draw: p[1], away: p[2], ver };
+    }
     const e = art.emphasis ?? new Array(art.features?.length ?? art.mu.length).fill(1);
     const rf = selectFeatures(rowFeatures(m), art.features);
     const x = rf.map((v, i) => (v - art.mu[i]) / art.sd[i]).map((v, i) => v * (e[i] ?? 1));
@@ -111,6 +146,10 @@ export function DashboardExplorer() {
       trials: number | null;
       pattern_tau: number | null;
       pattern_stats: Record<string, { rank: number; freq: number; acc: number }[]> | null;
+      base_ver?: string;
+      blend_w?: number;
+      base?: PermatchArtifact | null;
+      xgb?: XgbSlim | null;
     } | null;
   };
   const [modelDetail, setModelDetail] = useState<ModelDetail | null>(null);
@@ -1091,9 +1130,9 @@ export function DashboardExplorer() {
 
         <div>
           <div className="flex items-baseline justify-between">
-            <span className="text-xs font-medium text-zinc-500">
-              시즌 적중률 (전체 {viewSeasons.length})
-            </span>
+              <span className="text-xs font-medium text-zinc-500">
+                시즌 적중률 (미학습 {viewSeasons.filter((s) => !trainSet.has(s)).length}/{viewSeasons.length})
+              </span>
           </div>
           <div className="mt-1 space-y-0.5">
             {loadingSeasons ? (
@@ -1103,7 +1142,7 @@ export function DashboardExplorer() {
             ) : (
               (() => {
                 const isTrain = (s: string) => trainSet.has(s);
-                const chrono = [...viewSeasons].reverse();
+                const chrono = [...viewSeasons].reverse().filter((s) => !isTrain(s));
                 const pts = chrono
                   .map((s, i) => {
                     const a = applyState === "done" ? accuracy[s] : undefined;

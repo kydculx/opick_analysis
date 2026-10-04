@@ -551,6 +551,9 @@ def load_seasons(league: str, seasons: list[str], use_cache: bool = True):
 def tune_weights(league: str, ver: str, tune_s: set, max_sweeps: int = 6,
                  use_cache: bool = True, draw_w: float = 0.0):
     art = json.load(open(model_path(league, ver)))
+    if not isinstance(art.get("weights"), list):
+        log(f"조절/탐색은 legacy 가중치 모델만 지원 (현재: {art.get('model_type')})")
+        return False
     afeats = art.get("features")
     if isinstance(afeats, list) and afeats:
         global FEATURES, SEL
@@ -657,6 +660,9 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
         log(f"아티팩트 없음: {p} (먼저 학습 필요)")
         return False
     art = json.load(open(p))
+    if not isinstance(art.get("weights"), list):
+        log(f"조절/탐색은 legacy 가중치 모델만 지원 (현재: {art.get('model_type')})")
+        return False
     afeats = art.get("features")
     if isinstance(afeats, list) and afeats:
         global FEATURES, SEL
@@ -972,6 +978,9 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
         log(f"아티팩트 없음: {p} (먼저 학습 필요)")
         return False
     art = json.load(open(p))
+    if not isinstance(art.get("weights"), list):
+        log(f"조절/탐색은 legacy 가중치 모델만 지원 (현재: {art.get('model_type')})")
+        return False
     afeats = art.get("features")
     if isinstance(afeats, list) and afeats:
         global FEATURES, SEL
@@ -1777,6 +1786,14 @@ def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", d
     draws = sum(1 for s, y in zip(splits, labels) if s == "train" and y == 1)
     draw_prior = draws / max(n_train, 1)
     log(f"train={n_train} draw_prior={draw_prior:.3f}")
+    try:
+        import draw_analysis as _da
+        draw_rep = _da.analyze_draws(matches, train_s)
+        _da.log_report(draw_rep, log)
+    except Exception as e:
+        log(f"무분석 스킽: {type(e).__name__}")
+        draw_rep = {"seasons": [], "n_train": n_train, "draws": draws,
+                    "draw_prior": round(draw_prior, 4)}
     log(f"features={','.join(FEATURES)}")
 
     vX = [x for x, s, y in zip(feats, splits, labels) if s == "train" and y is not None]
@@ -1824,7 +1841,8 @@ def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", d
                 "draw_mu": mu_d, "draw_sd": sd_d, "draw_features": DRAW_FEATURES,
                 "features": FEATURES, "patterns": patterns, "pattern_tau": pattern_tau,
                 "pattern_stats": pattern_stats, "contrib_cap": contrib_cap,
-                "train_seasons": sorted(train_s), "valid": sorted(valid_s)}
+                "train_seasons": sorted(train_s), "valid": sorted(valid_s),
+                "draw_analysis": draw_rep}
     return artifact, metrics
 
 
@@ -2325,6 +2343,8 @@ def main():
     ap.add_argument("--features", default="", help="임의 피처 선택, 콤마 구분 (예: rank,power,att). 지정 시 --five보다 우선")
     ap.add_argument("--model", default="legacy", choices=["legacy"], help="모델 구조 (legacy 단일)")
     ap.add_argument("--draw-w", type=float, default=0.0, help="무승부 가중 (선발 리콜가중 + 샘플가중, 0=끄기, 예: 0.5)")
+    ap.add_argument("--auto-ensemble", action="store_true", help="학습 후 legacy+XGB 앙상블 자동 적합")
+    ap.add_argument("--ens-rec-w", type=float, default=0.5, help="앙상블 선발식 무승부 가중")
     ap.add_argument("--trials", type=int, default=20)
     ap.add_argument("--sweeps", type=int, default=6, help="tune 모드용 최대 sweep 수")
     ap.add_argument("--seq-sweeps", type=int, default=1, help="auto 모드 순차 패스 수")
@@ -2353,6 +2373,24 @@ def main():
     league, ver = args.league, args.ver
     global _LEAGUE_TAG
     _LEAGUE_TAG = league_tag(league)
+
+    def run_auto_ensemble():
+        import subprocess
+        log("앙상블 적합 시작...")
+        try:
+            r = subprocess.run(
+                [sys.executable, "ml/ensemble.py", "--league", league,
+                 "--base", ver, "--rec-w", str(args.ens_rec_w)],
+                capture_output=True, text=True, timeout=1800)
+        except Exception as e:
+            log(f"앙상블 실패: {e}")
+            return
+        for line in ((r.stdout or "") + "\n" + (r.stderr or "")).splitlines():
+            line = line.strip()
+            if line:
+                log(f"[ens] {line}")
+        if r.returncode != 0:
+            log(f"앙상블 종료코드 {r.returncode}")
     if args.features:
         names = [s.strip() for s in args.features.split(",") if s.strip()]
         bad = [n for n in names if n not in FEATURES13]
@@ -2492,6 +2530,8 @@ def main():
         save_artifact(league, ver, artifact)
         w = artifact["weights"]
         log(f"FINAL W {{{', '.join(f'{n}:{v:+.3f}' for n, v in zip(FEATURES, w))}}} T={artifact['T']}")
+        if args.auto_ensemble:
+            run_auto_ensemble()
         return
 
     # ---- autotune 모드
@@ -2506,6 +2546,13 @@ def main():
         labels.append(0 if hs > aws else (1 if hs == aws else 2))
     draws = sum(1 for y in labels if y == 1)
     d = draws / max(len(labels), 1)
+    try:
+        import draw_analysis as _da2
+        draw_rep2 = _da2.analyze_draws(rows, train_s)
+        _da2.log_report(draw_rep2, log)
+    except Exception:
+        draw_rep2 = {"seasons": [], "n_train": len(labels), "draws": draws,
+                     "draw_prior": round(d, 4)}
     mu, sd = standardize(feats)
     Xn = [apply_std(x, mu, sd) for x in feats]
     ty = labels
@@ -2598,7 +2645,8 @@ def main():
             save_artifact(league, ver, {"weights": w, "hfa": hfa, "T": T, "draw_prior": d,
                                         "mu": mu, "sd": sd, "emphasis": e, "features": FEATURES,
                                         "train_seasons": sorted(train_s),
-                                        "valid": sorted(valid_s), "trials": t, "best_trial": t})
+                                        "valid": sorted(valid_s), "trials": t, "best_trial": t,
+                                        "draw_analysis": draw_rep2})
             tag = " ★ NEW BEST 저장"
             no_improve = 0
         else:
@@ -2629,6 +2677,8 @@ def main():
         save_artifact(league, ver, _art)
     except (OSError, ValueError):
         pass
+    if args.auto_ensemble:
+        run_auto_ensemble()
     log(f"FINAL best acc={best['acc']:.3f} ll={best['ll']:.4f} trial={best['trial']} ver={ver} total={(time.time() - _START) / 60:.1f}m")
 
 

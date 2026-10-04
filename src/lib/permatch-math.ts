@@ -110,9 +110,80 @@ export function sigmoid(s: number): number {
   return 1 / (1 + Math.exp(-c));
 }
 
+export type LegacyArt = {
+  weights?: number[] | null;
+  hfa?: number | null;
+  draw_prior?: number | null;
+  mu: number[];
+  sd: number[];
+  features?: string[] | null;
+  emphasis?: number[] | null;
+  draw_weights?: number[] | null;
+  draw_bias?: number | null;
+  draw_mu?: number[] | null;
+  draw_sd?: number[] | null;
+  contrib_cap?: number | null;
+};
+
+export function stdVec(x: number[], mu: number[], sd: number[]): number[] {
+  return x.map((v, i) => (v - mu[i]) / sd[i]);
+}
+
+export function legacyParts(
+  m: SoccerMatch,
+  art: LegacyArt
+): { x: number[]; ph: number; dd: number } | null {
+  const e = art.emphasis ?? new Array(art.features?.length ?? art.mu.length).fill(1);
+  const x = stdVec(selectFeatures(rowFeatures(m), art.features), art.mu, art.sd).map((v, i) => v * e[i]);
+  if (!(art.weights && art.hfa != null && art.draw_prior != null)) return null;
+  const s = cappedDot(x, art.weights, art.hfa, art.contrib_cap ?? null);
+  const ph = sigmoid(s);
+  let dd: number;
+  if (art.draw_weights && art.draw_mu && art.draw_sd) {
+    const xd = stdVec(drawFeatures(m), art.draw_mu, art.draw_sd);
+    const ds = xd.reduce((a, v, i) => a + v * (art.draw_weights as number[])[i], 0) + (art.draw_bias ?? 0);
+    dd = sigmoid(ds);
+  } else {
+    dd = art.draw_prior;
+  }
+  return { x, ph, dd };
+}
+
 export function cappedDot(x: number[], w: number[], hfa: number, cap: number | null | undefined): number {
   if (!cap || cap <= 0) return x.reduce((a, v, i) => a + v * w[i], hfa);
   return x.reduce((a, v, i) => a + cap * Math.tanh((v * w[i]) / (cap as number)), hfa);
+}
+
+function factorial(n: number): number {
+  let r = 1;
+  for (let i = 2; i <= n; i++) r *= i;
+  return r;
+}
+
+export function dcProba(lam: number, mu: number, rho: number, maxGoals = 10): number[] {  const grid: number[][] = [];
+  for (let x = 0; x <= maxGoals; x++) {
+    grid[x] = [];
+    const px = (lam ** x * Math.exp(-lam)) / factorial(x);
+    for (let y = 0; y <= maxGoals; y++) {
+      let tau = 1;
+      if (x === 0 && y === 0) tau = 1 - lam * mu * rho;
+      else if (x === 0 && y === 1) tau = 1 + lam * rho;
+      else if (x === 1 && y === 0) tau = 1 + mu * rho;
+      else if (x === 1 && y === 1) tau = 1 - rho;
+      grid[x][y] = px * ((mu ** y * Math.exp(-mu)) / factorial(y)) * Math.max(tau, 1e-12);
+    }
+  }
+  const s = grid.flat().reduce((a, b) => a + b, 0) || 1;
+  let hw = 0;
+  let aw = 0;
+  for (let x = 0; x <= maxGoals; x++) {
+    for (let y = 0; y <= maxGoals; y++) {
+      const p = grid[x][y] / s;
+      if (x > y) hw += p;
+      else if (y > x) aw += p;
+    }
+  }
+  return [hw, Math.max(0, 1 - hw - aw), aw];
 }
 
 export function applyTemp(p: number[], T: number): number[] {
@@ -149,4 +220,19 @@ export function blendProbs(lin: number[], x: number[], patterns: PatternSet | un
   const pp = patternProbs(x, patterns, tau);
   if (!pp) return lin;
   return lin.map((v, i) => 0.5 * v + 0.5 * pp[i]);
+}
+
+export function logregProba(
+  x: number[],
+  mean: number[],
+  scale: number[],
+  coef: number[][],
+  intercept: number[]
+): number[] {
+  const z = x.map((v, i) => (v - mean[i]) / (scale[i] || 1));
+  const logits = coef.map((row, c) => row.reduce((a, w, i) => a + w * (z[i] ?? 0), intercept[c] ?? 0));
+  const mx = Math.max(...logits);
+  const ex = logits.map((v) => Math.exp(Math.max(-30, Math.min(30, v - mx))));
+  const s = ex.reduce((a, b) => a + b, 0) || 1;
+  return ex.map((v) => v / s);
 }

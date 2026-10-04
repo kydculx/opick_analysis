@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
+import { loadArtifact } from "@/lib/predict";
 
 function diskVersions(league: string): { ver: string; model_type: string }[] {
   const dir = `${process.cwd()}/ml/permatch`;
@@ -9,8 +10,14 @@ function diskVersions(league: string): { ver: string; model_type: string }[] {
   const out: { ver: string; model_type: string }[] = [];
   for (const f of readdirSync(dir)) {
     if (!f.startsWith(prefix) || !f.endsWith(".json")) continue;
-    if (f.endsWith(".grid.json") || f.endsWith(".live.json") || f.endsWith(".auto.json") || f.endsWith(".whist.json")) continue;
-    out.push({ ver: f.slice(prefix.length, -5), model_type: "permatch" });
+    if (f.endsWith(".grid.json") || f.endsWith(".live.json") || f.endsWith(".auto.json") || f.endsWith(".whist.json") || f.endsWith(".xgb.json") || f.endsWith(".lstm.pt")) continue;
+    try {
+      const a = JSON.parse(readFileSync(`${dir}/${f}`, "utf-8"));
+      const mt = typeof a?.model_type === "string" ? a.model_type : "permatch";
+      out.push({ ver: f.slice(prefix.length, -5), model_type: mt });
+    } catch {
+      out.push({ ver: f.slice(prefix.length, -5), model_type: "permatch" });
+    }
   }
   return out;
 }
@@ -34,7 +41,98 @@ export async function GET(req: Request) {
         return NextResponse.json({ ok: true, league, ver, model_type: "unknown", detail: null });
       }
       const a = JSON.parse(readFileSync(p, "utf-8"));
+      if (a?.model_type === "ensemble") {
+        const art = loadArtifact(league, ver);
+        if (!art || art.model_type !== "ensemble" || !art.base || !art.xgb) {
+          return NextResponse.json({ ok: true, league, ver, model_type: "unknown", detail: null });
+        }
+        const b = art.base;
+        return NextResponse.json({
+          ok: true,
+          league,
+          ver,
+          model_type: "ensemble",
+          detail: {
+            model_type: "ensemble",
+            features: Array.isArray(b.features) ? b.features : [],
+            weights: null,
+            base_ver: art.base_ver ?? null,
+            blend_w: art.blend_w ?? 1,
+            base: {
+              weights: b.weights ?? null,
+              hfa: b.hfa ?? null,
+              T: b.T ?? null,
+              draw_prior: b.draw_prior ?? null,
+              mu: Array.isArray(b.mu) ? b.mu : null,
+              sd: Array.isArray(b.sd) ? b.sd : null,
+              emphasis: Array.isArray(b.emphasis) ? b.emphasis : null,
+              draw_weights: Array.isArray(b.draw_weights) ? b.draw_weights : null,
+              draw_bias: b.draw_bias ?? 0,
+              draw_mu: Array.isArray(b.draw_mu) ? b.draw_mu : null,
+              draw_sd: Array.isArray(b.draw_sd) ? b.draw_sd : null,
+              patterns: b.patterns ?? null,
+              pattern_tau: b.pattern_tau ?? null,
+              contrib_cap: b.contrib_cap ?? null,
+            },
+            xgb: art.xgb,
+            train_seasons: Array.isArray(a.train_seasons) ? a.train_seasons : [],
+            valid: a.valid ?? null,
+          },
+        });
+      }
       const feats: string[] = Array.isArray(a.features) ? a.features : [];
+      const mt = typeof a?.model_type === "string" ? a.model_type : "permatch";
+      if (mt === "poisson" || mt === "dixon") {
+        return NextResponse.json({
+          ok: true, league, ver, model_type: mt,
+          detail: {
+            model_type: mt, features: feats,
+            teams: Array.isArray(a.teams) ? a.teams : [],
+            att: Array.isArray(a.att) ? a.att : [],
+            def: Array.isArray(a.def) ? a.def : [],
+            home: a.home ?? null, rho: a.rho ?? null, xi: a.xi ?? null,
+            train_seasons: a.train_seasons ?? [], valid: a.valid ?? null,
+            metrics: a.metrics ?? null,
+          },
+        });
+      }
+      if (mt === "logreg") {
+        return NextResponse.json({
+          ok: true, league, ver, model_type: mt,
+          detail: {
+            model_type: mt, features: feats,
+            scaler_mean: Array.isArray(a.scaler_mean) ? a.scaler_mean : null,
+            scaler_scale: Array.isArray(a.scaler_scale) ? a.scaler_scale : null,
+            coef: Array.isArray(a.coef) ? a.coef : null,
+            intercept: Array.isArray(a.intercept) ? a.intercept : null,
+            train_seasons: a.train_seasons ?? [], valid: a.valid ?? null,
+            metrics: a.metrics ?? null,
+          },
+        });
+      }
+      if (mt === "xgb") {
+        return NextResponse.json({
+          ok: true, league, ver, model_type: mt,
+          detail: {
+            model_type: mt, features: feats,
+            xgb_file: a.xgb_file ?? null,
+            train_seasons: a.train_seasons ?? [], valid: a.valid ?? null,
+            metrics: a.metrics ?? null,
+          },
+        });
+      }
+      if (mt === "lstm") {
+        return NextResponse.json({
+          ok: true, league, ver, model_type: mt,
+          detail: {
+            model_type: mt,
+            lstm_file: a.lstm_file ?? null, seq_len: a.seq_len ?? null,
+            serving: "python-only",
+            train_seasons: a.train_seasons ?? [], valid: a.valid ?? null,
+            metrics: a.metrics ?? null,
+          },
+        });
+      }
       const weights: number[] = Array.isArray(a.weights) ? a.weights : [];
       const emphasis: number[] | null = Array.isArray(a.emphasis) ? a.emphasis : null;
       return NextResponse.json({
