@@ -40,6 +40,8 @@ def main():
     ap.add_argument("--ver", required=True, help="저장 버전")
     ap.add_argument("--lr", type=float, default=0.05)
     ap.add_argument("--l2", type=float, default=0.0)
+    ap.add_argument("--lr-decay", type=float, default=0.0, help="매경기 lr/(1+decay*n) 감쇠 (0이면 끔)")
+    ap.add_argument("--rollback", action="store_true", help="최근 500경기 최고 가중치로 복원")
     ap.add_argument("--dw-lr", type=float, default=0.01, help="무브랜치 lr")
     ap.add_argument("--draw-up", type=float, default=1.0, help="무 실제시 무브랜치 갱신 배율")
     ap.add_argument("--draw-t", type=float, default=0.3, help="dd가 이 값 넘고 양쪽 확률이 draw-c 미만이면 무")
@@ -126,6 +128,11 @@ def main():
 
     lr = max(args.lr, 0.0)
     l2 = max(args.l2, 0.0)
+    lr_decay = max(args.lr_decay, 0.0)
+    use_rollback = bool(args.rollback)
+    from collections import deque
+    recent = deque(maxlen=500)
+    best_roll, best_snap = -1.0, None
     dw_lr = args.dw_lr if args.dw_lr > 0 else lr
     draw_up = max(args.draw_up, 0.0)
     draw_t = args.draw_t
@@ -182,11 +189,12 @@ def main():
         s_lin = max(-30.0, min(30.0, sum(a * b for a, b in zip(x, w)) + hfa))
         ph = 1.0 / (1.0 + math.exp(-s_lin))
         g = -(1.0 - ph) if y == 0 else (ph if y == 2 else 0.0)
+        lr_eff = lr / (1.0 + lr_decay * n)
         if g:
             if l2:
-                w = [v * (1.0 - lr * l2) for v in w]
-            w = [v - lr * g * xv for v, xv in zip(w, x)]
-            hfa -= lr * g
+                w = [v * (1.0 - lr_eff * l2) for v in w]
+            w = [v - lr_eff * g * xv for v, xv in zip(w, x)]
+            hfa -= lr_eff * g
         s_dr = max(-30.0, min(30.0, sum(a * b for a, b in zip(xd, dw)) + db))
         dd = 1.0 / (1.0 + math.exp(-s_dr))
         gd = -(1.0 - dd) if y == 1 else dd
@@ -194,6 +202,13 @@ def main():
             gd *= draw_up
         dw = [v - dw_lr * gd * xv for v, xv in zip(dw, xd)]
         db -= dw_lr * gd
+        if use_rollback:
+            recent.append(1 if pick == y else 0)
+            if len(recent) == 500:
+                roll = sum(recent) / 500
+                if roll > best_roll:
+                    best_roll = roll
+                    best_snap = (list(w), float(hfa), list(dw), float(db), n)
         if n % max(args.log_every, 1) == 0 or n == len(scored):
             print(f"누적 {n}/{len(scored)} walk={walk_hit / walk_tot:.3f}", flush=True)
 
@@ -241,6 +256,9 @@ def main():
     test = None
     test_recs = []
     _tt, _tc = draw_spec["t"], draw_spec["c"]
+    if use_rollback and best_snap is not None:
+        w, hfa, dw, db = best_snap[0], best_snap[1], best_snap[2], best_snap[3]
+        print(f"롤백: {best_snap[4]}번째 최고(최근500 {best_roll:.3f})로 복원")
     if test_s:
         thit, ttot, tll = 0, 0, 0.0
         tsea = {}
@@ -286,6 +304,7 @@ def main():
                 "valid": sorted(set(test_s)),
                 "metrics": {"acc": walk["acc"], "ll": walk["ll"], "draw_rec": 0.0},
                 "cumulative": {"base_ver": args.base, "lr": lr, "l2": l2,
+                               "lr_decay": lr_decay, "rollback": use_rollback,
                                "walk": walk, "static_acc": static_acc, "test": test,
                                "draw_spec": draw_spec, "draw_alert_t": args.alert_t}})
     out_p = os.path.join(ROOT, "ml", "permatch", f"{args.league}_{args.ver}.json")

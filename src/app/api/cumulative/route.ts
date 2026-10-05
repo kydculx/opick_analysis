@@ -14,6 +14,7 @@ function nowTag(d = new Date()): string {
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as {
     league?: unknown; seasons?: unknown; base?: unknown; lr?: unknown; ver?: unknown; features?: unknown;
+    lrDecay?: unknown; rollback?: unknown;
   };
   const league = typeof body.league === "string" ? body.league : "";
   const seasons = Array.isArray(body.seasons) ? body.seasons.map((s) => String(s)).filter(Boolean) : [];
@@ -54,6 +55,9 @@ export async function POST(req: Request) {
   ];
   if (resolvedBase) argv.push("--base", resolvedBase);
   if (feats.length !== ALL_FEATURES.length) argv.push("--features", feats.join(","));
+  const decay = Number.parseFloat(String(body.lrDecay ?? "0")) || 0;
+  if (decay > 0) argv.push("--lr-decay", String(decay));
+  if (body.rollback === true || body.rollback === "true" || body.rollback === 1) argv.push("--rollback");
   const job = startJob({
     kind: "train",
     league,

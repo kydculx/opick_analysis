@@ -112,6 +112,8 @@ export function DashboardExplorer() {
   const [jobsText, setJobsText] = useState("4");
   const [trainProg, setTrainProg] = useState<{ done: number; total: number; line?: string } | null>(null);
   const [cumuLr, setCumuLr] = useState("0.05");
+  const [cumuDecayOn, setCumuDecayOn] = useState(false);
+  const [cumuRollbackOn, setCumuRollbackOn] = useState(false);
   const [cumuBase, setCumuBase] = useState("");
   const [cumuResult, setCumuResult] = useState<string | null>(null);
   const [matches, setMatches] = useState<SoccerMatch[]>([]);
@@ -454,6 +456,8 @@ export function DashboardExplorer() {
           base: cumuBase,
           lr: cumuLr,
           ...(featSel.length !== ALL_FEATURES.length ? { features: featSel } : {}),
+          ...(cumuDecayOn ? { lrDecay: 0.0002 } : {}),
+          ...(cumuRollbackOn ? { rollback: true } : {}),
         }),
       }).then((r) => r.json());
       if (!res.ok) {
@@ -1430,6 +1434,26 @@ export function DashboardExplorer() {
                   className="w-14 rounded-lg border border-zinc-300 bg-white px-2 py-0.5 text-right font-mono text-xs text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
                 />
               </label>
+              <label className="flex cursor-pointer items-center gap-1 text-xs text-zinc-500">
+                <input
+                  type="checkbox"
+                  checked={cumuDecayOn}
+                  onChange={() => setCumuDecayOn((v) => !v)}
+                  disabled={trainState === "running"}
+                  className="h-3.5 w-3.5 accent-blue-600 disabled:opacity-40 dark:accent-blue-400"
+                />
+                <span>lr감쇠</span>
+              </label>
+              <label className="flex cursor-pointer items-center gap-1 text-xs text-zinc-500">
+                <input
+                  type="checkbox"
+                  checked={cumuRollbackOn}
+                  onChange={() => setCumuRollbackOn((v) => !v)}
+                  disabled={trainState === "running"}
+                  className="h-3.5 w-3.5 accent-blue-600 disabled:opacity-40 dark:accent-blue-400"
+                />
+                <span>롤백</span>
+              </label>
               </div>
             )}
           <details open className="mt-2 rounded-xl border border-zinc-200 dark:border-zinc-800">
@@ -1511,7 +1535,7 @@ export function DashboardExplorer() {
             size="sm"
             disabled={
               learnMode === "cumulative"
-                ? checked.length === 0 || trainState === "running" || trainState === "done"
+                ? checked.length === 0 || trainState === "running" || (trainState === "done" && cumuBase !== "")
                 : trainingOrdered.length === 0 || trainState === "running" || trainState === "done"
             }
             onClick={handleTrain}

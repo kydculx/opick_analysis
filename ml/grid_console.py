@@ -281,9 +281,13 @@ def build_command(o):
             _ft = f"-f{len(feats.split(','))}" if feats else ""
             outver = f"cumu{_ft}-{now_tag()}"
         cmd = [py, "ml/cumulative.py", "--league", o["league"],
-               "--ver", outver, "--lr", o.get("cumu_lr") or "0.01"]
+               "--ver", outver, "--lr", o.get("cumu_lr") or "0.05"]
         if base:
             cmd += ["--base", base]
+        if o.get("cumu_decay"):
+            cmd += ["--lr-decay", o["cumu_decay"]]
+        if o.get("cumu_rb"):
+            cmd.append("--rollback")
         if feats:
             cmd += ["--features", feats]
         if walk:
@@ -351,6 +355,8 @@ def main():
     v_wmax = tk.StringVar(value="3.0")
     v_cumulr = tk.StringVar(value="0.05")
     v_cumubase = tk.StringVar(value="")
+    v_cumudecay = tk.BooleanVar(value=False)
+    v_cumurb = tk.BooleanVar(value=False)
     v_status = tk.StringVar(value="대기 중")
     v_acc = tk.StringVar(value="−")
     v_train_line = tk.StringVar(value="")
@@ -404,6 +410,8 @@ def main():
             "log_secs": v_logsecs.get().strip(), "wmin": v_wmin.get().strip(),
             "wmax": v_wmax.get().strip(), "cumu_lr": v_cumulr.get().strip(),
             "cumu_base": "" if v_cumubase.get().strip() in ("", "(처음부터)") else v_cumubase.get().strip(),
+            "cumu_decay": "0.0002" if v_cumudecay.get() else "",
+            "cumu_rb": bool(v_cumurb.get()),
         }
 
     opt_widgets = []
@@ -991,6 +999,8 @@ def main():
     cb_cumubase.pack(side="left", padx=(2, 0))
     ttk.Label(fr_cumu, text="lr").pack(side="left", padx=(8, 2))
     _reg(ttk.Entry(fr_cumu, textvariable=v_cumulr, width=6)).pack(side="left")
+    _reg(ttk.Checkbutton(fr_cumu, text="lr감쇠", variable=v_cumudecay)).pack(side="left", padx=(8, 0))
+    _reg(ttk.Checkbutton(fr_cumu, text="롤백", variable=v_cumurb)).pack(side="left")
 
     MODE_FRAMES = {"grid": f_grid, "train": f_train, "auto": f_auto, "cumu": f_cumu}
 
