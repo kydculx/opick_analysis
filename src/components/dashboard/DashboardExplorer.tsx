@@ -106,6 +106,8 @@ export function DashboardExplorer() {
   const [trialsText, setTrialsText] = useState("10000");
   const [jobsText, setJobsText] = useState("4");
   const [trainProg, setTrainProg] = useState<{ done: number; total: number; line?: string } | null>(null);
+  const [cumuLr, setCumuLr] = useState("0.01");
+  const [cumuResult, setCumuResult] = useState<string | null>(null);
   const [matches, setMatches] = useState<SoccerMatch[]>([]);
   const [hiddenCols, setHiddenCols] = useState<ColumnId[]>([]);
   const [loadingLeagues, setLoadingLeagues] = useState(true);
@@ -420,7 +422,58 @@ export function DashboardExplorer() {
     }
   }
 
+  async function handleCumulative() {
+    if (checked.length === 0 || trainState === "running") return;
+    const base = selVer || models[0]?.ver || "";
+    if (!base) {
+      setError("베이스 모델을 선택하세요");
+      return;
+    }
+    setTrainState("running");
+    setTrainProg(null);
+    setCumuResult(null);
+    setAppliedVer("");
+    setPredMap({});
+    appliedKeyRef.current = "";
+    try {
+      const res = await fetch("/api/cumulative", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ league, seasons: checked, base, lr: cumuLr }),
+      }).then((r) => r.json());
+      if (!res.ok) {
+        setTrainState("error");
+        setError(res.error ?? "누적 학습 실패");
+        return;
+      }
+      let lastTail: string[] = [];
+      const done = await pollJob(
+        "/api/cumulative",
+        res.jobId as string,
+        900,
+        (p, tail) => {
+          setTrainProg(p ? { ...p, line: tail?.[tail.length - 1] } : null);
+          if (tail) lastTail = tail;
+        }
+      );
+      setTrainState(done);
+      if (done === "done") {
+        const summary = lastTail.filter((l) => /walk acc=|static base acc=/.test(l)).slice(-2);
+        setCumuResult(summary.length > 0 ? summary.join(" / ") : "완료");
+        await fetchModels(league);
+        setSelVer(res.ver as string);
+        setApplyState("idle");
+      }
+    } catch {
+      setTrainState("error");
+    }
+  }
+
   async function handleTrain() {
+    if (learnMode === "cumulative") {
+      await handleCumulative();
+      return;
+    }
     if (trainingOrdered.length === 0 || trainState === "running") return;
     if (featSel.length === 0) {
       setError("피처를 1개 이상 선택하세요");
@@ -1303,11 +1356,30 @@ export function DashboardExplorer() {
               />
               <span>경기당</span>
             </label>
-            <label className="flex items-center gap-1.5 opacity-40">
-              <input type="radio" name="learn-mode" disabled className="h-3.5 w-3.5" />
-              <span>누적(준비중)</span>
+            <label className="flex cursor-pointer items-center gap-1.5">
+              <input
+                type="radio"
+                name="learn-mode"
+                checked={learnMode === "cumulative"}
+                onChange={() => setLearnMode("cumulative")}
+                className="h-3.5 w-3.5 accent-blue-600 dark:accent-blue-400"
+              />
+              <span>누적</span>
             </label>
-          </div>
+            {learnMode === "cumulative" && (
+              <label className="flex items-center gap-1 text-xs text-zinc-500">
+                lr
+                <input
+                  value={cumuLr}
+                  onChange={(e) => setCumuLr(e.target.value.replace(/[^0-9.]/g, ""))}
+                  disabled={trainState === "running"}
+                  inputMode="decimal"
+                  aria-label="학습률"
+                  className="w-14 rounded-lg border border-zinc-300 bg-white px-2 py-0.5 text-right font-mono text-xs text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
+                />
+              </label>
+            )}
+            </div>
           <details open className="mt-2 rounded-xl border border-zinc-200 dark:border-zinc-800">
             <summary className="cursor-pointer px-2.5 py-1.5 text-xs font-medium text-zinc-500">
               피처 선택 ({featSel.length}/{ALL_FEATURES.length})
@@ -1383,7 +1455,11 @@ export function DashboardExplorer() {
           </details>
           <Button
             size="sm"
-            disabled={trainingOrdered.length === 0 || trainState === "running" || trainState === "done"}
+            disabled={
+              learnMode === "cumulative"
+                ? checked.length === 0 || trainState === "running" || trainState === "done"
+                : trainingOrdered.length === 0 || trainState === "running" || trainState === "done"
+            }
             onClick={handleTrain}
             className={
               trainingOrdered.length > 0 && (trainState === "idle" || trainState === "error")
@@ -1405,6 +1481,9 @@ export function DashboardExplorer() {
             <p className="mt-1 truncate px-0.5 font-mono text-[10px] text-zinc-400" title={trainProg.line}>
               {trainProg.line.length > 90 ? trainProg.line.slice(-90) : trainProg.line}
             </p>
+          )}
+          {learnMode === "cumulative" && cumuResult && trainState !== "running" && (
+            <p className="mt-1 px-0.5 font-mono text-[10px] text-zinc-500">{cumuResult}</p>
           )}
         </div>
 

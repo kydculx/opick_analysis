@@ -117,6 +117,7 @@ MODES = [
     ("train", "새학습"),
     ("grid", "전수탐색"),
     ("auto", "랜덤탐색"),
+    ("cumu", "누적학습"),
 ]
 MO2CODE = {mo: code for code, mo in MODES}
 CODE2MO = {code: mo for code, mo in MODES}
@@ -268,6 +269,14 @@ def build_command(o):
         cmd += ["--jobs", o.get("jobs") or "1"]
         if o.get("draw_w"):
             cmd += ["--draw-w", o["draw_w"]]
+    elif mode == "cumu":
+        walk = ",".join([s for s in (o.get("train", "") + "," + o.get("valid", "")).split(",") if s.strip()])
+        cmd = [py, "ml/cumulative.py", "--league", o["league"],
+               "--base", o["ver"], "--ver", o["ver"] + "-cumu",
+               "--lr", o.get("cumu_lr") or "0.01"]
+        if walk:
+            cmd += ["--seasons", walk]
+        return cmd
     else:
         cmd += ["--train", o["train"], "--valid", o["valid"] or "auto",
                 "--trials", o.get("trials") or "10000",
@@ -328,6 +337,7 @@ def main():
     v_logsecs = tk.StringVar(value="1.0")
     v_wmin = tk.StringVar(value="-3.0")
     v_wmax = tk.StringVar(value="3.0")
+    v_cumulr = tk.StringVar(value="0.01")
     v_status = tk.StringVar(value="대기 중")
     v_acc = tk.StringVar(value="−")
     v_train_line = tk.StringVar(value="")
@@ -353,7 +363,7 @@ def main():
         v_train.set(",".join(tr))
         v_valid.set(",".join(va))
         sel = selected_feats()
-        if v_mode.get() in ("grid", "auto"):
+        if v_mode.get() in ("grid", "auto", "cumu"):
             cur = v_ver.get().strip()
             if not (cur and os.path.exists(tune_path(lg, cur))):
                 cands = list_versions(lg)
@@ -377,7 +387,7 @@ def main():
             "max_combos": v_maxcombos.get().strip(), "max_minutes": v_maxmin.get().strip(),
             "ckpt_every": v_ckpt.get().strip(), "batch": v_batch.get().strip(),
             "log_secs": v_logsecs.get().strip(), "wmin": v_wmin.get().strip(),
-            "wmax": v_wmax.get().strip(),
+            "wmax": v_wmax.get().strip(), "cumu_lr": v_cumulr.get().strip(),
         }
 
     opt_widgets = []
@@ -451,6 +461,7 @@ def main():
         "grid": "전수탐색: 미학습 전체 기준 · 축간격/범위로 전 조합 탐색 · 종료 후 아래 슬라이더·진행 클릭으로 시점 이동",
         "train": "새학습: 학습수만 입력하면 자동배치(학습=오래된순 N개, 검증=나머지·최신 제외)",
         "auto": "랜덤탐색: 미학습 전체 · 축간격 격자 위 랜덤 점프 · 중지로 종료",
+        "cumu": "누적학습: 선택 버전을 베이스로 오래된 경기부터 1스텝씩 갱신 · {베이스}-cumu로 저장",
     }
 
     detail = ttk.Frame(app, padding=8)
@@ -935,7 +946,14 @@ def main():
     _reg(_dw_grid).pack(side="left")
     _dw_widgets.append(_dw_grid)
 
-    MODE_FRAMES = {"grid": f_grid, "train": f_train, "auto": f_auto}
+    f_cumu = ttk.Frame(detail)
+    fr_cumu = ttk.Frame(f_cumu)
+    fr_cumu.pack(fill="x", pady=2)
+    ttk.Label(fr_cumu, text="베이스=선택버전 · 출력 {베이스}-cumu").pack(side="left")
+    ttk.Label(fr_cumu, text="lr").pack(side="left", padx=(8, 2))
+    _reg(ttk.Entry(fr_cumu, textvariable=v_cumulr, width=6)).pack(side="left")
+
+    MODE_FRAMES = {"grid": f_grid, "train": f_train, "auto": f_auto, "cumu": f_cumu}
 
     def refresh_detail():
         for m, fr in MODE_FRAMES.items():
@@ -2031,6 +2049,10 @@ def main():
                     ev = f"{v_ver.get().strip()}-ens"
                     if ev and os.path.exists(tune_path(v_league.get(), ev)):
                         v_ver.set(ev)
+                elif v_mode.get() == "cumu":
+                    ev = f"{v_ver.get().strip()}-cumu"
+                    if ev and os.path.exists(tune_path(v_league.get(), ev)):
+                        v_ver.set(ev)
             except tk.TclError:
                 pass
             refresh_ver_list()
@@ -2103,7 +2125,7 @@ def main():
         if o["mode"] == "train" and not o["train"]:
             v_status.set("학습시즌이 필요합니다 (상세에서 확인)")
             return
-        if o["mode"] in ("grid", "auto"):
+        if o["mode"] in ("grid", "auto", "cumu"):
             if not o["ver"]:
                 v_status.set("버전을 선택하세요 (상세에서 확인)")
                 return
