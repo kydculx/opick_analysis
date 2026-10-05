@@ -107,6 +107,7 @@ export function DashboardExplorer() {
   const [jobsText, setJobsText] = useState("4");
   const [trainProg, setTrainProg] = useState<{ done: number; total: number; line?: string } | null>(null);
   const [cumuLr, setCumuLr] = useState("0.01");
+  const [cumuBase, setCumuBase] = useState("");
   const [cumuResult, setCumuResult] = useState<string | null>(null);
   const [matches, setMatches] = useState<SoccerMatch[]>([]);
   const [hiddenCols, setHiddenCols] = useState<ColumnId[]>([]);
@@ -424,9 +425,8 @@ export function DashboardExplorer() {
 
   async function handleCumulative() {
     if (checked.length === 0 || trainState === "running") return;
-    const base = selVer || models[0]?.ver || "";
-    if (!base) {
-      setError("베이스 모델을 선택하세요");
+    if (featSel.length === 0) {
+      setError("피처를 1개 이상 선택하세요");
       return;
     }
     setTrainState("running");
@@ -439,7 +439,13 @@ export function DashboardExplorer() {
       const res = await fetch("/api/cumulative", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ league, seasons: checked, base, lr: cumuLr }),
+        body: JSON.stringify({
+          league,
+          seasons: checked,
+          base: cumuBase,
+          lr: cumuLr,
+          ...(featSel.length !== ALL_FEATURES.length ? { features: featSel } : {}),
+        }),
       }).then((r) => r.json());
       if (!res.ok) {
         setTrainState("error");
@@ -1368,6 +1374,26 @@ export function DashboardExplorer() {
             </label>
             {learnMode === "cumulative" && (
               <label className="flex items-center gap-1 text-xs text-zinc-500">
+                베이스
+                <select
+                  value={cumuBase}
+                  onChange={(e) => setCumuBase(e.target.value)}
+                  disabled={trainState === "running"}
+                  className="max-w-40 rounded-lg border border-zinc-300 bg-white px-1 py-0.5 font-mono text-xs text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
+                >
+                  <option value="">처음부터</option>
+                  {models
+                    .filter((m) => m.model_type === "permatch")
+                    .map((m) => (
+                      <option key={m.ver} value={m.ver}>
+                        {m.ver}
+                      </option>
+                    ))}
+                </select>
+              </label>
+            )}
+            {learnMode === "cumulative" && (
+              <label className="flex items-center gap-1 text-xs text-zinc-500">
                 lr
                 <input
                   value={cumuLr}
@@ -1410,6 +1436,7 @@ export function DashboardExplorer() {
               </button>
             </div>
           </details>
+          {learnMode === "match" && (
           <details open className="mt-2 rounded-xl border border-zinc-200 dark:border-zinc-800">
             <summary className="cursor-pointer px-2.5 py-1.5 text-xs font-medium text-zinc-500">
               학습 방식 ({fullTrain ? `전체 ${trialsText}회` : "빠른 단발"})
@@ -1453,6 +1480,7 @@ export function DashboardExplorer() {
               )}
             </div>
           </details>
+          )}
           <Button
             size="sm"
             disabled={

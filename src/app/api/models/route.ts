@@ -10,7 +10,7 @@ function diskVersions(league: string): { ver: string; model_type: string }[] {
   const out: { ver: string; model_type: string }[] = [];
   for (const f of readdirSync(dir)) {
     if (!f.startsWith(prefix) || !f.endsWith(".json")) continue;
-    if (f.endsWith(".grid.json") || f.endsWith(".live.json") || f.endsWith(".auto.json") || f.endsWith(".whist.json") || f.endsWith(".xgb.json") || f.endsWith(".lstm.pt")) continue;
+    if (f.endsWith(".grid.json") || f.endsWith(".live.json") || f.endsWith(".auto.json") || f.endsWith(".whist.json") || f.endsWith(".xgb.json") || f.endsWith(".cumu.json") || f.endsWith(".wrong.json") || f.endsWith(".lstm.pt")) continue;
     try {
       const a = JSON.parse(readFileSync(`${dir}/${f}`, "utf-8"));
       const mt = typeof a?.model_type === "string" ? a.model_type : "permatch";
@@ -257,6 +257,8 @@ export async function DELETE(req: Request) {
       `${base}.live.json`,
       `${base}.auto.json`,
       `${base}.xgb.json`,
+      `${base}.cumu.json`,
+      `${base}.wrong.json`,
       `${base}.lstm.pt`,
     ]);
     if (ver.endsWith("-ens")) {

@@ -180,7 +180,7 @@ def list_versions(league):
     for f in files:
         if not f.startswith(league + "_") or not f.endswith(".json"):
             continue
-        if f.endswith((".grid.json", ".live.json", ".auto.json", ".whist.json", ".xgb.json")):
+        if f.endswith((".grid.json", ".live.json", ".auto.json", ".whist.json", ".xgb.json", ".cumu.json", ".wrong.json")):
             continue
         ver = f[len(league) + 1:-5]
         out.append(ver)
@@ -271,9 +271,21 @@ def build_command(o):
             cmd += ["--draw-w", o["draw_w"]]
     elif mode == "cumu":
         walk = ",".join([s for s in (o.get("train", "") + "," + o.get("valid", "")).split(",") if s.strip()])
+        feats = o.get("features", "")
+        base = o.get("cumu_base", "")
+        if o.get("cumu_ver"):
+            outver = o["cumu_ver"]
+        elif base:
+            outver = base + "-cumu"
+        else:
+            _ft = f"-f{len(feats.split(','))}" if feats else ""
+            outver = f"cumu{_ft}-{now_tag()}"
         cmd = [py, "ml/cumulative.py", "--league", o["league"],
-               "--base", o["ver"], "--ver", o["ver"] + "-cumu",
-               "--lr", o.get("cumu_lr") or "0.01"]
+               "--ver", outver, "--lr", o.get("cumu_lr") or "0.01"]
+        if base:
+            cmd += ["--base", base]
+        if feats:
+            cmd += ["--features", feats]
         if walk:
             cmd += ["--seasons", walk]
         return cmd
@@ -338,6 +350,7 @@ def main():
     v_wmin = tk.StringVar(value="-3.0")
     v_wmax = tk.StringVar(value="3.0")
     v_cumulr = tk.StringVar(value="0.01")
+    v_cumubase = tk.StringVar(value="")
     v_status = tk.StringVar(value="대기 중")
     v_acc = tk.StringVar(value="−")
     v_train_line = tk.StringVar(value="")
@@ -363,11 +376,13 @@ def main():
         v_train.set(",".join(tr))
         v_valid.set(",".join(va))
         sel = selected_feats()
-        if v_mode.get() in ("grid", "auto", "cumu"):
+        if v_mode.get() in ("grid", "auto"):
             cur = v_ver.get().strip()
             if not (cur and os.path.exists(tune_path(lg, cur))):
                 cands = list_versions(lg)
                 v_ver.set(cands[-1] if cands else "")
+        elif v_mode.get() == "cumu":
+            pass
         else:
             v_ver.set(make_ver(",".join(tr), sel, v_draww.get(), now_tag()))
         try:
@@ -388,6 +403,7 @@ def main():
             "ckpt_every": v_ckpt.get().strip(), "batch": v_batch.get().strip(),
             "log_secs": v_logsecs.get().strip(), "wmin": v_wmin.get().strip(),
             "wmax": v_wmax.get().strip(), "cumu_lr": v_cumulr.get().strip(),
+            "cumu_base": "" if v_cumubase.get().strip() in ("", "(처음부터)") else v_cumubase.get().strip(),
         }
 
     opt_widgets = []
@@ -461,7 +477,7 @@ def main():
         "grid": "전수탐색: 미학습 전체 기준 · 축간격/범위로 전 조합 탐색 · 종료 후 아래 슬라이더·진행 클릭으로 시점 이동",
         "train": "새학습: 학습수만 입력하면 자동배치(학습=오래된순 N개, 검증=나머지·최신 제외)",
         "auto": "랜덤탐색: 미학습 전체 · 축간격 격자 위 랜덤 점프 · 중지로 종료",
-        "cumu": "누적학습: 선택 버전을 베이스로 오래된 경기부터 1스텝씩 갱신 · {베이스}-cumu로 저장",
+        "cumu": "누적학습: 버전 선택 없이 콜드스타트 · 오래된 경기부터 1스텝씩 갱신",
     }
 
     detail = ttk.Frame(app, padding=8)
@@ -523,6 +539,21 @@ def main():
         try:
             cb_ver.configure(values=list_versions(v_league.get()))
         except tk.TclError:
+            pass
+        try:
+            lg = v_league.get()
+            legacy = []
+            for _v in list_versions(lg):
+                try:
+                    _a = json.load(open(tune_path(lg, _v), encoding="utf-8"))
+                except (OSError, ValueError):
+                    continue
+                if isinstance(_a, dict) and isinstance(_a.get("weights"), list):
+                    legacy.append(_v)
+            cb_cumubase.configure(values=["(처음부터)"] + legacy)
+            if v_cumubase.get().strip() not in (["(처음부터)"] + legacy):
+                v_cumubase.set("(처음부터)")
+        except (tk.TclError, NameError):
             pass
 
     def apply_ver_features(*_):
@@ -949,7 +980,10 @@ def main():
     f_cumu = ttk.Frame(detail)
     fr_cumu = ttk.Frame(f_cumu)
     fr_cumu.pack(fill="x", pady=2)
-    ttk.Label(fr_cumu, text="베이스=선택버전 · 출력 {베이스}-cumu").pack(side="left")
+    ttk.Label(fr_cumu, text="베이스").pack(side="left")
+    cb_cumubase = _reg(ttk.Combobox(fr_cumu, textvariable=v_cumubase, state="readonly", width=34,
+                                    values=["(처음부터)"]))
+    cb_cumubase.pack(side="left", padx=(2, 0))
     ttk.Label(fr_cumu, text="lr").pack(side="left", padx=(8, 2))
     _reg(ttk.Entry(fr_cumu, textvariable=v_cumulr, width=6)).pack(side="left")
 
@@ -962,12 +996,43 @@ def main():
         fr = MODE_FRAMES.get(cur)
         if fr is not None:
             fr.pack(fill="x", pady=2)
+        if cur == "cumu":
+            try:
+                wedit_frame.pack_forget()
+            except (tk.TclError, AttributeError, NameError):
+                pass
+        else:
+            try:
+                if runner["obj"] is None:
+                    btn_feat.configure(state="normal")
+            except (tk.TclError, AttributeError):
+                pass
+            try:
+                wedit_frame.pack(fill="x", pady=(4, 0))
+            except (tk.TclError, AttributeError, NameError):
+                pass
         if cur == "train":
             cb_ver.pack_forget()
             btn_del_ver.pack_forget()
             ver_label.pack(side="left")
             lbl_acc.pack_forget()
             val_acc.pack_forget()
+            try:
+                scrub_scale.state(["disabled"])
+            except (tk.TclError, AttributeError):
+                pass
+        elif cur == "cumu":
+            cb_ver.pack_forget()
+            btn_del_ver.pack_forget()
+            ver_label.pack_forget()
+            lbl_acc.pack_forget()
+            val_acc.pack_forget()
+            if v_ver.get().strip():
+                ver_sync["on"] = True
+                try:
+                    v_ver.set("")
+                finally:
+                    ver_sync["on"] = False
             try:
                 scrub_scale.state(["disabled"])
             except (tk.TclError, AttributeError):
@@ -1189,6 +1254,7 @@ def main():
     wedit_info.pack(side="left", padx=(8, 0))
 
     runner = {"obj": None}
+    cumu_out = {"ver": ""}
     live = {"best": None, "cur_acc": None}
     prog = {"t": 0.0, "ndone": 0, "cps": 0.0}
     hist = {"x": [], "best": [], "cur": []}
@@ -2036,6 +2102,11 @@ def main():
             btn_stop.configure(state="disabled")
             set_opts_enabled(True)
             try:
+                if v_mode.get() == "cumu":
+                    btn_feat.configure(state="disabled")
+            except (tk.TclError, AttributeError):
+                pass
+            try:
                 os.remove(live_path(v_league.get(), v_ver.get().strip()))
             except OSError:
                 pass
@@ -2050,7 +2121,13 @@ def main():
                     if ev and os.path.exists(tune_path(v_league.get(), ev)):
                         v_ver.set(ev)
                 elif v_mode.get() == "cumu":
-                    ev = f"{v_ver.get().strip()}-cumu"
+                    ev = None
+                    try:
+                        ev = cumu_out.get("ver")
+                    except NameError:
+                        ev = None
+                    if not ev:
+                        ev = f"{v_ver.get().strip()}-cumu"
                     if ev and os.path.exists(tune_path(v_league.get(), ev)):
                         v_ver.set(ev)
             except tk.TclError:
@@ -2116,7 +2193,7 @@ def main():
         v_league.set(KO2CODE.get(v_league_ko.get(), "premier_league"))
         v_mode.set(MO2CODE.get(v_mode_ko.get(), "grid"))
         # 상세 직접 입력을 보존: 프리셋 재적용 금지, 버전 공백시에만 복원
-        if not v_ver.get().strip() and v_train.get().strip() and v_mode.get() not in ("grid", "auto"):
+        if not v_ver.get().strip() and v_train.get().strip() and v_mode.get() not in ("grid", "auto", "cumu"):
             apply_train_ver()
         o = current_options()
         if not selected_feats():
@@ -2125,7 +2202,7 @@ def main():
         if o["mode"] == "train" and not o["train"]:
             v_status.set("학습시즌이 필요합니다 (상세에서 확인)")
             return
-        if o["mode"] in ("grid", "auto", "cumu"):
+        if o["mode"] in ("grid", "auto"):
             if not o["ver"]:
                 v_status.set("버전을 선택하세요 (상세에서 확인)")
                 return
@@ -2133,9 +2210,31 @@ def main():
                 art0 = json.load(open(tune_path(o["league"], o["ver"]), encoding="utf-8"))
             except (OSError, ValueError):
                 art0 = None
-            if not isinstance(art0, dict) or not isinstance(art0.get("weights"), list):
+            if not isinstance(art0, dict):
                 v_status.set(f"아티팩트 없음: {o['ver']} (버전 확인)")
                 return
+            if not isinstance(art0.get("weights"), list):
+                v_status.set(f"legacy 베이스 필요: {o['ver']} (현재 {art0.get('model_type')})")
+                return
+        if o["mode"] == "cumu":
+            _cb = o.get("cumu_base", "")
+            if _cb:
+                try:
+                    art0 = json.load(open(tune_path(o["league"], _cb), encoding="utf-8"))
+                except (OSError, ValueError):
+                    art0 = None
+                if not isinstance(art0, dict):
+                    v_status.set(f"아티팩트 없음: {_cb} (버전 확인)")
+                    return
+                if not isinstance(art0.get("weights"), list):
+                    v_status.set(f"legacy 베이스 필요: {_cb} (현재 {art0.get('model_type')})")
+                    return
+                o["cumu_ver"] = _cb + "-cumu"
+            else:
+                _ff = o.get("features", "")
+                _ft = f"-f{len(_ff.split(','))}" if _ff else ""
+                o["cumu_ver"] = f"cumu{_ft}-{now_tag()}"
+            cumu_out["ver"] = o.get("cumu_ver", "") if o["mode"] == "cumu" else ""
         set_opts_enabled(False)
         for _w in list(_dw_widgets):
             try:
@@ -2208,7 +2307,7 @@ def main():
             return
         base = os.path.join(ROOT, "ml", "permatch", f"{lg}_{ver}")
         gone = []
-        for ext in (".json", ".grid.json", ".auto.json", ".live.json", ".whist.json", ".xgb.json"):
+        for ext in (".json", ".grid.json", ".auto.json", ".live.json", ".whist.json", ".xgb.json", ".cumu.json", ".wrong.json"):
             try:
                 os.remove(base + ext)
                 gone.append(ext)

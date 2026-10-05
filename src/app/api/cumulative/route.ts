@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { ALL_FEATURES } from "@/lib/permatch-math";
 import { JOB_DIR, isJobId, readJob, startJob } from "@/lib/jobs";
 
 export const dynamic = "force-dynamic";
@@ -12,35 +13,56 @@ function nowTag(d = new Date()): string {
 
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as {
-    league?: unknown; seasons?: unknown; base?: unknown; lr?: unknown; ver?: unknown;
+    league?: unknown; seasons?: unknown; base?: unknown; lr?: unknown; ver?: unknown; features?: unknown;
   };
   const league = typeof body.league === "string" ? body.league : "";
   const seasons = Array.isArray(body.seasons) ? body.seasons.map((s) => String(s)).filter(Boolean) : [];
   const base = typeof body.base === "string" ? body.base : "";
   const lr = Math.max(0, Math.min(1, Number.parseFloat(String(body.lr ?? "0.01")) || 0.01));
-  if (!/^[A-Za-z0-9_-]+$/.test(league) || seasons.length === 0 || !/^[A-Za-z0-9_.-]+$/.test(base)) {
-    return NextResponse.json({ ok: false, error: "league·seasons·base가 필요" }, { status: 400 });
+  const features = Array.isArray(body.features)
+    ? body.features.map((f) => String(f)).filter((f) => (ALL_FEATURES as string[]).includes(f))
+    : [...ALL_FEATURES];
+  if (!/^[A-Za-z0-9_-]+$/.test(league) || seasons.length === 0 || (base && !/^[A-Za-z0-9_.-]+$/.test(base))) {
+    return NextResponse.json({ ok: false, error: "league·seasons가 필요" }, { status: 400 });
+  }
+  if (features.length === 0) {
+    return NextResponse.json({ ok: false, error: "피처를 1개 이상 선택하세요" }, { status: 400 });
   }
   const sorted = [...new Set(seasons)].sort() as string[];
+  const feats = features.length === ALL_FEATURES.length ? [...ALL_FEATURES] : [...features];
+  let resolvedBase = base;
+  if (resolvedBase) {
+    try {
+      const bp = join(process.cwd(), "ml", "permatch", `${league}_${resolvedBase}.json`);
+      const ba = JSON.parse(readFileSync(bp, "utf-8"));
+      if (ba?.model_type === "ensemble" && typeof ba.base_ver === "string" && ba.base_ver) {
+        resolvedBase = ba.base_ver;
+      }
+    } catch {
+      resolvedBase = base;
+    }
+  }
   const ver =
     typeof body.ver === "string" && /^[A-Za-z0-9_.-]+$/.test(body.ver)
       ? body.ver
-      : `${base}-cumu-${nowTag()}`;
+      : `${resolvedBase || league}-cumu-${nowTag()}`;
+  const argv = [
+    "--league", league,
+    "--seasons", sorted.join(","),
+    "--ver", ver,
+    "--lr", String(lr),
+  ];
+  if (resolvedBase) argv.push("--base", resolvedBase);
+  if (feats.length !== ALL_FEATURES.length) argv.push("--features", feats.join(","));
   const job = startJob({
     kind: "train",
     league,
     seasons: sorted,
     ver,
     script: "ml/cumulative.py",
-    argv: [
-      "--league", league,
-      "--seasons", sorted.join(","),
-      "--base", base,
-      "--ver", ver,
-      "--lr", String(lr),
-    ],
+    argv,
   });
-  return NextResponse.json({ ok: true, jobId: job.id, ver });
+  return NextResponse.json({ ok: true, jobId: job.id, ver, base: resolvedBase });
 }
 
 export async function GET(req: Request) {
