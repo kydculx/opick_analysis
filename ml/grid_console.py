@@ -349,7 +349,7 @@ def main():
     v_logsecs = tk.StringVar(value="1.0")
     v_wmin = tk.StringVar(value="-3.0")
     v_wmax = tk.StringVar(value="3.0")
-    v_cumulr = tk.StringVar(value="0.01")
+    v_cumulr = tk.StringVar(value="0.05")
     v_cumubase = tk.StringVar(value="")
     v_status = tk.StringVar(value="대기 중")
     v_acc = tk.StringVar(value="−")
@@ -544,6 +544,8 @@ def main():
             lg = v_league.get()
             legacy = []
             for _v in list_versions(lg):
+                if "cumu" not in _v:
+                    continue
                 try:
                     _a = json.load(open(tune_path(lg, _v), encoding="utf-8"))
                 except (OSError, ValueError):
@@ -700,6 +702,9 @@ def main():
                 mm = art.get("metrics") or {}
                 if isinstance(mm.get("acc"), (int, float)):
                     return f"검증 {mm['acc'] * 100:.1f}% (n={int(mm.get('n', 0))})" if mm.get("n") else f"검증 {mm['acc'] * 100:.1f}%"
+            cw = (art.get("cumulative") or {}).get("walk") or {}
+            if isinstance(cw.get("acc"), (int, float)) and not art.get("valid"):
+                return f"누적 {cw['acc'] * 100:.1f}% (n={int(cw.get('n', 0))})"
             vs = art.get("valid")
             valid_s = {str(s) for s in (vs if isinstance(vs, list) else ([vs] if vs else [])) if s and s != "auto"}
             feats = art.get("features")
@@ -1025,8 +1030,8 @@ def main():
             cb_ver.pack_forget()
             btn_del_ver.pack_forget()
             ver_label.pack_forget()
-            lbl_acc.pack_forget()
-            val_acc.pack_forget()
+            lbl_acc.pack(side="left", padx=(8, 2))
+            val_acc.pack(side="left")
             if v_ver.get().strip():
                 ver_sync["on"] = True
                 try:

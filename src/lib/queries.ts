@@ -133,7 +133,7 @@ export type SoccerMatch = {
   ht_ft?: TeamHalfFull | null;
   odds?: MatchOdds;
   same_odds?: SameOdds;
-  pred?: { home: number; draw: number; away: number; ver: string } | null;
+  pred?: { home: number; draw: number; away: number; ver: string; drawAlert?: boolean } | null;
 };
 
 export async function getPredictionsMap(

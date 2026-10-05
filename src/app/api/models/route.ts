@@ -160,6 +160,7 @@ export async function GET(req: Request) {
           trials: a.trials ?? null,
           pattern_tau: a.pattern_tau ?? null,
           pattern_stats: a.pattern_stats ?? null,
+          cumulative: (a.cumulative ?? null) as unknown,
         },
       });
     } catch (e) {

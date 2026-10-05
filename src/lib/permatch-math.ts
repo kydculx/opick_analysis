@@ -102,7 +102,22 @@ export function drawFeatures(m: SoccerMatch): number[] {
     rg = 0;
   }
   const imp = sameWdl(m);
-  return [poissonDraw(xgH, xgA), rg, xgH + xgA, imp ? imp.draw : 0];
+  const rf = (m.recent_form ?? {}) as Record<string, Record<string, { draw?: unknown; scored?: unknown; conceded?: unknown } | null> | undefined>;
+  const hd5 = [1, 2, 3, 4, 5].filter((i) => fnum(rf.home?.[`recent_${i}`]?.draw) > 0).length;
+  const ad5 = [1, 2, 3, 4, 5].filter((i) => fnum(rf.away?.[`recent_${i}`]?.draw) > 0).length;
+  const hh = (m.head_to_head ?? {}) as Record<string, { draw?: unknown } | null | undefined>;
+  const hd = [1, 2, 3, 4, 5].filter((i) => fnum(hh[`recent_${i}`]?.draw) > 0).length;
+  let sc5 = 0;
+  let co5 = 0;
+  for (const side of [rf.home, rf.away]) {
+    for (let i = 1; i <= 5; i++) {
+      const q = side?.[`recent_${i}`];
+      sc5 += fnum(q?.scored);
+      co5 += fnum(q?.conceded);
+    }
+  }
+  const pg = Math.abs(fnum(th.possession) - fnum(ta.possession));
+  return [poissonDraw(xgH, xgA), rg, xgH + xgA, imp ? imp.draw : 0, hd5, ad5, hd, Math.abs(xgH - xgA), sc5, pg, co5];
 }
 
 export function sigmoid(s: number): number {
@@ -140,7 +155,9 @@ export function legacyParts(
   const ph = sigmoid(s);
   let dd: number;
   if (art.draw_weights && art.draw_mu && art.draw_sd) {
-    const xd = stdVec(drawFeatures(m), art.draw_mu, art.draw_sd);
+    const df = drawFeatures(m);
+    const n = Math.min(df.length, art.draw_weights.length, art.draw_mu.length, art.draw_sd.length);
+    const xd = stdVec(df.slice(0, n), art.draw_mu.slice(0, n), art.draw_sd.slice(0, n));
     const ds = xd.reduce((a, v, i) => a + v * (art.draw_weights as number[])[i], 0) + (art.draw_bias ?? 0);
     dd = sigmoid(ds);
   } else {

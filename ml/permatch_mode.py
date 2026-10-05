@@ -74,7 +74,9 @@ FIVE_IDX = [FEATURES13.index(n) for n in FIVE]
 FEATURES = list(FEATURES13)
 SEL = None
 
-DRAW_FEATURES = ["poisson_draw", "rank_gap", "total_goals", "market_draw"]
+DRAW_FEATURES = ["poisson_draw", "rank_gap", "total_goals", "market_draw",
+                 "home_draw5", "away_draw5", "h2h_draw5", "xg_diff",
+                 "scored10", "poss_gap", "conceded10"]
 
 DRAW_ACC_TOL = 0.02
 
@@ -396,8 +398,25 @@ def draw_row_features(m: dict) -> list:
     except (TypeError, ValueError):
         rg = 0.0
     ph, pd_mkt, pa = implied_probs(same_odds_wdl(m.get("same_odds"))) or (math.nan, math.nan, math.nan)
+    rf = m.get("recent_form") or {}
+    rfh = (rf.get("home") or {})
+    rfa = (rf.get("away") or {})
+    hd5 = sum(1 for i in range(1, 6) if fnum((rfh.get(f"recent_{i}") or {}).get("draw")) > 0)
+    ad5 = sum(1 for i in range(1, 6) if fnum((rfa.get(f"recent_{i}") or {}).get("draw")) > 0)
+    hh = m.get("head_to_head") or {}
+    hd = sum(1 for i in range(1, 6) if fnum((hh.get(f"recent_{i}") or {}).get("draw")) > 0)
+    sc5 = 0.0
+    co5 = 0.0
+    for _side in (rfh, rfa):
+        for i in range(1, 6):
+            _q = _side.get(f"recent_{i}") or {}
+            sc5 += fnum(_q.get("scored"))
+            co5 += fnum(_q.get("conceded"))
+    pg = abs(fnum(th.get("possession")) - fnum(ta.get("possession")))
     return [pd, rg, xg_h + xg_a,
-            pd_mkt if not (isinstance(pd_mkt, float) and math.isnan(pd_mkt)) else 0.0]
+            pd_mkt if not (isinstance(pd_mkt, float) and math.isnan(pd_mkt)) else 0.0,
+            float(hd5), float(ad5), float(hd), abs(xg_h - xg_a),
+            sc5, pg, co5]
 
 
 def standardize(Xtr):

@@ -18,7 +18,7 @@ export async function POST(req: Request) {
   const league = typeof body.league === "string" ? body.league : "";
   const seasons = Array.isArray(body.seasons) ? body.seasons.map((s) => String(s)).filter(Boolean) : [];
   const base = typeof body.base === "string" ? body.base : "";
-  const lr = Math.max(0, Math.min(1, Number.parseFloat(String(body.lr ?? "0.01")) || 0.01));
+  const lr = Math.max(0, Math.min(1, Number.parseFloat(String(body.lr ?? "0.05")) || 0.05));
   const features = Array.isArray(body.features)
     ? body.features.map((f) => String(f)).filter((f) => (ALL_FEATURES as string[]).includes(f))
     : [...ALL_FEATURES];

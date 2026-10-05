@@ -17,7 +17,7 @@ export type SavedModel = {
   created_at: string;
 };
 
-export type PredMapEntry = { home: number; draw: number; away: number; ver: string };
+export type PredMapEntry = { home: number; draw: number; away: number; ver: string; drawAlert?: boolean };
 
 export type AccuracyMap = Record<string, { n: number; hit: number; acc: number | null }>;
 
@@ -32,17 +32,21 @@ function parseScoreLocal(v: string | null | undefined): number | null {
 }
 
 function predictLocal(m: SoccerMatch, art: PermatchArtifact, ver: string) {
+  const alertT = (() => {
+    const t = (art as { cumulative?: { draw_alert_t?: unknown } }).cumulative?.draw_alert_t;
+    return typeof t === "number" && Number.isFinite(t) && t > 0 ? t : 0.3;
+  })();
   try {
     if (art.model_type === "lstm") return null;
     if (art.model_type === "xgb" && art.xgb) {
       const p = xgbProba(art.xgb, selectFeatures(rowFeatures(m), art.features));
       if (p.some((v) => !Number.isFinite(v))) return null;
-      return { home: p[0], draw: p[1], away: p[2], ver };
+      return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertT };
     }
     if (art.model_type === "logreg" && art.scaler_mean && art.scaler_scale && art.coef && art.intercept) {
       const p = logregProba(selectFeatures(rowFeatures(m), art.features), art.scaler_mean, art.scaler_scale, art.coef, art.intercept);
       if (p.some((v) => !Number.isFinite(v))) return null;
-      return { home: p[0], draw: p[1], away: p[2], ver };
+      return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertT };
     }
     if ((art.model_type === "poisson" || art.model_type === "dixon") && art.teams && art.att && art.def) {
       const idx = new Map(art.teams.map((t, i) => [t, i]));
@@ -53,7 +57,7 @@ function predictLocal(m: SoccerMatch, art: PermatchArtifact, ver: string) {
       const rho = art.model_type === "dixon" ? (art.rho ?? 0) : 0;
       const p = dcProba(lam, mu, rho);
       if (p.some((v) => !Number.isFinite(v))) return null;
-      return { home: p[0], draw: p[1], away: p[2], ver };
+      return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertT };
     }
     if (art.model_type === "ensemble" && art.base && art.xgb) {
       const b = legacyParts(m, art.base);
@@ -65,7 +69,7 @@ function predictLocal(m: SoccerMatch, art: PermatchArtifact, ver: string) {
       const bb = art.base;
       const p = applyTemp(blendProbs(lin, b.x, bb.patterns, bb.pattern_tau ?? 0), bb.T);
       if (p.some((v) => !Number.isFinite(v))) return null;
-      return { home: p[0], draw: p[1], away: p[2], ver };
+      return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertT };
     }
     const e = art.emphasis ?? new Array(art.features?.length ?? art.mu.length).fill(1);
     const rf = selectFeatures(rowFeatures(m), art.features);
@@ -77,7 +81,8 @@ function predictLocal(m: SoccerMatch, art: PermatchArtifact, ver: string) {
       let dd: number;
       if (art.draw_weights && art.draw_mu && art.draw_sd) {
         const df = drawFeatures(m);
-        const xd = art.draw_mu.map((mu, i) => (df[i] - mu) / (art.draw_sd as number[])[i]);
+        const n = Math.min(df.length, art.draw_weights.length, art.draw_mu.length, (art.draw_sd as number[]).length);
+        const xd = (art.draw_mu as number[]).slice(0, n).map((mu, i) => (df[i] - mu) / (art.draw_sd as number[])[i]);
         const ds = xd.reduce((a, v, i) => a + v * (art.draw_weights as number[])[i], 0) + (art.draw_bias ?? 0);
         dd = sigmoid(ds);
       } else {
@@ -89,7 +94,7 @@ function predictLocal(m: SoccerMatch, art: PermatchArtifact, ver: string) {
     }
     const p = applyTemp(blendProbs(lin, x, art.patterns, art.pattern_tau ?? 0), art.T);
     if (p.some((v) => !Number.isFinite(v))) return null;
-    return { home: p[0], draw: p[1], away: p[2], ver };
+    return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertT };
   } catch {
     return null;
   }
@@ -106,7 +111,7 @@ export function DashboardExplorer() {
   const [trialsText, setTrialsText] = useState("10000");
   const [jobsText, setJobsText] = useState("4");
   const [trainProg, setTrainProg] = useState<{ done: number; total: number; line?: string } | null>(null);
-  const [cumuLr, setCumuLr] = useState("0.01");
+  const [cumuLr, setCumuLr] = useState("0.05");
   const [cumuBase, setCumuBase] = useState("");
   const [cumuResult, setCumuResult] = useState<string | null>(null);
   const [matches, setMatches] = useState<SoccerMatch[]>([]);
@@ -157,6 +162,10 @@ export function DashboardExplorer() {
       blend_w?: number;
       base?: PermatchArtifact | null;
       xgb?: XgbSlim | null;
+      cumulative?: {
+        base_ver?: string;
+        walk?: { n: number; acc: number; seasons: Record<string, { n: number; acc: number }> };
+      } | null;
     } | null;
   };
   const [modelDetail, setModelDetail] = useState<ModelDetail | null>(null);
@@ -1182,6 +1191,8 @@ export function DashboardExplorer() {
     Object.entries(m)
       .filter(([s]) => !trainSet.has(s) && !(validSet ? validSet.has(s) : false))
       .sort(([a], [b]) => (a < b ? -1 : 1));
+  const cumuWalkSeasons = modelDetail?.detail?.cumulative?.walk?.seasons;
+  const cumuWalkCount = cumuWalkSeasons ? Object.keys(cumuWalkSeasons).length : 0;
   const curOverall = overallOf(scopeOf(accuracy));
   const baseOverall = overallOf(scopeOf(baseMapRef.current ?? {}));
   const canSave =
@@ -1219,7 +1230,9 @@ export function DashboardExplorer() {
         <div>
           <div className="flex items-baseline justify-between">
               <span className="text-xs font-medium text-zinc-500">
-                시즌 적중률 (검증 {validSet ? [...validSet].filter((s) => viewSeasons.includes(s)).length : viewSeasons.filter((s) => !trainSet.has(s)).length}/{viewSeasons.length})
+                {cumuWalkCount > 0
+                  ? `시즌 적중률 (누적 ${cumuWalkCount})`
+                  : `시즌 적중률 (검증 ${validSet ? [...validSet].filter((s) => viewSeasons.includes(s)).length : viewSeasons.filter((s) => !trainSet.has(s)).length}/${viewSeasons.length})`}
               </span>
             </div>
             {(() => {
@@ -1244,13 +1257,26 @@ export function DashboardExplorer() {
             ) : (
               (() => {
                 const inScope = (s: string) => (validSet ? validSet.has(s) : !trainSet.has(s));
-                const chrono = [...viewSeasons].reverse().filter(inScope);
-                const pts = chrono
-                  .map((s, i) => {
-                    const a = applyState === "done" ? accuracy[s] : undefined;
-                    return a?.acc != null ? { s, i, acc: a.acc, n: a.n, hit: a.hit } : null;
-                  })
-                  .filter((p): p is { s: string; i: number; acc: number; n: number; hit: number } => p !== null);
+                const walk = modelDetail?.detail?.cumulative?.walk;
+                const walkSeasons = walk?.seasons;
+                const chrono = walkSeasons
+                  ? Object.keys(walkSeasons).sort()
+                  : [...viewSeasons].reverse().filter(inScope);
+                const pts = (walkSeasons
+                  ? chrono
+                      .map((s, i) => {
+                        const a = walkSeasons[s];
+                        if (applyState !== "done" || !a || a.n <= 0) return null;
+                        const hit = Math.round(a.acc * a.n);
+                        return { s, i, acc: a.acc, n: a.n, hit };
+                      })
+                      .filter((p): p is { s: string; i: number; acc: number; n: number; hit: number } => p !== null)
+                  : chrono
+                      .map((s, i) => {
+                        const a = applyState === "done" ? accuracy[s] : undefined;
+                        return a?.acc != null ? { s, i, acc: a.acc, n: a.n, hit: a.hit } : null;
+                      })
+                      .filter((p): p is { s: string; i: number; acc: number; n: number; hit: number } => p !== null));
                 const W = 232, H = 118, PL = 3, PR = 3, PT = 8, PB = 14;
                 const n = chrono.length;
                 const X = (i: number) => (n <= 1 ? PL + (W - PL - PR) / 2 : PL + (i / (n - 1)) * (W - PL - PR));
@@ -1372,7 +1398,9 @@ export function DashboardExplorer() {
               />
               <span>누적</span>
             </label>
+            </div>
             {learnMode === "cumulative" && (
+              <div className="mt-2 space-y-1.5">
               <label className="flex items-center gap-1 text-xs text-zinc-500">
                 베이스
                 <select
@@ -1383,7 +1411,7 @@ export function DashboardExplorer() {
                 >
                   <option value="">처음부터</option>
                   {models
-                    .filter((m) => m.model_type === "permatch")
+                    .filter((m) => m.model_type === "permatch" && m.ver.includes("cumu"))
                     .map((m) => (
                       <option key={m.ver} value={m.ver}>
                         {m.ver}
@@ -1391,8 +1419,6 @@ export function DashboardExplorer() {
                     ))}
                 </select>
               </label>
-            )}
-            {learnMode === "cumulative" && (
               <label className="flex items-center gap-1 text-xs text-zinc-500">
                 lr
                 <input
@@ -1404,8 +1430,8 @@ export function DashboardExplorer() {
                   className="w-14 rounded-lg border border-zinc-300 bg-white px-2 py-0.5 text-right font-mono text-xs text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
                 />
               </label>
+              </div>
             )}
-            </div>
           <details open className="mt-2 rounded-xl border border-zinc-200 dark:border-zinc-800">
             <summary className="cursor-pointer px-2.5 py-1.5 text-xs font-medium text-zinc-500">
               피처 선택 ({featSel.length}/{ALL_FEATURES.length})
