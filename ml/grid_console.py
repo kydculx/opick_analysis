@@ -93,20 +93,26 @@ def split_train_valid(league, n):
     return tr, [s for s in pool if s not in taken]
 
 
-def make_ver(train_csv, feats, draw_w="0", ts=""):
+def make_ver(train_csv, feats, draw_w="0", ts="", recency_w="0"):
     feats = list(feats)
     nt = len([s for s in train_csv.split(",") if s.strip()])
     try:
         dw = float(str(draw_w).strip() or "0")
     except (ValueError, AttributeError):
         dw = 0.0
+    try:
+        rw = float(str(recency_w).strip() or "0")
+    except (ValueError, AttributeError):
+        rw = 0.0
     if dw == 0.0:
-        key = f"{train_csv}|{','.join(feats)}|0"
+        key = f"{train_csv}|{','.join(feats)}|0|r{rw:g}"
     else:
-        key = f"{train_csv}|{','.join(feats)}|{dw:g}"
+        key = f"{train_csv}|{','.join(feats)}|{dw:g}|r{rw:g}"
     h = hashlib.sha1(key.encode()).hexdigest()[:4]
     tag = ("%g" % dw).replace(".", "_")
     base = f"tr{nt}-f{len(feats)}-d{tag}-x{h}"
+    if rw != 0.0:
+        base += f"-r{('%g' % rw).replace('.', '_')}"
     return f"{base}-{ts}" if ts else base
 
 
@@ -253,6 +259,12 @@ def build_command(o):
         cmd += ["--wmin", o.get("wmin") or "-3.0", "--wmax", o.get("wmax") or "3.0"]
         if o.get("draw_w"):
             cmd += ["--draw-w", o["draw_w"]]
+        if o.get("recency_w"):
+            try:
+                if float(str(o["recency_w"]).strip() or "0") != 0.0:
+                    cmd += ["--recency-w", str(o["recency_w"]).strip()]
+            except (ValueError, AttributeError):
+                pass
     elif mode == "grid":
         cmd += ["--mode", "grid"]
         if o.get("tune"):
@@ -269,6 +281,12 @@ def build_command(o):
         cmd += ["--jobs", o.get("jobs") or "1"]
         if o.get("draw_w"):
             cmd += ["--draw-w", o["draw_w"]]
+        if o.get("recency_w"):
+            try:
+                if float(str(o["recency_w"]).strip() or "0") != 0.0:
+                    cmd += ["--recency-w", str(o["recency_w"]).strip()]
+            except (ValueError, AttributeError):
+                pass
     elif mode == "cumu":
         walk = ",".join([s for s in (o.get("train", "") + "," + o.get("valid", "")).split(",") if s.strip()])
         feats = o.get("features", "")
@@ -302,6 +320,12 @@ def build_command(o):
                 "--auto-ensemble"]
         if o.get("draw_w"):
             cmd += ["--draw-w", o["draw_w"]]
+        if o.get("recency_w"):
+            try:
+                if float(str(o["recency_w"]).strip() or "0") != 0.0:
+                    cmd += ["--recency-w", str(o["recency_w"]).strip()]
+            except (ValueError, AttributeError):
+                pass
     if o.get("features"):
         cmd += ["--features", o["features"]]
     if o.get("new"):
@@ -347,6 +371,7 @@ def main():
     v_trials = tk.StringVar(value="10000")
     v_jobs = tk.StringVar(value="4")
     v_draww = tk.StringVar(value="0")
+    v_recw = tk.StringVar(value="0")
     v_gridstep = tk.StringVar(value="0.5")
     v_maxcombos = tk.StringVar(value="")
     v_maxmin = tk.StringVar(value="")
@@ -393,7 +418,7 @@ def main():
         elif v_mode.get() == "cumu":
             pass
         else:
-            v_ver.set(make_ver(",".join(tr), sel, v_draww.get(), now_tag()))
+            v_ver.set(make_ver(",".join(tr), sel, v_draww.get(), now_tag(), v_recw.get()))
         try:
             btn_feat.configure(text=f"피처({len(sel)})")
         except (AttributeError, RuntimeError, tk.TclError):
@@ -407,7 +432,7 @@ def main():
             "tune": v_tune.get().strip(), "features": ",".join(sel) if len(sel) != len(FEAT13) else "",
             "new": v_mode.get() == "train",
             "no_cache": v_nocache.get(), "trials": v_trials.get().strip(),
-            "jobs": v_jobs.get().strip(), "draw_w": v_draww.get().strip(), "grid_step": v_gridstep.get().strip(),
+            "jobs": v_jobs.get().strip(), "draw_w": v_draww.get().strip(), "recency_w": v_recw.get().strip(), "grid_step": v_gridstep.get().strip(),
             "max_combos": v_maxcombos.get().strip(), "max_minutes": v_maxmin.get().strip(),
             "ckpt_every": v_ckpt.get().strip(), "batch": v_batch.get().strip(),
             "log_secs": v_logsecs.get().strip(), "wmin": v_wmin.get().strip(),
@@ -532,7 +557,7 @@ def main():
         tr = v_train.get().strip()
         if not tr:
             return
-        ver = make_ver(tr, selected_feats(), v_draww.get(), now_tag())
+        ver = make_ver(tr, selected_feats(), v_draww.get(), now_tag(), v_recw.get())
         if ver != v_ver.get().strip():
             train_ver_sync["on"] = True
             try:
@@ -613,6 +638,12 @@ def main():
         if m:
             try:
                 v_draww.set("%g" % float(m.group(1).replace("_", ".")))
+            except (ValueError, AttributeError, tk.TclError):
+                pass
+        mr = re.search(r"-r(\d+(?:_\d+)?)(?=-|$)", ver)
+        if mr:
+            try:
+                v_recw.set("%g" % float(mr.group(1).replace("_", ".")))
             except (ValueError, AttributeError, tk.TclError):
                 pass
         try:
@@ -970,6 +1001,9 @@ def main():
     ent_draww = ttk.Entry(fr_train_opt, textvariable=v_draww, width=4)
     _reg(ent_draww).pack(side="left")
     _dw_widgets.append(ent_draww)
+    ttk.Label(fr_train_opt, text="최근가중").pack(side="left", padx=(8, 2))
+    ent_recw = ttk.Entry(fr_train_opt, textvariable=v_recw, width=4)
+    _reg(ent_recw).pack(side="left")
 
     f_auto = ttk.Frame(detail)
     fr_auto1 = ttk.Frame(f_auto)
@@ -981,6 +1015,9 @@ def main():
     _dw_auto = ttk.Entry(fr_auto1, textvariable=v_draww, width=4)
     _reg(_dw_auto).pack(side="left")
     _dw_widgets.append(_dw_auto)
+    ttk.Label(fr_auto1, text="최근가중").pack(side="left", padx=(8, 2))
+    _recw_auto = ttk.Entry(fr_auto1, textvariable=v_recw, width=4)
+    _reg(_recw_auto).pack(side="left")
 
     f_grid = ttk.Frame(detail)
     fr_grid2 = ttk.Frame(f_grid)
@@ -993,6 +1030,9 @@ def main():
     _dw_grid = ttk.Entry(fr_grid2, textvariable=v_draww, width=4)
     _reg(_dw_grid).pack(side="left")
     _dw_widgets.append(_dw_grid)
+    ttk.Label(fr_grid2, text="최근가중").pack(side="left", padx=(8, 2))
+    _recw_grid = ttk.Entry(fr_grid2, textvariable=v_recw, width=4)
+    _reg(_recw_grid).pack(side="left")
 
     f_cumu = ttk.Frame(detail)
     fr_cumu = ttk.Frame(f_cumu)

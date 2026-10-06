@@ -47,6 +47,7 @@ export async function POST(req: Request) {
     wmin?: unknown;
     wmax?: unknown;
     draw_w?: unknown;
+    recency_w?: unknown;
     max_combos?: unknown;
     max_minutes?: unknown;
   };
@@ -84,6 +85,8 @@ export async function POST(req: Request) {
   }
   const drawW = Number(body.draw_w);
   if (Number.isFinite(drawW) && drawW !== 0) argv.push("--draw-w", String(drawW));
+  const recW = Number(body.recency_w);
+  if (Number.isFinite(recW) && recW !== 0) argv.push("--recency-w", String(recW));
   const maxCombos = Math.floor(Number(body.max_combos));
   if (Number.isFinite(maxCombos) && maxCombos > 0) argv.push("--max-combos", String(maxCombos));
   const maxMinutes = Number(body.max_minutes);

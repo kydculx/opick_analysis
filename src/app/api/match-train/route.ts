@@ -6,12 +6,13 @@ import { JOB_DIR, isJobId, readJob, startJob } from "@/lib/jobs";
 import { ALL_FEATURES } from "@/lib/permatch-math";
 
 // GUI ml/grid_console.py make_ver와 동일 규칙: tr{시즌수}-f{피처수}-d{무가중}-x{해시4}-{년월일시분}
-function makeVer(trainCsv: string, feats: string[], drawW = "0", ts = ""): string {
+function makeVer(trainCsv: string, feats: string[], drawW = "0", ts = "", recencyW = "0"): string {
   const dw = Number.parseFloat(String(drawW).trim() || "0") || 0;
-  const key = `${trainCsv}|${feats.join(",")}|${dw === 0 ? "0" : String(dw)}`;
+  const rw = Number.parseFloat(String(recencyW).trim() || "0") || 0;
+  const key = `${trainCsv}|${feats.join(",")}|${dw === 0 ? "0" : String(dw)}|r${rw}`;
   const h = createHash("sha1").update(key).digest("hex").slice(0, 4);
   const tag = String(dw).replace(".", "_");
-  const base = `tr${trainCsv.split(",").filter((s) => s.trim()).length}-f${feats.length}-d${tag}-x${h}`;
+  const base = `tr${trainCsv.split(",").filter((s) => s.trim()).length}-f${feats.length}-d${tag}-x${h}${rw !== 0 ? `-r${String(rw).replace(".", "_")}` : ""}`;
   return ts ? `${base}-${ts}` : base;
 }
 
@@ -23,7 +24,7 @@ function nowTag(d = new Date()): string {
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as {
     league?: unknown; seasons?: unknown; features?: unknown;
-    mode?: unknown; trials?: unknown; jobs?: unknown; drawW?: unknown; valid?: unknown;
+    mode?: unknown; trials?: unknown; jobs?: unknown; drawW?: unknown; valid?: unknown; recencyW?: unknown;
   };
   const league = typeof body.league === "string" ? body.league : "";
   const seasons = Array.isArray(body.seasons) ? body.seasons.map((s) => String(s)).filter(Boolean) : [];
@@ -37,12 +38,14 @@ export async function POST(req: Request) {
   const trials = Math.max(1, Math.min(200000, Number.parseInt(String(body.trials ?? "10000"), 10) || 10000));
   const jobs = Math.max(1, Math.min(16, Number.parseInt(String(body.jobs ?? "4"), 10) || 4));
   const drawW = Number.parseFloat(String(body.drawW ?? "0")) || 0;
+  const recencyW = Number.parseFloat(String(body.recencyW ?? "0")) || 0;
   const valid = Array.isArray(body.valid)
     ? body.valid.map((s) => String(s)).filter(Boolean)
     : "auto";
   const sorted = [...new Set(seasons)].sort() as string[];
   const feats = features.length === ALL_FEATURES.length ? [...ALL_FEATURES] : [...features];
-  const ver = makeVer(sorted.join(","), feats, String(drawW), nowTag());
+  const ver = makeVer(sorted.join(","), feats, String(drawW), nowTag(), String(recencyW));
+  const recArg = recencyW !== 0 ? ["--recency-w", String(recencyW)] : [];
   const argv = full
     ? [
         "--league", league,
@@ -53,6 +56,7 @@ export async function POST(req: Request) {
         "--jobs", String(jobs),
         "--auto-ensemble",
         ...(drawW ? ["--draw-w", String(drawW)] : []),
+        ...recArg,
         ...(feats.length !== ALL_FEATURES.length ? ["--features", feats.join(",")] : []),
       ]
     : [
@@ -62,6 +66,7 @@ export async function POST(req: Request) {
         "--ver", ver,
         "--fast",
         "--auto-ensemble",
+        ...recArg,
         ...(feats.length !== ALL_FEATURES.length ? ["--features", feats.join(",")] : []),
       ];
   const job = startJob({

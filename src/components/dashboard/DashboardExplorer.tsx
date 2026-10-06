@@ -110,6 +110,7 @@ export function DashboardExplorer() {
   const [fullTrain, setFullTrain] = useState(true);
   const [trialsText, setTrialsText] = useState("10000");
   const [jobsText, setJobsText] = useState("4");
+  const [recencyWText, setRecencyWText] = useState("0");
   const [trainProg, setTrainProg] = useState<{ done: number; total: number; line?: string } | null>(null);
   const [cumuLr, setCumuLr] = useState("0.05");
   const [cumuDecayOn, setCumuDecayOn] = useState(false);
@@ -192,6 +193,7 @@ export function DashboardExplorer() {
   const [gridWminText, setGridWminText] = useState("-3.0");
   const [gridWmaxText, setGridWmaxText] = useState("3.0");
   const [gridDrawWText, setGridDrawWText] = useState("0");
+  const [gridRecWText, setGridRecWText] = useState("0");
   const FEATURE_KO: Record<string, string> = {
     rank: "순위차", power: "전력", hstr: "H2H강도", cond: "컨디션", att: "공격", def: "수비",
     val: "가치", form5: "최근폼", h2h5: "H2H5", avg_goals: "평균득점", avg_conceded: "평균실점",
@@ -516,8 +518,8 @@ export function DashboardExplorer() {
           seasons: trainingOrdered,
           ...(featSel.length !== ALL_FEATURES.length ? { features: featSel } : {}),
           ...(fullTrain
-            ? { mode: "full", trials: trialsText, jobs: jobsText }
-            : { mode: "fast" }),
+            ? { mode: "full", trials: trialsText, jobs: jobsText, recencyW: recencyWText }
+            : { mode: "fast", recencyW: recencyWText }),
         }),
       }).then((r) => r.json());
       if (!res.ok) {
@@ -1056,6 +1058,11 @@ export function DashboardExplorer() {
       setError("무가중은 0 이상 숫자로 입력하세요");
       return;
     }
+    const recW = Number(gridRecWText);
+    if (!Number.isFinite(recW) || recW < 0) {
+      setError("최근가중은 0 이상 숫자로 입력하세요");
+      return;
+    }
     gridRef.current = true;
     setGridding(true);
     setGridInfo(null);
@@ -1083,7 +1090,7 @@ export function DashboardExplorer() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           league, ver: selVer, tune, five, jobs, grid_step: step,
-          batch, wmin, wmax, draw_w: drawW,
+          batch, wmin, wmax, draw_w: drawW, recency_w: recW,
         }),
       }).then((r) => r.json());
       if (!res.ok) {
@@ -1548,6 +1555,18 @@ export function DashboardExplorer() {
                       className="w-10 rounded-lg border border-zinc-300 bg-white px-2 py-0.5 text-right font-mono text-xs text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
                     />
                   </label>
+                  <label className="flex items-center gap-1 text-xs text-zinc-500">
+                    최근가중
+                    <input
+                      value={recencyWText}
+                      onChange={(e) => setRecencyWText(e.target.value.replace(/[^0-9.]/g, ""))}
+                      disabled={trainState === "running"}
+                      inputMode="decimal"
+                      aria-label="최근가중"
+                      placeholder="0"
+                      className="w-12 rounded-lg border border-zinc-300 bg-white px-2 py-0.5 text-right font-mono text-xs text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
+                    />
+                  </label>
                 </>
               )}
             </div>
@@ -1719,6 +1738,7 @@ export function DashboardExplorer() {
                     { label: "jobs", value: gridJobsText, set: setGridJobsText, ph: "4" },
                     { label: "묶음", value: gridBatchText, set: setGridBatchText, ph: "4096" },
                     { label: "무가중", value: gridDrawWText, set: setGridDrawWText, ph: "0" },
+                    { label: "최근가중", value: gridRecWText, set: setGridRecWText, ph: "0" },
                     { label: "wmin", value: gridWminText, set: setGridWminText, ph: "-3.0" },
                     { label: "wmax", value: gridWmaxText, set: setGridWmaxText, ph: "3.0" },
                   ].map((f) => (
