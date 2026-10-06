@@ -67,7 +67,7 @@ function predictLocal(m: SoccerMatch, art: PermatchArtifact, ver: string) {
       const dd = alpha * b.dd + (1 - alpha) * qx[1];
       const lin = [b.ph * (1 - dd), dd, (1 - b.ph) * (1 - dd)];
       const bb = art.base;
-      const p = applyTemp(blendProbs(lin, b.x, bb.patterns, bb.pattern_tau ?? 0), bb.T);
+      const p = applyTemp(blendProbs(lin, b.x, bb.patterns, bb.pattern_tau ?? 0, bb.pattern_alpha ?? 0.5, bb.weights ?? null, bb.pattern_taus ?? null), bb.T);
       if (p.some((v) => !Number.isFinite(v))) return null;
       return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertT };
     }
@@ -92,7 +92,7 @@ function predictLocal(m: SoccerMatch, art: PermatchArtifact, ver: string) {
     } else {
       return null;
     }
-    const p = applyTemp(blendProbs(lin, x, art.patterns, art.pattern_tau ?? 0), art.T);
+    const p = applyTemp(blendProbs(lin, x, art.patterns, art.pattern_tau ?? 0, art.pattern_alpha ?? 0.5, art.weights ?? null, art.pattern_taus ?? null), art.T);
     if (p.some((v) => !Number.isFinite(v))) return null;
     return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertT };
   } catch {
@@ -114,6 +114,7 @@ export function DashboardExplorer() {
   const [cumuLr, setCumuLr] = useState("0.05");
   const [cumuDecayOn, setCumuDecayOn] = useState(false);
   const [cumuRollbackOn, setCumuRollbackOn] = useState(false);
+  const [cumuRecencyOn, setCumuRecencyOn] = useState(true);
   const [cumuBase, setCumuBase] = useState("");
   const [cumuResult, setCumuResult] = useState<string | null>(null);
   const [matches, setMatches] = useState<SoccerMatch[]>([]);
@@ -159,6 +160,8 @@ export function DashboardExplorer() {
       valid: string | string[] | null;
       trials: number | null;
       pattern_tau: number | null;
+      pattern_taus?: Record<string, number> | null;
+      pattern_alpha?: number | null;
       pattern_stats: Record<string, { rank: number; freq: number; acc: number }[]> | null;
       base_ver?: string;
       blend_w?: number;
@@ -435,7 +438,7 @@ export function DashboardExplorer() {
   }
 
   async function handleCumulative() {
-    if (checked.length === 0 || trainState === "running") return;
+    if (trainingOrdered.length === 0 || trainState === "running") return;
     if (featSel.length === 0) {
       setError("피처를 1개 이상 선택하세요");
       return;
@@ -452,12 +455,13 @@ export function DashboardExplorer() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           league,
-          seasons: checked,
+          seasons: trainingOrdered,
           base: cumuBase,
           lr: cumuLr,
           ...(featSel.length !== ALL_FEATURES.length ? { features: featSel } : {}),
           ...(cumuDecayOn ? { lrDecay: 0.0002 } : {}),
           ...(cumuRollbackOn ? { rollback: true } : {}),
+          ...(!cumuRecencyOn ? { recencyOff: true } : {}),
         }),
       }).then((r) => r.json());
       if (!res.ok) {
@@ -659,6 +663,8 @@ export function DashboardExplorer() {
       draw_sd: d.draw_sd,
       patterns: d.patterns ?? undefined,
       pattern_tau: d.pattern_tau ?? 0,
+      pattern_taus: d.pattern_taus ?? null,
+      pattern_alpha: d.pattern_alpha ?? 0.5,
       contrib_cap: d.contrib_cap ?? null,
     };
     const map: Record<string, PredMapEntry> = {};
@@ -749,6 +755,8 @@ export function DashboardExplorer() {
     const T = d.T ?? 1;
     const pats = d.patterns ?? undefined;
     const tau = d.pattern_tau ?? 0;
+    const taus = d.pattern_taus ?? null;
+    const palpha = d.pattern_alpha ?? 0.5;
     const Xe: number[][] = [];
     const labels: number[] = [];
     const ddArr: number[] = [];
@@ -768,7 +776,7 @@ export function DashboardExplorer() {
         ddArr.push(d.draw_prior ?? 0);
       }
     }
-    const ppArr = Xe.map((x) => patternProbs(x, pats, tau));
+    const ppArr = Xe.map((x) => patternProbs(x, pats, tau, d.weights ?? null, taus));
     const accLine = (wcur: number[], hfaCur: number) => {
       let hit = 0;
       for (let i = 0; i < Xe.length; i++) {
@@ -776,10 +784,10 @@ export function DashboardExplorer() {
         const ph = sigmoid(s);
         const dd = ddArr[i];
         const lin = [ph * (1 - dd), dd, (1 - ph) * (1 - dd)];
-        const pp = ppArr[i];
-        const a = pp ? lin[0] * 0.5 + pp[0] * 0.5 : lin[0];
-        const b = pp ? lin[1] * 0.5 + pp[1] * 0.5 : lin[1];
-        const c = pp ? lin[2] * 0.5 + pp[2] * 0.5 : lin[2];
+        const pp = patternProbs(Xe[i], pats, tau, wcur, taus);
+        const a = pp ? lin[0] * (1 - palpha) + pp[0] * palpha : lin[0];
+        const b = pp ? lin[1] * (1 - palpha) + pp[1] * palpha : lin[1];
+        const c = pp ? lin[2] * (1 - palpha) + pp[2] * palpha : lin[2];
         const pick = a >= b ? (a >= c ? 0 : 2) : b >= c ? 1 : 2;
         if (pick === labels[i]) hit++;
       }
@@ -791,7 +799,7 @@ export function DashboardExplorer() {
         const s = cappedDot(Xe[i], w, hfa, cap);
         const ph = sigmoid(s);
         const dd = ddArr[i];
-        const p = applyTemp(blendProbs([ph * (1 - dd), dd, (1 - ph) * (1 - dd)], Xe[i], pats, tau), T);
+        const p = applyTemp(blendProbs([ph * (1 - dd), dd, (1 - ph) * (1 - dd)], Xe[i], pats, tau, palpha, w, taus), T);
         const pick = p.indexOf(Math.max(...p));
         if (pick === labels[i]) hit++;
       }
@@ -1191,12 +1199,16 @@ export function DashboardExplorer() {
     Object.fromEntries(
       Object.entries(m).filter(([s]) => (validSet ? validSet.has(s) : !trainSet.has(s)))
     );
-  const upcomingOf = (m: Record<string, { n: number; hit: number; acc: number | null }>) =>
-    Object.entries(m)
-      .filter(([s]) => !trainSet.has(s) && !(validSet ? validSet.has(s) : false))
+  const upcomingOf = (m: Record<string, { n: number; hit: number; acc: number | null }>) => {
+    if (viewSeasons.length === 0) return [];
+    const latest = [...viewSeasons].sort().slice(-1)[0];
+    return Object.entries(m)
+      .filter(([s]) => s === latest && !trainSet.has(s) && !(validSet ? validSet.has(s) : false))
       .sort(([a], [b]) => (a < b ? -1 : 1));
+  };
   const cumuWalkSeasons = modelDetail?.detail?.cumulative?.walk?.seasons;
-  const cumuWalkCount = cumuWalkSeasons ? Object.keys(cumuWalkSeasons).length : 0;
+  const showWalk = cumuWalkSeasons && (!validSet || validSet.size === 0);
+  const cumuWalkCount = showWalk ? Object.keys(cumuWalkSeasons as Record<string, unknown>).length : 0;
   const curOverall = overallOf(scopeOf(accuracy));
   const baseOverall = overallOf(scopeOf(baseMapRef.current ?? {}));
   const canSave =
@@ -1261,7 +1273,7 @@ export function DashboardExplorer() {
             ) : (
               (() => {
                 const inScope = (s: string) => (validSet ? validSet.has(s) : !trainSet.has(s));
-                const walk = modelDetail?.detail?.cumulative?.walk;
+                const walk = showWalk ? modelDetail?.detail?.cumulative?.walk : undefined;
                 const walkSeasons = walk?.seasons;
                 const chrono = walkSeasons
                   ? Object.keys(walkSeasons).sort()
@@ -1454,6 +1466,16 @@ export function DashboardExplorer() {
                 />
                 <span>롤백</span>
               </label>
+              <label className="flex cursor-pointer items-center gap-1 text-xs text-zinc-500">
+                <input
+                  type="checkbox"
+                  checked={cumuRecencyOn}
+                  onChange={() => setCumuRecencyOn((v) => !v)}
+                  disabled={trainState === "running"}
+                  className="h-3.5 w-3.5 accent-blue-600 disabled:opacity-40 dark:accent-blue-400"
+                />
+                <span>최신가중</span>
+              </label>
               </div>
             )}
           <details open className="mt-2 rounded-xl border border-zinc-200 dark:border-zinc-800">
@@ -1535,7 +1557,7 @@ export function DashboardExplorer() {
             size="sm"
             disabled={
               learnMode === "cumulative"
-                ? checked.length === 0 || trainState === "running" || (trainState === "done" && cumuBase !== "")
+                ? trainingOrdered.length === 0 || trainState === "running" || (trainState === "done" && cumuBase !== "")
                 : trainingOrdered.length === 0 || trainState === "running" || trainState === "done"
             }
             onClick={handleTrain}
