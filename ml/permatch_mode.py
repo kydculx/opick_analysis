@@ -142,35 +142,77 @@ def batch_proba(X, w, hfa: float, d: float, T: float = 1.0, e=None, dw=None, db:
     return P
 
 
-def batch_ll(X, y, w, hfa: float, d: float, T: float = 1.0, l2: float = 0.0, e=None, dw=None, db=0.0, Xd=None, cap=None, draw_w: float = 0.0):
+def _recency_weights(ssn, strength: float):
+    """시즌 순서 기반 샘플 가중치. 오래된시즌 1.0 → 최신시즌 1.0+strength 선형. 0이면 균등(None)."""
+    try:
+        s = float(strength)
+    except (TypeError, ValueError):
+        return None
+    if not (s > 0):
+        return None
+    if not ssn:
+        return None
+    uniq = sorted(set(str(v) for v in ssn))
+    if len(uniq) < 2:
+        return None
+    rank = {v: i for i, v in enumerate(uniq)}
+    denom = max(len(uniq) - 1, 1)
+    return [1.0 + s * (rank[str(v)] / denom) for v in ssn]
+
+
+def batch_ll(X, y, w, hfa: float, d: float, T: float = 1.0, l2: float = 0.0, e=None, dw=None, db=0.0, Xd=None, cap=None, draw_w: float = 0.0, sw=None):
     import numpy as np
     P = batch_proba(X, w, hfa, d, T, e, dw, db, Xd, cap)
     yy = np.asarray(y, dtype=int)
     nll = -np.log(np.maximum(P[np.arange(len(yy)), yy], 1e-12))
+    if sw is not None:
+        ww = np.asarray(list(sw), dtype=float)
+        if ww.shape[0] == yy.shape[0] and float(ww.sum()) > 0:
+            if draw_w > 0:
+                dw8 = np.where(yy == 1, 1.0 + draw_w, 1.0) * ww
+                ll = float((dw8 * nll).sum() / dw8.sum())
+            else:
+                ll = float((ww * nll).sum() / ww.sum())
+        elif draw_w > 0:
+            dww = np.where(yy == 1, 1.0 + draw_w, 1.0)
+            ll = float((dww * nll).sum() / dww.sum())
+        else:
+            ll = float(nll.mean())
+        return ll + l2 * float((np.asarray(w, dtype=float) ** 2).sum())
     if draw_w > 0:
-        sw = np.where(yy == 1, 1.0 + draw_w, 1.0)
-        ll = float((sw * nll).sum() / sw.sum())
+        sw2 = np.where(yy == 1, 1.0 + draw_w, 1.0)
+        ll = float((sw2 * nll).sum() / sw2.sum())
     else:
         ll = float(nll.mean())
     return ll + l2 * float((np.asarray(w, dtype=float) ** 2).sum())
 
 
-def batch_acc(X, y, w, hfa: float, d: float, T: float = 1.0, e=None, dw=None, db=0.0, Xd=None, cap=None):
+def batch_acc(X, y, w, hfa: float, d: float, T: float = 1.0, e=None, dw=None, db=0.0, Xd=None, cap=None, sw=None):
     import numpy as np
     P = batch_proba(X, w, hfa, d, T, e, dw, db, Xd, cap)
     home, dr, away = P[:, 0], P[:, 1], P[:, 2]
     pick = np.where((home >= dr) & (home >= away), 0, np.where(dr >= away, 1, 2))
     yy = np.asarray(y, dtype=int)
+    if sw is not None:
+        ww = np.asarray(list(sw), dtype=float)
+        if ww.shape[0] == yy.shape[0] and float(ww.sum()) > 0:
+            return float(((pick == yy) * ww).sum() / ww.sum())
     return float((pick == yy).mean())
 
 
-def batch_accrec(X, y, w, hfa: float, d: float, T: float = 1.0, e=None, dw=None, db=0.0, Xd=None, cap=None):
-    """정확도와 무승부 리콜을 함께 반환. (acc, rec)"""
+def batch_accrec(X, y, w, hfa: float, d: float, T: float = 1.0, e=None, dw=None, db=0.0, Xd=None, cap=None, sw=None):
     import numpy as np
     P = batch_proba(X, w, hfa, d, T, e, dw, db, Xd, cap)
     home, dr, away = P[:, 0], P[:, 1], P[:, 2]
     pick = np.where((home >= dr) & (home >= away), 0, np.where(dr >= away, 1, 2))
     yy = np.asarray(y, dtype=int)
+    if sw is not None:
+        ww = np.asarray(list(sw), dtype=float)
+        if ww.shape[0] == yy.shape[0] and float(ww.sum()) > 0:
+            acc = float(((pick == yy) * ww).sum() / ww.sum())
+            m = yy == 1
+            rec = float(((pick[m] == 1) * ww[m]).sum() / ww[m].sum()) if m.sum() and float(ww[m].sum()) > 0 else 0.0
+            return acc, rec
     acc = float((pick == yy).mean())
     m = yy == 1
     rec = float((pick[m] == 1).mean()) if m.sum() else 0.0
@@ -470,7 +512,7 @@ def blend_proba(p_lin, x, patterns, tau: float, alpha: float = 0.5, w=None, taus
 
 
 def tune_pattern_alpha(Xe_va, yva, w, hfa, d, pats, tau, taus, T=1.0, dw=None, db: float = 0.0,
-                       Xde_va=None, cap=None):
+                       Xde_va=None, cap=None, sw_va=None):
     """valid 기준 alpha(0~1, 0.1 간격) 선택. 기준: (acc, -ll) 최대."""
     import numpy as _np
     if not len(Xe_va) or not len(yva) or not pats or not tau:
@@ -493,6 +535,12 @@ def tune_pattern_alpha(Xe_va, yva, w, hfa, d, pats, tau, taus, T=1.0, dw=None, d
             P = E / E.sum(axis=1, keepdims=True)
         home, dr, away = P[:, 0], P[:, 1], P[:, 2]
         pick = _np.where((home >= dr) & (home >= away), 0, _np.where(dr >= away, 1, 2))
+        if sw_va is not None:
+            _ww = _np.asarray(list(sw_va), dtype=float)
+            if _ww.shape[0] == len(yn):
+                acc = float(((pick == yn) * _ww).sum() / _ww.sum())
+                nll = float((_ww * -_np.log(_np.maximum(P[_np.arange(len(yn)), yn], 1e-12))).sum() / _ww.sum())
+                return acc, nll
         acc = float((pick == yn).mean())
         nll = float((-_np.log(_np.maximum(P[_np.arange(len(yn)), yn], 1e-12))).mean())
         return acc, nll
@@ -692,7 +740,7 @@ def load_seasons(league: str, seasons: list[str], use_cache: bool = True):
 
 
 def tune_weights(league: str, ver: str, tune_s: set, max_sweeps: int = 6,
-                 use_cache: bool = True, draw_w: float = 0.0):
+                 use_cache: bool = True, draw_w: float = 0.0, recency_w: float = 0.0):
     art = json.load(open(model_path(league, ver)))
     if not isinstance(art.get("weights"), list):
         log(f"조절/탐색은 legacy 가중치 모델만 지원 (현재: {art.get('model_type')})")
@@ -725,10 +773,13 @@ def tune_weights(league: str, ver: str, tune_s: set, max_sweeps: int = 6,
     import numpy as _np
     Xn = _np.asarray(feats, dtype=float)
     yn = _np.asarray(labels, dtype=int)
+    sw = _recency_weights(ssn, recency_w)
+    if sw is not None:
+        log(f"최신가중 적용 (strength={recency_w})")
 
     def key_of(wv, hv):
-        a, r = batch_accrec(Xn, yn, wv, hv, d)
-        return (_sel_bonus(a, r, draw_w), -batch_ll(Xn, yn, wv, hv, d), a)
+        a, r = batch_accrec(Xn, yn, wv, hv, d, sw=sw)
+        return (_sel_bonus(a, r, draw_w), -batch_ll(Xn, yn, wv, hv, d, sw=sw), a)
 
     def season_acc(wv, hv):
         out = {}
@@ -796,7 +847,7 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
               max_minutes: float = 0.0, noise: float = 0.1, hfa_noise: float = 0.05,
               wmin: float = -3.0, wmax: float = 3.0, log_every: int = 200,
               seed: int = 7, fresh: bool = False, use_cache: bool = True,
-              grid_step: float = 0.0, draw_w: float = 0.0):
+              grid_step: float = 0.0, draw_w: float = 0.0, recency_w: float = 0.0):
     import numpy as _np
     p = model_path(league, ver)
     if not os.path.exists(p):
@@ -852,6 +903,11 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
     yn = _np.asarray(labels, dtype=int)
     Xd = _np.asarray(xds, dtype=float) if use_draw else None
     log("draw 모델 평가 사용" if use_draw else "draw_prior 평가 사용")
+    sw_arr = None
+    _sw = _recency_weights(ssn, recency_w)
+    if _sw is not None:
+        sw_arr = _np.asarray(_sw, dtype=float)
+        log(f"최신가중 적용 (strength={recency_w})")
     PP = None
     if pats and tau and tau > 0:
         try:
@@ -866,6 +922,8 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
         P = (1.0 - palpha) * Plin + palpha * PP if PP is not None else Plin
         home, dr, aw = P[:, 0], P[:, 1], P[:, 2]
         pick = _np.where((home >= dr) & (home >= aw), 0, _np.where(dr >= aw, 1, 2))
+        if sw_arr is not None:
+            return float(((pick == yn) * sw_arr).sum() / sw_arr.sum())
         return float((pick == yn).mean())
 
     def accrec_of(wv, hv):
@@ -874,6 +932,11 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
         P = (1.0 - palpha) * Plin + palpha * PP if PP is not None else Plin
         home, dr, aw = P[:, 0], P[:, 1], P[:, 2]
         pick = _np.where((home >= dr) & (home >= aw), 0, _np.where(dr >= aw, 1, 2))
+        if sw_arr is not None:
+            a = float(((pick == yn) * sw_arr).sum() / sw_arr.sum())
+            m = yn == 1
+            r = float(((pick[m] == 1) * sw_arr[m]).sum() / sw_arr[m].sum()) if m.sum() and float(sw_arr[m].sum()) > 0 else 0.0
+            return a, r
         a = float((pick == yn).mean())
         m = yn == 1
         r = float((pick[m] == 1).mean()) if m.sum() else 0.0
@@ -1114,7 +1177,7 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
                 batch: int = 4096, log_secs: float = 10.0,
                 split: int = 1, part: int = 0,
                 fresh: bool = False, use_cache: bool = True,
-                jobs: int = 1, draw_w: float = 0.0):
+                jobs: int = 1, draw_w: float = 0.0, recency_w: float = 0.0):
     import numpy as _np
     p = model_path(league, ver)
     if not os.path.exists(p):
@@ -1136,6 +1199,7 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
     e = art.get("emphasis", [1.0] * nw)
     _tau0, _taus0, _w0, _alpha0 = _pat_params_from_art(art)
     pats, tau, taus, palpha = art.get("patterns"), _tau0, _taus0, _alpha0
+    gw = list(_w0) if isinstance(_w0, list) else None
     cap = art.get("contrib_cap")
     dw = art.get("draw_weights")
     db = art.get("draw_bias", 0.0) or 0.0
@@ -1168,10 +1232,15 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
     Xn = _np.asarray(feats, dtype=float)
     yn = _np.asarray(labels, dtype=int)
     Xd = _np.asarray(xds, dtype=float) if use_draw else None
+    sw_arr = None
+    _sw = _recency_weights(ssn, recency_w)
+    if _sw is not None:
+        sw_arr = _np.asarray(_sw, dtype=float)
+        log(f"최신가중 적용 (strength={recency_w})")
     PP = None
     if pats and tau and tau > 0:
         try:
-            PP = _np.asarray([pattern_proba(x, pats, tau, w, taus) for x in feats], dtype=float)
+            PP = _np.asarray([pattern_proba(x, pats, tau, gw, taus) for x in feats], dtype=float)
         except (KeyError, TypeError, ValueError):
             PP = None
 
@@ -1200,10 +1269,12 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
         P1 = _np.broadcast_to(ddArr, Ph.shape)
         P2 = (1.0 - Ph) * (1.0 - ddArr)
         if PP is not None:
-            P0 = 0.5 * P0 + 0.5 * PP[:, 0]
-            P1 = 0.5 * P1 + 0.5 * PP[:, 1]
-            P2 = 0.5 * P2 + 0.5 * PP[:, 2]
+            P0 = (1.0 - palpha) * P0 + palpha * PP[:, 0]
+            P1 = (1.0 - palpha) * P1 + palpha * PP[:, 1]
+            P2 = (1.0 - palpha) * P2 + palpha * PP[:, 2]
         pick = _np.where((P0 >= P1) & (P0 >= P2), 0, _np.where(P1 >= P2, 1, 2))
+        if sw_arr is not None:
+            return ((pick == yn[None, :]) * sw_arr[None, :]).sum(axis=1) / sw_arr.sum()
         return (pick == yn[None, :]).mean(axis=1)
 
     def _accrec_batch(Wmat, hvec):
@@ -1221,14 +1292,20 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
         P1 = _np.broadcast_to(ddArr, Ph.shape)
         P2 = (1.0 - Ph) * (1.0 - ddArr)
         if PP is not None:
-            P0 = 0.5 * P0 + 0.5 * PP[:, 0]
-            P1 = 0.5 * P1 + 0.5 * PP[:, 1]
-            P2 = 0.5 * P2 + 0.5 * PP[:, 2]
+            P0 = (1.0 - palpha) * P0 + palpha * PP[:, 0]
+            P1 = (1.0 - palpha) * P1 + palpha * PP[:, 1]
+            P2 = (1.0 - palpha) * P2 + palpha * PP[:, 2]
         pick = _np.where((P0 >= P1) & (P0 >= P2), 0, _np.where(P1 >= P2, 1, 2))
-        accs = (pick == yn[None, :]).mean(axis=1)
+        if sw_arr is not None:
+            accs = ((pick == yn[None, :]) * sw_arr[None, :]).sum(axis=1) / sw_arr.sum()
+        else:
+            accs = (pick == yn[None, :]).mean(axis=1)
         dm = yn == 1
         if dm.sum():
-            recs = (pick[:, dm] == 1).mean(axis=1)
+            if sw_arr is not None and float(sw_arr[dm].sum()) > 0:
+                recs = ((pick[:, dm] == 1) * sw_arr[dm][None, :]).sum(axis=1) / sw_arr[dm].sum()
+            else:
+                recs = (pick[:, dm] == 1).mean(axis=1)
         else:
             recs = _np.zeros(B)
         return accs, recs
@@ -1903,7 +1980,8 @@ def drawfit(league: str, ver: str, extra_s: set, use_cache: bool = True):
     return True
 
 
-def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", draw_w: float = 0.0):
+def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", draw_w: float = 0.0,
+                recency_w: float = 0.0):
     feats, splits, labels, rounds, dfeats = [], [], [], [], []
     for r in matches:
         s = str(r["season"])
@@ -1944,6 +2022,10 @@ def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", d
     vy = [y for s, y in zip(splits, labels) if s == "train" and y is not None]
     vvX = [x for x, s, y in zip(feats, splits, labels) if s == "valid" and y is not None]
     vvy = [y for s, y in zip(splits, labels) if s == "valid" and y is not None]
+    vvS = [s for s, y in zip(splits, labels) if s == "valid" and y is not None]
+    sw_va = _recency_weights(vvS, recency_w)
+    if sw_va is not None:
+        log(f"최신가중 적용 (strength={recency_w})")
     d_tr = [x for x, s, y in zip(dfeats, splits, labels) if s == "train" and y is not None]
     d_va = [x for x, s, y in zip(dfeats, splits, labels) if s == "valid" and y is not None]
     w, hfa, T, mu, sd, e, dw, db, mu_d, sd_d = fit_linear(
@@ -1974,7 +2056,7 @@ def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", d
         log(f"  {_c} #1: {_s['freq']}전 acc={_s['acc']:.3f}")
     pattern_alpha = tune_pattern_alpha(Xe_va, vvy, w, hfa, draw_prior, patterns,
                                        pattern_tau, pattern_taus, T, dw, db, Xde_va,
-                                       contrib_cap)
+                                       contrib_cap, sw_va)
     log(f"pattern_alpha={pattern_alpha:.1f}")
     metrics = {}
     for split in ("train", "valid", "test"):
@@ -1990,6 +2072,7 @@ def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", d
                 "features": FEATURES, "patterns": patterns, "pattern_tau": pattern_tau,
                 "pattern_taus": pattern_taus, "pattern_alpha": pattern_alpha,
                 "pattern_stats": pattern_stats, "contrib_cap": contrib_cap,
+                "recency_w": recency_w,
                 "train_seasons": sorted(train_s), "valid": sorted(valid_s),
                 "draw_analysis": draw_rep}
     return artifact, metrics
@@ -2493,6 +2576,7 @@ def main():
     ap.add_argument("--features", default="", help="임의 피처 선택, 콤마 구분 (예: rank,power,att). 지정 시 --five보다 우선")
     ap.add_argument("--model", default="legacy", choices=["legacy"], help="모델 구조 (legacy 단일)")
     ap.add_argument("--draw-w", type=float, default=0.0, help="무승부 가중 (선발 리콜가중 + 샘플가중, 0=끄기, 예: 0.5)")
+    ap.add_argument("--recency-w", type=float, default=0.0, help="최신시즌 가중 (valid/tune 선발만, 0=끄기, 예: 1.0이면 최신시즌 2배)")
     ap.add_argument("--auto-ensemble", action="store_true", help="학습 후 legacy+XGB 앙상블 자동 적합")
     ap.add_argument("--ens-rec-w", type=float, default=0.5, help="앙상블 선발식 무승부 가중")
     ap.add_argument("--trials", type=int, default=20)
@@ -2603,7 +2687,7 @@ def main():
         assert args.tune and args.ver, "--tune과 --ver 필요"
         tune_s = {s.strip() for s in args.tune.split(",") if s.strip()}
         tune_weights(league, ver, tune_s, args.sweeps, use_cache=not args.no_cache,
-                     draw_w=args.draw_w)
+                     draw_w=args.draw_w, recency_w=args.recency_w)
         return
 
     if args.mode == "drawfit":
@@ -2620,7 +2704,7 @@ def main():
                   noise=args.noise, hfa_noise=args.hfa_noise,
                   wmin=args.wmin, wmax=args.wmax, log_every=args.log_every,
                   seed=args.seed, fresh=args.new, use_cache=not args.no_cache,
-                  grid_step=args.auto_step, draw_w=args.draw_w)
+                  grid_step=args.auto_step, draw_w=args.draw_w, recency_w=args.recency_w)
         return
 
     if args.mode == "grid":
@@ -2633,7 +2717,7 @@ def main():
                     batch=args.batch, log_secs=args.log_secs,
                     split=args.split, part=args.part,
                     fresh=args.new, use_cache=not args.no_cache,
-                    jobs=args.jobs, draw_w=args.draw_w)
+                    jobs=args.jobs, draw_w=args.draw_w, recency_w=args.recency_w)
         return
 
     assert args.train, "--train 필요"
@@ -2661,7 +2745,7 @@ def main():
     # ---- 단발 모드
     if args.fast:
         artifact, metrics = train_model(rows, train_s, valid_s, ver, args.test,
-                                        draw_w=args.draw_w)
+                                        draw_w=args.draw_w, recency_w=args.recency_w)
         for split in ("train", "valid", "test"):
             m = metrics.get(split, {})
             if m.get("n"):
@@ -2708,6 +2792,7 @@ def main():
     Xn = [apply_std(x, mu, sd) for x in feats]
     ty = labels
     vX, vy = [], []
+    vy_ssn = []
     for r in rows:
         if str(r.get("season")) not in valid_s:
             continue
@@ -2716,8 +2801,12 @@ def main():
             continue
         vX.append(apply_std(row_features(r), mu, sd))
         vy.append(0 if hs > aws else (1 if hs == aws else 2))
+        vy_ssn.append(str(r.get("season")))
     log(f"league={league} train={sorted(train_s)}({len(Xn)}) valid={sorted(valid_s)}({len(vX)}) ver={ver}")
     log(f"trials={args.trials} jobs={args.jobs} seed={args.seed} mode={'new' if args.new else 'resume'}")
+    sw_trials = _recency_weights(vy_ssn, args.recency_w)
+    if sw_trials is not None:
+        log(f"최신가중 적용 (strength={args.recency_w})")
 
     best, old_art = (None, None) if args.new else load_existing_best(league, ver, rows, train_s, valid_s)
     if args.new:
@@ -2739,7 +2828,11 @@ def main():
         Xe = [apply_emphasis(x, e_) for x in Xn]
         Ve = [apply_emphasis(x, e_) for x in vX]
         if Ve and vy:
-            return metrics_of(w_, hfa_, T_, d, Ve, vy)
+            import numpy as _np
+            _Ve = _np.asarray(Ve, dtype=float)
+            _vy = _np.asarray(vy, dtype=int)
+            return (batch_acc(_Ve, _vy, w_, hfa_, T_, d, sw=sw_trials),
+                    batch_ll(_Ve, _vy, w_, hfa_, T_, d, sw=sw_trials))
         _, ll = metrics_of(w_, hfa_, T_, d, Xe, ty)
         return 0.0, ll
 
@@ -2774,7 +2867,7 @@ def main():
         if args.draw_w > 0 and len(vX) and len(vy):
             import numpy as _np
             _Ve = _np.asarray([apply_emphasis(x, e) for x in vX])
-            _, rec = batch_accrec(_Ve, _np.asarray(vy, dtype=int), w, hfa, d, T)
+            _, rec = batch_accrec(_Ve, _np.asarray(vy, dtype=int), w, hfa, d, T, sw=sw_trials)
         key = (_sel_bonus(acc, rec, args.draw_w), -ll)
         cur_key = ((_sel_bonus(best["acc"], best.get("rec", 0.0), args.draw_w),
                     -best["ll"]) if best else None)
