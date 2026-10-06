@@ -288,6 +288,8 @@ def build_command(o):
             cmd += ["--lr-decay", o["cumu_decay"]]
         if o.get("cumu_rb"):
             cmd.append("--rollback")
+        if o.get("cumu_norec"):
+            cmd.append("--no-recency")
         if feats:
             cmd += ["--features", feats]
         if walk:
@@ -357,6 +359,7 @@ def main():
     v_cumubase = tk.StringVar(value="")
     v_cumudecay = tk.BooleanVar(value=False)
     v_cumurb = tk.BooleanVar(value=False)
+    v_cumurec = tk.BooleanVar(value=True)
     v_status = tk.StringVar(value="대기 중")
     v_acc = tk.StringVar(value="−")
     v_train_line = tk.StringVar(value="")
@@ -412,6 +415,7 @@ def main():
             "cumu_base": "" if v_cumubase.get().strip() in ("", "(처음부터)") else v_cumubase.get().strip(),
             "cumu_decay": "0.0002" if v_cumudecay.get() else "",
             "cumu_rb": bool(v_cumurb.get()),
+            "cumu_norec": not bool(v_cumurec.get()),
         }
 
     opt_widgets = []
@@ -1001,6 +1005,7 @@ def main():
     _reg(ttk.Entry(fr_cumu, textvariable=v_cumulr, width=6)).pack(side="left")
     _reg(ttk.Checkbutton(fr_cumu, text="lr감쇠", variable=v_cumudecay)).pack(side="left", padx=(8, 0))
     _reg(ttk.Checkbutton(fr_cumu, text="롤백", variable=v_cumurb)).pack(side="left")
+    _reg(ttk.Checkbutton(fr_cumu, text="최신가중", variable=v_cumurec)).pack(side="left")
 
     MODE_FRAMES = {"grid": f_grid, "train": f_train, "auto": f_auto, "cumu": f_cumu}
 
