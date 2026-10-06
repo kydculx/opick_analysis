@@ -331,12 +331,73 @@ def kmeans(X, k: int, seed: int = 0, iters: int = 60):
     return C
 
 
-def build_patterns(feats, labels, mu, sd, e, k: int = 5, seed: int = 11):
+def _metric_weights(w, n: int):
+    """|w| 기반 차원 가중치. mean=1 정규화로 tau 스케일 유지. w 없으면 None(균등)."""
+    if w is None:
+        return None
+    try:
+        m = [abs(float(v)) for v in w]
+    except (TypeError, ValueError):
+        return None
+    if len(m) != n:
+        return None
+    if max(m) < 1e-9:
+        return [1.0] * n
+    mean = sum(m) / len(m) or 1.0
+    return [v / mean for v in m]
+
+
+def _wdist2(x, c, mw):
+    if mw is None:
+        return sum((a - b) ** 2 for a, b in zip(x, c))
+    return sum(mw[i] * ((a - b) ** 2) for i, (a, b) in enumerate(zip(x, c)))
+
+
+def _resolve_class_tau(cname: str, tau: float, taus) -> float:
+    if isinstance(taus, dict):
+        try:
+            v = float(taus.get(cname, tau))
+            if v > 0 and math.isfinite(v):
+                return v
+        except (TypeError, ValueError):
+            pass
+    try:
+        t = float(tau)
+        if t > 0 and math.isfinite(t):
+            return t
+    except (TypeError, ValueError):
+        pass
+    return 1.0
+
+
+def _pat_params_from_art(art: dict):
+    """아티팩트에서 (tau, taus, w, alpha) 추출. 구 아티팩트 하위호환."""
+    tau = art.get("pattern_tau", 0.0) or 0.0
+    taus = art.get("pattern_taus")
+    if not isinstance(taus, dict):
+        taus = None
+    w = art.get("weights")
+    if not isinstance(w, list):
+        w = None
+    try:
+        alpha = float(art.get("pattern_alpha", 0.5))
+    except (TypeError, ValueError):
+        alpha = 0.5
+    if not math.isfinite(alpha):
+        alpha = 0.5
+    alpha = min(1.0, max(0.0, alpha))
+    return tau, taus, w, alpha
+
+
+def build_patterns(feats, labels, mu, sd, e, k: int = 5, seed: int = 11, w=None):
     import numpy as _np
     Xn = _np.asarray([apply_emphasis(apply_std(x, mu, sd), e) for x in feats], dtype=float)
     y = _np.asarray(labels, dtype=int)
     out: dict = {}
-    spread: list = []
+    mw = _metric_weights(w, Xn.shape[1]) if len(Xn) else None
+    # kmeans는 기존대로 유클리드(안정성), 거리/tau만 w가중. 중심은 Xe 공간에 저장.
+    spread_all: list = []
+    spread_by: dict = {"home": [], "draw": [], "away": []}
     for ci, cname in ((0, "home"), (1, "draw"), (2, "away")):
         Xc = Xn[y == ci]
         if len(Xc) == 0:
@@ -347,12 +408,22 @@ def build_patterns(feats, labels, mu, sd, e, k: int = 5, seed: int = 11):
         if kk < k:
             C = _np.vstack([C] + [C[:1]] * (k - kk))
         out[cname] = [list(map(float, row)) for row in C]
-        dmin = ((Xc[:, None, :] - C[None, :, :]) ** 2).sum(-1).min(1)
-        spread.extend(float(v) for v in _np.sqrt(dmin))
-    tau = float(sum(spread) / max(len(spread), 1)) or 1.0
+        for row in Xc:
+            best = min(_wdist2(row, cen, mw) for cen in out[cname])
+            v = float(math.sqrt(max(best, 0.0)))
+            spread_all.append(v)
+            spread_by[cname].append(v)
+    tau = float(sum(spread_all) / max(len(spread_all), 1)) or 1.0
+    taus = {c: (float(sum(v) / len(v)) if v else tau) or tau
+            for c, v in spread_by.items()}
     order = ["home", "draw", "away"]
     all_c = _np.asarray([c for cname in order for c in out[cname]], dtype=float)
-    d_all = ((Xn[:, None, :] - all_c[None, :, :]) ** 2).sum(-1).argmin(1)
+    # 랭킹용 귀속도 동일 가중거리 사용
+    if mw is None:
+        d_all = ((Xn[:, None, :] - all_c[None, :, :]) ** 2).sum(-1).argmin(1)
+    else:
+        Mw = _np.asarray(mw, dtype=float)
+        d_all = (((Xn[:, None, :] - all_c[None, :, :]) ** 2) * Mw).sum(-1).argmin(1)
     stats: dict = {}
     for ci, cname in enumerate(order):
         ranked = []
@@ -364,25 +435,78 @@ def build_patterns(feats, labels, mu, sd, e, k: int = 5, seed: int = 11):
         ranked.sort(key=lambda t: (-t[0], -t[1]))
         out[cname] = [out[cname][j] for _, _, j in ranked]
         stats[cname] = [{"rank": r + 1, "freq": f, "acc": round(a, 4)} for r, (f, a, _) in enumerate(ranked)]
-    return out, tau, stats
+    return out, tau, stats, taus
 
 
-def pattern_proba(x, patterns, tau: float):
+def pattern_proba(x, patterns, tau: float, w=None, taus=None):
+    mw = _metric_weights(w, len(x))
     scores = []
     for cname in ("home", "draw", "away"):
-        best = min(sum((a - b) ** 2 for a, b in zip(x, cen)) for cen in patterns[cname])
-        scores.append(-math.sqrt(best) / tau)
+        best = min(_wdist2(x, cen, mw) for cen in patterns[cname])
+        t = _resolve_class_tau(cname, tau, taus)
+        scores.append(-math.sqrt(max(best, 0.0)) / t)
     mx = max(scores)
     ex = [math.exp(s - mx) for s in scores]
     s = sum(ex)
     return [v / s for v in ex]
 
 
-def blend_proba(p_lin, x, patterns, tau: float, alpha: float = 0.5):
+def blend_proba(p_lin, x, patterns, tau: float, alpha: float = 0.5, w=None, taus=None):
     if not patterns or not tau:
         return p_lin
-    pp = pattern_proba(x, patterns, tau)
-    return [alpha * b + (1.0 - alpha) * a for a, b in zip(p_lin, pp)]
+    try:
+        a = float(alpha)
+    except (TypeError, ValueError):
+        a = 0.5
+    if not math.isfinite(a):
+        a = 0.5
+    a = min(1.0, max(0.0, a))
+    if a <= 0.0:
+        return p_lin
+    pp = pattern_proba(x, patterns, tau, w, taus)
+    if a >= 1.0:
+        return pp
+    return [a * b + (1.0 - a) * c for b, c in zip(pp, p_lin)]
+
+
+def tune_pattern_alpha(Xe_va, yva, w, hfa, d, pats, tau, taus, T=1.0, dw=None, db: float = 0.0,
+                       Xde_va=None, cap=None):
+    """valid 기준 alpha(0~1, 0.1 간격) 선택. 기준: (acc, -ll) 최대."""
+    import numpy as _np
+    if not len(Xe_va) or not len(yva) or not pats or not tau:
+        return 0.5
+    Vn = _np.asarray(Xe_va, dtype=float)
+    yn = _np.asarray(yva, dtype=int)
+    Dn = _np.asarray(Xde_va, dtype=float) if Xde_va is not None else None
+
+    def _ev_at(a):
+        Plin = batch_proba(Vn, w, hfa, d, 1.0, None, dw, db, Dn, cap)
+        out = []
+        for i in range(len(Vn)):
+            pp = pattern_proba(list(Vn[i]), pats, tau, w, taus)
+            out.append([a * b + (1.0 - a) * c for b, c in zip(pp, Plin[i])])
+        P = _np.asarray(out, dtype=float)
+        if T != 1.0:
+            L = _np.log(_np.maximum(P, 1e-9)) / T
+            L = L - L.max(axis=1, keepdims=True)
+            E = _np.exp(L)
+            P = E / E.sum(axis=1, keepdims=True)
+        home, dr, away = P[:, 0], P[:, 1], P[:, 2]
+        pick = _np.where((home >= dr) & (home >= away), 0, _np.where(dr >= away, 1, 2))
+        acc = float((pick == yn).mean())
+        nll = float((-_np.log(_np.maximum(P[_np.arange(len(yn)), yn], 1e-12))).mean())
+        return acc, nll
+
+    best_a, best_key = 0.5, None
+    a = 0.0
+    while a <= 1.0001:
+        a = round(a, 1)
+        acc, ll = _ev_at(a)
+        key = (acc, -ll)
+        if best_key is None or key > best_key:
+            best_key, best_a = key, a
+        a += 0.1
+    return best_a
 
 
 def draw_row_features(m: dict) -> list:
@@ -692,8 +816,8 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
     d = art["draw_prior"]
     mu, sd = art["mu"], art["sd"]
     e = art.get("emphasis", [1.0] * nw)
-    pats = art.get("patterns")
-    tau = art.get("pattern_tau", 0.0) or 0.0
+    _tau0, _taus0, _w0, _alpha0 = _pat_params_from_art(art)
+    pats, tau, taus, palpha = art.get("patterns"), _tau0, _taus0, _alpha0
     cap = art.get("contrib_cap")
     overlap = set(art.get("train_seasons", [])) & set(tune_s)
     if overlap:
@@ -731,15 +855,15 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
     PP = None
     if pats and tau and tau > 0:
         try:
-            PP = _np.asarray([pattern_proba(x, pats, tau) for x in feats], dtype=float)
-            log(f"패턴 블렌드 평가 사용 (tau={tau:.3f})")
+            PP = _np.asarray([pattern_proba(x, pats, tau, w, taus) for x in feats], dtype=float)
+            log(f"패턴 블렌드 평가 사용 (tau={tau:.3f} alpha={palpha:.1f} w가중)")
         except (KeyError, TypeError, ValueError):
             PP = None
 
     def acc_of(wv, hv):
         Plin = batch_proba(Xn, wv, hv, d, 1.0, None, dw if use_draw else None,
                            db if use_draw else 0.0, Xd if use_draw else None, cap)
-        P = 0.5 * Plin + 0.5 * PP if PP is not None else Plin
+        P = (1.0 - palpha) * Plin + palpha * PP if PP is not None else Plin
         home, dr, aw = P[:, 0], P[:, 1], P[:, 2]
         pick = _np.where((home >= dr) & (home >= aw), 0, _np.where(dr >= aw, 1, 2))
         return float((pick == yn).mean())
@@ -747,7 +871,7 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
     def accrec_of(wv, hv):
         Plin = batch_proba(Xn, wv, hv, d, 1.0, None, dw if use_draw else None,
                            db if use_draw else 0.0, Xd if use_draw else None, cap)
-        P = 0.5 * Plin + 0.5 * PP if PP is not None else Plin
+        P = (1.0 - palpha) * Plin + palpha * PP if PP is not None else Plin
         home, dr, aw = P[:, 0], P[:, 1], P[:, 2]
         pick = _np.where((home >= dr) & (home >= aw), 0, _np.where(dr >= aw, 1, 2))
         a = float((pick == yn).mean())
@@ -763,7 +887,7 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
                 continue
             Plin = batch_proba(Xn[m], wv, hv, d, 1.0, None, dw if use_draw else None,
                                db if use_draw else 0.0, Xd[m] if use_draw else None, cap)
-            P = 0.5 * Plin + 0.5 * PP[m] if PP is not None else Plin
+            P = (1.0 - palpha) * Plin + palpha * PP[m] if PP is not None else Plin
             home, dr, aw = P[:, 0], P[:, 1], P[:, 2]
             pick = _np.where((home >= dr) & (home >= aw), 0, _np.where(dr >= aw, 1, 2))
             out[s] = float((pick == yn[m]).mean())
@@ -1010,8 +1134,8 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
     d = art["draw_prior"]
     mu, sd = art["mu"], art["sd"]
     e = art.get("emphasis", [1.0] * nw)
-    pats = art.get("patterns")
-    tau = art.get("pattern_tau", 0.0) or 0.0
+    _tau0, _taus0, _w0, _alpha0 = _pat_params_from_art(art)
+    pats, tau, taus, palpha = art.get("patterns"), _tau0, _taus0, _alpha0
     cap = art.get("contrib_cap")
     dw = art.get("draw_weights")
     db = art.get("draw_bias", 0.0) or 0.0
@@ -1047,7 +1171,7 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
     PP = None
     if pats and tau and tau > 0:
         try:
-            PP = _np.asarray([pattern_proba(x, pats, tau) for x in feats], dtype=float)
+            PP = _np.asarray([pattern_proba(x, pats, tau, w, taus) for x in feats], dtype=float)
         except (KeyError, TypeError, ValueError):
             PP = None
 
@@ -1126,7 +1250,7 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
                 continue
             Plin = batch_proba(Xn[m], wv, hv, d, 1.0, None, dw if use_draw else None,
                                db if use_draw else 0.0, Xd[m] if use_draw else None, cap)
-            P = 0.5 * Plin + 0.5 * PP[m] if PP is not None else Plin
+            P = (1.0 - palpha) * Plin + palpha * PP[m] if PP is not None else Plin
             home, dr, aw = P[:, 0], P[:, 1], P[:, 2]
             pick = _np.where((home >= dr) & (home >= aw), 0, _np.where(dr >= aw, 1, 2))
             out[s] = float((pick == yn[m]).mean())
@@ -1738,7 +1862,8 @@ def drawfit(league: str, ver: str, extra_s: set, use_cache: bool = True):
     if not keep:
         log(f"drawfit 개선 없음, 유지 (ll {old_ll:.4f} vs {new_ll:.4f}, acc {old_acc:.3f} vs {new_acc:.3f})")
         return False
-    pats, tau = art.get("patterns"), art.get("pattern_tau", 0.0) or 0.0
+    _tau_df, _taus_df, _w_df, _alpha_df = _pat_params_from_art(art)
+    pats, tau, taus, palpha = art.get("patterns"), _tau_df, _taus_df, _alpha_df
     cap = art.get("contrib_cap")
     Xe_key = [apply_emphasis(x, e) for x in Xm_va]
     Xd_key = None
@@ -1750,7 +1875,7 @@ def drawfit(league: str, ver: str, extra_s: set, use_cache: bool = True):
         for i, x in enumerate(Xe_key):
             xd = Xd_key[i] if Xd_key is not None else None
             p = apply_temp(blend_proba(full_proba(x, w, hfa, d, dw, db, xd, cap),
-                                       x, pats, tau), Tc)
+                                       x, pats, tau, palpha, w, taus), Tc)
             y = vy[i]
             n += 1
             hit += (p.index(max(p)) == y)
@@ -1839,17 +1964,21 @@ def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", d
 
     def _evd(xd):
         return [(a - b) / s for a, b, s in zip(xd, mu_d, sd_d)] if mu_d and sd_d else xd
-    patterns, pattern_tau, pattern_stats = build_patterns(
+    patterns, pattern_tau, pattern_stats, pattern_taus = build_patterns(
         [x for x, s, y in zip(feats, splits, labels) if s == "train" and y is not None],
         [y for s, y in zip(splits, labels) if s == "train" and y is not None],
-        mu, sd, e)
-    log(f"patterns: home/draw/away x 5, tau={pattern_tau:.3f}")
+        mu, sd, e, w=w)
+    log(f"patterns: home/draw/away x 5, tau={pattern_tau:.3f} taus={ {k: round(v, 3) for k, v in pattern_taus.items()} }")
     for _c in ("home", "draw", "away"):
         _s = pattern_stats[_c][0]
         log(f"  {_c} #1: {_s['freq']}전 acc={_s['acc']:.3f}")
+    pattern_alpha = tune_pattern_alpha(Xe_va, vvy, w, hfa, draw_prior, patterns,
+                                       pattern_tau, pattern_taus, T, dw, db, Xde_va,
+                                       contrib_cap)
+    log(f"pattern_alpha={pattern_alpha:.1f}")
     metrics = {}
     for split in ("train", "valid", "test"):
-        rows = [{"probs": apply_temp(blend_proba(full_proba(_ev(x), w, hfa, draw_prior, dw, db, _evd(xd), contrib_cap), _ev(x), patterns, pattern_tau), T), "label": y}
+        rows = [{"probs": apply_temp(blend_proba(full_proba(_ev(x), w, hfa, draw_prior, dw, db, _evd(xd), contrib_cap), _ev(x), patterns, pattern_tau, pattern_alpha, w, pattern_taus), T), "label": y}
                 for x, xd, s, y in zip(feats, dfeats, splits, labels) if s == split and y is not None]
         acc, ll = dataset_metrics(rows)
         metrics[split] = {"n": len(rows), "acc": acc, "ll": ll}
@@ -1859,6 +1988,7 @@ def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", d
                 "mu": mu, "sd": sd, "emphasis": e, "draw_weights": dw, "draw_bias": db,
                 "draw_mu": mu_d, "draw_sd": sd_d, "draw_features": DRAW_FEATURES,
                 "features": FEATURES, "patterns": patterns, "pattern_tau": pattern_tau,
+                "pattern_taus": pattern_taus, "pattern_alpha": pattern_alpha,
                 "pattern_stats": pattern_stats, "contrib_cap": contrib_cap,
                 "train_seasons": sorted(train_s), "valid": sorted(valid_s),
                 "draw_analysis": draw_rep}
@@ -1871,7 +2001,8 @@ def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", d
 
 def eval_artifact(matches, train_s: set, valid_s: set, artifact: dict):
     mu, sd = artifact["mu"], artifact["sd"]
-    pats, tau = artifact.get("patterns"), artifact.get("pattern_tau", 0.0) or 0.0
+    tau, taus, _w, alpha = _pat_params_from_art(artifact)
+    pats = artifact.get("patterns")
     T = artifact.get("T", 1.0)
     out = {}
     w, hfa, d = (artifact["weights"], artifact["hfa"], artifact["draw_prior"])
@@ -1894,7 +2025,7 @@ def eval_artifact(matches, train_s: set, valid_s: set, artifact: dict):
             xd = draw_row_features(r)
             if mu_d and sd_d:
                 xd = [(a - b) / s_ for a, b, s_ in zip(xd, mu_d, sd_d)]
-            p = apply_temp(blend_proba(full_proba(x, w, hfa, d, dw, db, xd, cap), x, pats, tau), T)
+            p = apply_temp(blend_proba(full_proba(x, w, hfa, d, dw, db, xd, cap), x, pats, tau, alpha, w, taus), T)
             n += 1
             hit += (p.index(max(p)) == y)
             tot += -math.log(max(p[y], 1e-12))
@@ -2434,7 +2565,8 @@ def main():
         T = art["T"]
         mu, sd = art.get("mu"), art.get("sd")
         e = art.get("emphasis", [1.0] * len(art.get("features", [])))
-        pats, tau = art.get("patterns"), art.get("pattern_tau", 0.0) or 0.0
+        _tau_p, _taus_p, _w_p, _alpha_p = _pat_params_from_art(art)
+        pats, tau, taus, palpha = art.get("patterns"), _tau_p, _taus_p, _alpha_p
         w, hfa, d = art["weights"], art["hfa"], art["draw_prior"]
         dw = art.get("draw_weights")
         db = art.get("draw_bias", 0.0)
@@ -2453,7 +2585,7 @@ def main():
             xd = draw_row_features(r)
             if mu_d and sd_d:
                 xd = [(a - b) / s for a, b, s in zip(xd, mu_d, sd_d)]
-            return apply_temp(blend_proba(full_proba(xe, w, hfa, d, dw, db, xd, cap), xe, pats, tau), T)
+            return apply_temp(blend_proba(full_proba(xe, w, hfa, d, dw, db, xd, cap), xe, pats, tau, palpha, w, taus), T)
         probas = [_px(r) for r in targets]
         n, hit = len(targets), 0
         for r, p in zip(targets, probas):
@@ -2682,8 +2814,10 @@ def main():
     contrib_cap, best_T = tune_contrib(Xe_best, ty, Ve_best, vy, best["weights"], best["hfa"], d)
     best["T"] = best_T
     log(f"contrib_cap={contrib_cap} T={best_T}")
-    pats, tau, pstats = build_patterns(feats, labels, mu, sd, best["e"])
-    log(f"patterns: home/draw/away x 5, tau={tau:.3f}")
+    pats, tau, pstats, ptaus = build_patterns(feats, labels, mu, sd, best["e"], w=best["weights"])
+    palpha_new = tune_pattern_alpha(Ve_best, vy, best["weights"], best["hfa"], d, pats, tau,
+                                    ptaus, best_T)
+    log(f"patterns: home/draw/away x 5, tau={tau:.3f} alpha={palpha_new:.1f}")
     try:
         _art = json.load(open(model_path(league, ver)))
         if _art.get("trials", 0) != trial_ids[-1]:
@@ -2692,6 +2826,8 @@ def main():
         _art["contrib_cap"] = contrib_cap
         _art["patterns"] = pats
         _art["pattern_tau"] = tau
+        _art["pattern_taus"] = ptaus
+        _art["pattern_alpha"] = palpha_new
         _art["pattern_stats"] = pstats
         save_artifact(league, ver, _art)
     except (OSError, ValueError):
