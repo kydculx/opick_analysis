@@ -19,6 +19,8 @@ export type PermatchArtifact = {
   draw_sd?: number[] | null;
   patterns?: { home: number[][]; draw: number[][]; away: number[][] };
   pattern_tau?: number;
+  pattern_taus?: Record<string, number> | null;
+  pattern_alpha?: number;
   contrib_cap?: number | null;
   base_ver?: string;
   blend_w?: number;
@@ -169,6 +171,9 @@ export function predictForRow(m: SoccerMatch, art: PermatchArtifact, ver: string
     let x: number[];
     let pats = art.patterns;
     let tau = art.pattern_tau ?? 0;
+    let taus = art.pattern_taus ?? null;
+    let palpha = art.pattern_alpha ?? 0.5;
+    let pw: number[] | null = art.weights ?? null;
     let T = art.T;
     if (art.model_type === "ensemble" && art.base && art.xgb) {
       const b = legacyParts(m, art.base);
@@ -180,6 +185,9 @@ export function predictForRow(m: SoccerMatch, art: PermatchArtifact, ver: string
       x = b.x;
       pats = art.base.patterns;
       tau = art.base.pattern_tau ?? 0;
+      taus = art.base.pattern_taus ?? null;
+      palpha = art.base.pattern_alpha ?? 0.5;
+      pw = art.base.weights ?? null;
       T = art.base.T;
     } else {
       const b = legacyParts(m, art);
@@ -187,7 +195,7 @@ export function predictForRow(m: SoccerMatch, art: PermatchArtifact, ver: string
       lin = [b.ph * (1 - b.dd), b.dd, (1 - b.ph) * (1 - b.dd)];
       x = b.x;
     }
-    const p = applyTemp(blendProbs(lin, x, pats, tau), T);
+    const p = applyTemp(blendProbs(lin, x, pats, tau, palpha, pw, taus), T);
     if (p.some((v) => !Number.isFinite(v))) return null;
     return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertThreshold(art) };
   } catch {

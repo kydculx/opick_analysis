@@ -214,18 +214,43 @@ export function applyTemp(p: number[], T: number): number[] {
 
 export type PatternSet = { home: number[][]; draw: number[][]; away: number[][] };
 
-export function patternProbs(x: number[], patterns: PatternSet | undefined, tau: number): number[] | null {
+export function metricWeights(w: number[] | null | undefined, n: number): number[] | null {
+  if (!w || w.length !== n) return null;
+  const m = w.map((v) => Math.abs(v));
+  if (Math.max(...m) < 1e-9) return new Array(n).fill(1);
+  const mean = m.reduce((a, b) => a + b, 0) / n || 1;
+  return m.map((v) => v / mean);
+}
+
+function classTau(cname: string, tau: number, taus?: Record<string, number> | null): number {
+  if (taus && Number.isFinite(taus[cname]) && (taus[cname] as number) > 0) return taus[cname] as number;
+  if (Number.isFinite(tau) && tau > 0) return tau;
+  return 1;
+}
+
+export function patternProbs(
+  x: number[],
+  patterns: PatternSet | undefined,
+  tau: number,
+  w?: number[] | null,
+  taus?: Record<string, number> | null,
+  ): number[] | null {
   if (!patterns || !tau || tau <= 0) return null;
+  const names = ["home", "draw", "away"] as const;
   const groups = [patterns.home, patterns.draw, patterns.away];
   if (groups.some((g) => !Array.isArray(g) || g.length === 0)) return null;
-  const scores = groups.map((g) => {
+  const mw = metricWeights(w ?? null, x.length);
+  const scores = groups.map((g, gi) => {
     let best = Infinity;
     for (const c of g) {
       let d = 0;
-      for (let i = 0; i < x.length; i++) d += (x[i] - c[i]) ** 2;
+      for (let i = 0; i < x.length; i++) {
+        const diff = x[i] - c[i];
+        d += mw ? mw[i] * diff * diff : diff * diff;
+      }
       if (d < best) best = d;
     }
-    return -Math.sqrt(best) / tau;
+    return -Math.sqrt(Math.max(best, 0)) / classTau(names[gi], tau, taus ?? null);
   });
   const mx = Math.max(...scores);
   const ex = scores.map((s) => Math.exp(s - mx));
@@ -233,10 +258,21 @@ export function patternProbs(x: number[], patterns: PatternSet | undefined, tau:
   return ex.map((v) => v / sum);
 }
 
-export function blendProbs(lin: number[], x: number[], patterns: PatternSet | undefined, tau: number): number[] {
-  const pp = patternProbs(x, patterns, tau);
+export function blendProbs(
+  lin: number[],
+  x: number[],
+  patterns: PatternSet | undefined,
+  tau: number,
+  alpha = 0.5,
+  w?: number[] | null,
+  taus?: Record<string, number> | null,
+  ): number[] {
+  const a = Number.isFinite(alpha) ? Math.min(1, Math.max(0, alpha)) : 0.5;
+  if (a <= 0) return lin;
+  const pp = patternProbs(x, patterns, tau, w ?? null, taus ?? null);
   if (!pp) return lin;
-  return lin.map((v, i) => 0.5 * v + 0.5 * pp[i]);
+  if (a >= 1) return pp;
+  return lin.map((v, i) => (1 - a) * v + a * pp[i]);
 }
 
 export function logregProba(
