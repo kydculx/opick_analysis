@@ -42,12 +42,14 @@ def legacy_parts(art, rows):
 
 
 def legacy_proba_rows(art, rows):
-    pats, tau = art.get("patterns"), art.get("pattern_tau", 0.0) or 0.0
+    _tau, _taus, _w, _alpha = pm._pat_params_from_art(art)
+    pats, tau, taus, palpha = art.get("patterns"), _tau, _taus, _alpha
     T = art.get("T", 1.0)
+    w = art.get("weights")
     out = []
     for x, ph, dd in legacy_parts(art, rows):
         lin = [ph * (1 - dd), dd, (1 - ph) * (1 - dd)]
-        out.append(pm.apply_temp(pm.blend_proba(lin, x, pats, tau), T))
+        out.append(pm.apply_temp(pm.blend_proba(lin, x, pats, tau, palpha, w, taus), T))
     return out
 
 
@@ -103,7 +105,10 @@ def main():
 
     best = None
     table = []
-    pats, tau, T = base.get("patterns"), base.get("pattern_tau", 0.0) or 0.0, base.get("T", 1.0)
+    _tau2, _taus2, _w2, _alpha2 = pm._pat_params_from_art(base)
+    pats, tau, taus, palpha = base.get("patterns"), _tau2, _taus2, _alpha2
+    T = base.get("T", 1.0)
+    w = base.get("weights")
     parts = legacy_parts(base, va_scored)
     al = 0.0
     while al <= 1.0001:
@@ -112,7 +117,7 @@ def main():
         for (x, ph, ddl), p2 in zip(parts, px):
             dd = al * ddl + (1 - al) * p2[1]
             lin = [ph * (1 - dd), dd, (1 - ph) * (1 - dd)]
-            pb.append(pm.apply_temp(pm.blend_proba(lin, x, pats, tau), T))
+            pb.append(pm.apply_temp(pm.blend_proba(lin, x, pats, tau, palpha, w, taus), T))
         m = B.metrics_of(pb, yva)
         key = (m["acc"] + args.rec_w * m["draw_rec"], -m["ll"])
         table.append((al, m))

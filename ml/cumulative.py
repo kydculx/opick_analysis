@@ -44,6 +44,8 @@ def main():
     ap.add_argument("--rollback", action="store_true", help="최근 500경기 최고 가중치로 복원")
     ap.add_argument("--dw-lr", type=float, default=0.01, help="무브랜치 lr")
     ap.add_argument("--draw-up", type=float, default=1.0, help="무 실제시 무브랜치 갱신 배율")
+    ap.add_argument("--miss-mult", type=float, default=1.0, help="오답시 갱신 배율")
+    ap.add_argument("--no-recency", action="store_true", help="최신 가중 램프 끔")
     ap.add_argument("--draw-t", type=float, default=0.3, help="dd가 이 값 넘고 양쪽 확률이 draw-c 미만이면 무")
     ap.add_argument("--draw-c", type=float, default=0.4, help="무 찍을 때 홈/원정 확률 상한")
     ap.add_argument("--alert-t", type=float, default=0.3, help="무복병 플래그 dd 임계값")
@@ -57,6 +59,8 @@ def main():
     seasons = parse_seasons(args.seasons) or list(full)
     seasons = sorted(seasons, key=lambda s: sidx.get(s, 0))
     test_s = [s for s in parse_seasons(args.test) if s not in set(seasons)]
+    if not test_s:
+        test_s = [s for s in full if s not in set(seasons)]
     test_s = sorted(test_s, key=lambda s: sidx.get(s, 0))
     featsel = [s.strip() for s in (args.features or "").split(",") if s.strip()]
     if featsel:
@@ -101,6 +105,13 @@ def main():
         dw, db = base.get("draw_weights"), base.get("draw_bias", 0.0) or 0.0
         mu_d, sd_d = base.get("draw_mu"), base.get("draw_sd")
         pats, tau, T = base.get("patterns"), base.get("pattern_tau", 0.0) or 0.0, base.get("T", 1.0)
+        _taus_c, _alpha_c = base.get("pattern_taus"), base.get("pattern_alpha", 0.5)
+        if not isinstance(_taus_c, dict):
+            _taus_c = None
+        try:
+            _alpha_c = float(_alpha_c)
+        except (TypeError, ValueError):
+            _alpha_c = 0.5
         cap = base.get("contrib_cap")
         feats = list(pm.FEATURES)
         hfa0 = float(base["hfa"])
@@ -114,6 +125,7 @@ def main():
         e = [1.0] * len(feats)
         dw, db, mu_d, sd_d = None, 0.0, None, None
         pats, tau, T, cap = None, 0.0, 1.0, None
+        _taus_c, _alpha_c = None, 0.5
         print(f"콜드스타트 w=0 draw_prior={d:.3f}")
     if not (dw and mu_d and sd_d):
         Xdall = [pm.draw_row_features(r) for r in scored]
@@ -135,6 +147,9 @@ def main():
     best_roll, best_snap = -1.0, None
     dw_lr = args.dw_lr if args.dw_lr > 0 else lr
     draw_up = max(args.draw_up, 0.0)
+    miss_mult = max(args.miss_mult, 0.0)
+    use_recency = not args.no_recency
+    N = len(scored)
     draw_t = args.draw_t
     draw_c = args.draw_c
     walk_hit, walk_tot, walk_ll = 0, 0, 0.0
@@ -154,7 +169,7 @@ def main():
         if mu_d and sd_d:
             xd = [(a - b) / s_ for a, b, s_ in zip(xd, mu_d, sd_d)]
         lin = pm.full_proba(x, w, hfa, d, dw, db, xd, cap)
-        p = pm.apply_temp(pm.blend_proba(lin, x, pats, tau), T)
+        p = pm.apply_temp(pm.blend_proba(lin, x, pats, tau, _alpha_c, w, _taus_c), T)
         dd_now = lin[1]
         if draw_t > 0 and dd_now > draw_t and max(p[0], p[2]) < draw_c:
             pick = 1
@@ -183,25 +198,29 @@ def main():
             conf_hit += float(max(p))
         sw, shfa = list(w0), float(hfa0)
         slin = pm.full_proba(x, sw, shfa, d, dw0, db0, xd, cap)
-        sp = pm.apply_temp(pm.blend_proba(slin, x, pats, tau), T)
+        sp = pm.apply_temp(pm.blend_proba(slin, x, pats, tau, _alpha_c, w0, _taus_c), T)
         stat_hit += (sp.index(max(sp)) == y)
         stat_tot += 1
         s_lin = max(-30.0, min(30.0, sum(a * b for a, b in zip(x, w)) + hfa))
         ph = 1.0 / (1.0 + math.exp(-s_lin))
         g = -(1.0 - ph) if y == 0 else (ph if y == 2 else 0.0)
         lr_eff = lr / (1.0 + lr_decay * n)
+        recency = (n - 1) / max(N - 1, 1) if use_recency else 1.0
+        step_lr = lr_eff * recency * (miss_mult if pick != y else 1.0)
         if g:
             if l2:
-                w = [v * (1.0 - lr_eff * l2) for v in w]
-            w = [v - lr_eff * g * xv for v, xv in zip(w, x)]
-            hfa -= lr_eff * g
+                w = [v * (1.0 - step_lr * l2) for v in w]
+            w = [v - step_lr * g * xv for v, xv in zip(w, x)]
+            hfa -= step_lr * g
         s_dr = max(-30.0, min(30.0, sum(a * b for a, b in zip(xd, dw)) + db))
         dd = 1.0 / (1.0 + math.exp(-s_dr))
         gd = -(1.0 - dd) if y == 1 else dd
         if y == 1 and draw_up != 1.0:
             gd *= draw_up
-        dw = [v - dw_lr * gd * xv for v, xv in zip(dw, xd)]
-        db -= dw_lr * gd
+        if pick != y and miss_mult != 1.0:
+            gd *= miss_mult
+        dw = [v - dw_lr * recency * gd * xv for v, xv in zip(dw, xd)]
+        db -= dw_lr * recency * gd
         if use_rollback:
             recent.append(1 if pick == y else 0)
             if len(recent) == 500:
@@ -273,7 +292,7 @@ def main():
             if mu_d and sd_d:
                 xd = [(a - b) / s_ for a, b, s_ in zip(xd, mu_d, sd_d)]
             lin = pm.full_proba(x, w, hfa, d, dw, db, xd, cap)
-            p = pm.apply_temp(pm.blend_proba(lin, x, pats, tau), T)
+            p = pm.apply_temp(pm.blend_proba(lin, x, pats, tau, _alpha_c, w, _taus_c), T)
             if _tt > 0 and lin[1] > _tt and max(p[0], p[2]) < _tc:
                 _pick = 1
             else:
@@ -305,6 +324,7 @@ def main():
                 "metrics": {"acc": walk["acc"], "ll": walk["ll"], "draw_rec": 0.0},
                 "cumulative": {"base_ver": args.base, "lr": lr, "l2": l2,
                                "lr_decay": lr_decay, "rollback": use_rollback,
+                               "recency": use_recency,
                                "walk": walk, "static_acc": static_acc, "test": test,
                                "draw_spec": draw_spec, "draw_alert_t": args.alert_t}})
     out_p = os.path.join(ROOT, "ml", "permatch", f"{args.league}_{args.ver}.json")
