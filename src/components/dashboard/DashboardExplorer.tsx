@@ -879,6 +879,7 @@ export function DashboardExplorer() {
                 improved = true;
                 lastDisp = nowMs;
                 setTweaked(cw);
+                previewWith(cw, ch);
                 return "hit";
               } else if (nowMs - lastDisp > 120) {
                 lastDisp = nowMs;
@@ -890,7 +891,7 @@ export function DashboardExplorer() {
               }
               if (nowMs - lastPv > 2500) {
                 lastPv = nowMs;
-                previewWith(cw, ch, false);
+                previewWith(cw, ch);
               }
               return "miss";
             };
@@ -943,7 +944,7 @@ export function DashboardExplorer() {
         }
         if (nowR - lastPv > 2500) {
           lastPv = nowR;
-          previewWith(w, hfa, false);
+          previewWith(w, hfa);
         }
         await new Promise((r) => setTimeout(r, 0));
       }
