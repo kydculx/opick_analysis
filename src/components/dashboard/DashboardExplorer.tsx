@@ -1421,14 +1421,6 @@ export function DashboardExplorer() {
                           );
                         })()}
                       </div>
-                      <div className="pb-0.5 text-right font-mono text-[10px] leading-tight">
-                        <div className="text-zinc-500">
-                          최고 <span className="font-semibold text-emerald-600 dark:text-emerald-400">{best ? `${(best.acc * 100).toFixed(1)}` : "−"}</span>
-                        </div>
-                        <div className="text-zinc-500">
-                          최저 <span className="font-semibold text-rose-500 dark:text-rose-400">{worst ? `${(worst.acc * 100).toFixed(1)}` : "−"}</span>
-                        </div>
-                      </div>
                     </div>
                     <svg viewBox={`0 0 ${W} ${H}`} className="mt-1 w-full" role="img" aria-label="시즌 적중률 추이">
                       <defs>
@@ -1457,6 +1449,9 @@ export function DashboardExplorer() {
                           {best && p.s === best.s && (
                             <circle cx={X(p.i)} cy={Y(p.acc)} r={5.5} fill="none" stroke="#10b981" strokeWidth={1.5} opacity={0.8} />
                           )}
+                          {worst && p.s === worst.s && (!best || p.s !== best.s) && (
+                            <circle cx={X(p.i)} cy={Y(p.acc)} r={5.5} fill="none" stroke="#f43f5e" strokeWidth={1.5} opacity={0.8} />
+                          )}
                           <circle cx={X(p.i)} cy={Y(p.acc)} r={3} fill={dotColor(p.acc)} stroke="#fff" strokeWidth={1} />
                         </g>
                       ))}
@@ -1471,6 +1466,14 @@ export function DashboardExplorer() {
                         );
                       })}
                     </svg>
+                    <div className="mt-1 flex items-center justify-end gap-3 border-t border-zinc-200 px-0.5 pt-1 font-mono text-[10px] dark:border-zinc-800">
+                      <span className="text-zinc-500">
+                        최고 <span className="font-semibold text-emerald-600 dark:text-emerald-400">{best ? `${short(best.s)} ${(best.acc * 100).toFixed(1)}%` : "−"}</span>
+                      </span>
+                      <span className="text-zinc-500">
+                        최저 <span className="font-semibold text-rose-500 dark:text-rose-400">{worst ? `${short(worst.s)} ${(worst.acc * 100).toFixed(1)}%` : "−"}</span>
+                      </span>
+                    </div>
                   </div>
                 );
               })()
