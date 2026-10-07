@@ -221,6 +221,7 @@ export function DashboardExplorer() {
   const [gridWmaxText, setGridWmaxText] = useState("3.0");
   const [gridDrawWText, setGridDrawWText] = useState("0");
   const [gridRecWText, setGridRecWText] = useState("0");
+  const [minOddsText, setMinOddsText] = useState("1.5");
   const FEATURE_KO: Record<string, string> = {
     rank: "순위차", power: "전력", hstr: "H2H강도", cond: "컨디션", att: "공격", def: "수비",
     val: "가치", form5: "최근폼", h2h5: "H2H5", avg_goals: "평균득점", avg_conceded: "평균실점",
@@ -1355,6 +1356,8 @@ export function DashboardExplorer() {
                         </div>
                         {(() => {
                           if (applyState !== "done") return null;
+                          const minOdds = Number(minOddsText);
+                          const cutoff = Number.isFinite(minOdds) && minOdds > 0 ? minOdds : 0;
                           let n = 0, hit = 0, staked = 0, returned = 0, hitOdds = 0, noOdds = 0;
                           const bySeason = new Map<string, { n: number; hit: number; staked: number; returned: number; hitOdds: number; noOdds: number }>();
                           const inScope = (s: string) => (validSet ? validSet.has(s) : !trainSet.has(s));
@@ -1372,6 +1375,7 @@ export function DashboardExplorer() {
                             const pick = probs.indexOf(Math.max(...probs));
                             const actual = h > a ? 0 : h === a ? 1 : 2;
                             const odds = [o.home, o.draw, o.away][pick];
+                            if (odds < cutoff) continue;
                             n++;
                             staked += BET_STAKE;
                             const r = bySeason.get(s) ?? { n: 0, hit: 0, staked: 0, returned: 0, hitOdds: 0, noOdds: 0 };
@@ -1387,7 +1391,27 @@ export function DashboardExplorer() {
                             }
                             bySeason.set(s, r);
                           }
-                          if (n === 0) return null;
+                          if (n === 0) {
+                            return (
+                              <div className="mt-1 font-mono text-[10px] leading-tight">
+                                <div className="flex min-w-0 items-center justify-between gap-1 px-0.5">
+                                  <span className="font-semibold text-zinc-400">수익률 −</span>
+                                  <label className="flex shrink-0 items-center gap-1 text-zinc-400">
+                                    최소배당
+                                    <input
+                                      value={minOddsText}
+                                      onChange={(e) => setMinOddsText(e.target.value.replace(/[^0-9.]/g, ""))}
+                                      inputMode="decimal"
+                                      aria-label="최소배당"
+                                      placeholder="1.5"
+                                      className="w-10 rounded-md border border-zinc-300 bg-white px-1 py-px text-right font-mono text-[10px] text-zinc-700 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
+                                    />
+                                  </label>
+                                </div>
+                                <span className="text-zinc-400"> 조건에 맞는 경기 없음</span>
+                              </div>
+                            );
+                          }
                           const pnl = returned - staked;
                           const roi = (pnl / staked) * 100;
                           const up = pnl >= 0;
@@ -1396,9 +1420,22 @@ export function DashboardExplorer() {
                             .sort((a, b) => (a[0] < b[0] ? -1 : 1));
                           return (
                             <div className="mt-1 font-mono text-[10px] leading-tight" title="매경기 1천원, 적중 시 3사 평균배당 그대로 수령">
-                              <span className={`font-semibold ${up ? "text-emerald-600 dark:text-emerald-400" : "text-rose-500 dark:text-rose-400"}`}>
-                                수익률 {up ? "+" : ""}{roi.toFixed(1)}%
-                              </span>
+                              <div className="flex min-w-0 items-center justify-between gap-1 px-0.5">
+                                <span className={`font-semibold ${up ? "text-emerald-600 dark:text-emerald-400" : "text-rose-500 dark:text-rose-400"}`}>
+                                  수익률 {up ? "+" : ""}{roi.toFixed(1)}%
+                                </span>
+                                <label className="flex shrink-0 items-center gap-1 text-zinc-400">
+                                  최소배당
+                                  <input
+                                    value={minOddsText}
+                                    onChange={(e) => setMinOddsText(e.target.value.replace(/[^0-9.]/g, ""))}
+                                    inputMode="decimal"
+                                    aria-label="최소배당"
+                                    placeholder="1.5"
+                                    className="w-10 rounded-md border border-zinc-300 bg-white px-1 py-px text-right font-mono text-[10px] text-zinc-700 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
+                                  />
+                                </label>
+                              </div>
                               <span className="text-zinc-400"> ({up ? "+" : "−"}{Math.abs(pnl).toLocaleString()}원)</span>
                               <div className="mt-1 space-y-0.5">
                                 {rows.map(([s, r]) => {
