@@ -848,8 +848,8 @@ function PredCell({ m }: { m: SoccerMatch }) {
     actual == null
       ? "text-zinc-900 dark:text-white"
       : pick === actual
-        ? "font-bold text-green-600 dark:text-green-400"
-        : "font-bold text-blue-600 dark:text-blue-400";
+        ? "font-bold text-emerald-600 dark:text-emerald-400"
+        : "font-bold text-rose-500 dark:text-rose-400";
   const alert = p.drawAlert && pick !== "무승부";
   return (
     <span className={cls}>
