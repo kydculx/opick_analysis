@@ -31,6 +31,33 @@ function parseScoreLocal(v: string | null | undefined): number | null {
   return Number.isNaN(n) ? null : n;
 }
 
+const BET_STAKE = 1000;
+
+function decimalOdds(m: SoccerMatch): { home: number; draw: number; away: number } | null {
+  const odds = m.odds as unknown as {
+    crown?: unknown; bet365?: unknown; one_x_bet?: unknown;
+  } | null | undefined;
+  if (!odds || typeof odds !== "object") return null;
+  const pick = (c: unknown, key: string): number | null => {
+    const wdl = (c as { win_draw_lose?: Record<string, unknown> } | null)?.win_draw_lose;
+    const v = wdl?.[key] as { initial?: unknown; live?: unknown } | null | undefined;
+    const n = Number(v?.initial ?? v?.live);
+    return Number.isFinite(n) && n > 1 ? n : null;
+  };
+  const avg = (key: string): number | null => {
+    const vs: number[] = [];
+    for (const c of [odds.crown, odds.bet365, odds.one_x_bet]) {
+      const v = pick(c, key);
+      if (v != null) vs.push(v);
+    }
+    if (vs.length === 0) return null;
+    return vs.reduce((a, b) => a + b, 0) / vs.length;
+  };
+  const home = avg("home"), draw = avg("draw"), away = avg("away");
+  if (home == null || draw == null || away == null) return null;
+  return { home, draw, away };
+}
+
 function predictLocal(m: SoccerMatch, art: PermatchArtifact, ver: string) {
   const alertT = (() => {
     const t = (art as { cumulative?: { draw_alert_t?: unknown } }).cumulative?.draw_alert_t;
@@ -1325,6 +1352,74 @@ export function DashboardExplorer() {
                         <div className="mt-0.5 font-mono text-[10px] text-zinc-400">
                           {totN > 0 ? `${totHit}/${totN} 적중` : "모델 적용 시 표시"}
                         </div>
+                        {(() => {
+                          if (applyState !== "done") return null;
+                          let n = 0, hit = 0, staked = 0, returned = 0, hitOdds = 0, noOdds = 0;
+                          const bySeason = new Map<string, { n: number; hit: number; staked: number; returned: number; hitOdds: number; noOdds: number }>();
+                          const inScope = (s: string) => (validSet ? validSet.has(s) : !trainSet.has(s));
+                          for (const m of rawMatches) {
+                            const s = String(m.season);
+                            if (!checked.includes(s) || !inScope(s)) continue;
+                            const h = parseScoreLocal(m.home_score);
+                            const a = parseScoreLocal(m.away_score);
+                            if (h == null || a == null) continue;
+                            const p = predMap[m.source_match_id || String(m.id)];
+                            if (!p) continue;
+                            const o = decimalOdds(m);
+                            if (!o) continue;
+                            const probs = [p.home, p.draw, p.away];
+                            const pick = probs.indexOf(Math.max(...probs));
+                            const actual = h > a ? 0 : h === a ? 1 : 2;
+                            const odds = [o.home, o.draw, o.away][pick];
+                            n++;
+                            staked += BET_STAKE;
+                            const r = bySeason.get(s) ?? { n: 0, hit: 0, staked: 0, returned: 0, hitOdds: 0, noOdds: 0 };
+                            r.n++;
+                            r.staked += BET_STAKE;
+                            if (pick === actual) {
+                              hit++;
+                              hitOdds += odds;
+                              returned += Math.round(BET_STAKE * odds);
+                              r.hit++;
+                              r.hitOdds += odds;
+                              r.returned += Math.round(BET_STAKE * odds);
+                            }
+                            bySeason.set(s, r);
+                          }
+                          if (n === 0) return null;
+                          const pnl = returned - staked;
+                          const roi = (pnl / staked) * 100;
+                          const up = pnl >= 0;
+                          const rows = [...bySeason.entries()]
+                            .filter(([, r]) => r.n > 0)
+                            .sort((a, b) => (a[0] < b[0] ? -1 : 1));
+                          return (
+                            <div className="mt-1 font-mono text-[10px] leading-tight" title="매경기 1천원, 적중 시 3사 평균배당 그대로 수령">
+                              <span className={`font-semibold ${up ? "text-emerald-600 dark:text-emerald-400" : "text-rose-500 dark:text-rose-400"}`}>
+                                수익률 {up ? "+" : ""}{roi.toFixed(1)}%
+                              </span>
+                              <span className="text-zinc-400"> ({up ? "+" : "−"}{Math.abs(pnl).toLocaleString()}원)</span>
+                              <div className="mt-1 space-y-0.5">
+                                {rows.map(([s, r]) => {
+                                  const sp = r.returned - r.staked;
+                                  const sr = (sp / r.staked) * 100;
+                                  const sup = sp >= 0;
+                                  return (
+                                    <div
+                                      key={s}
+                                      className="flex min-w-0 items-baseline justify-between gap-1 px-0.5"
+                                    >
+                                      <span className="shrink-0 text-zinc-500">{s}</span>
+                                      <span className={`truncate whitespace-nowrap ${sup ? "text-emerald-600 dark:text-emerald-400" : "text-rose-500 dark:text-rose-400"}`}>
+                                        {sup ? "+" : ""}{sr.toFixed(1)}% ({sup ? "+" : "−"}{Math.abs(sp).toLocaleString()}원)
+                                      </span>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          );
+                        })()}
                       </div>
                       <div className="pb-0.5 text-right font-mono text-[10px] leading-tight">
                         <div className="text-zinc-500">
