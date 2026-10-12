@@ -55,6 +55,92 @@ function alertThreshold(art: PermatchArtifact): number {
   return typeof t === "number" && Number.isFinite(t) && t > 0 ? t : 0.3;
 }
 
+function coerceArtifact(a: unknown): PermatchArtifact | null {
+  try {
+    if (!a || typeof a !== "object") return null;
+    const o = a as Record<string, unknown>;
+    if (o?.model_type === "poisson" || o?.model_type === "dixon") {
+      if (!Array.isArray(o.teams) || !Array.isArray(o.att) || !Array.isArray(o.def)) return null;
+      if ((o.teams as unknown[]).length !== (o.att as unknown[]).length) return null;
+      if ((o.teams as unknown[]).length !== (o.def as unknown[]).length) return null;
+      if (typeof o.home !== "number" || typeof o.rho !== "number") return null;
+      return o as unknown as PermatchArtifact;
+    }
+    if (o?.model_type === "logreg") {
+      if (!Array.isArray(o.scaler_mean) || !Array.isArray(o.scaler_scale)) return null;
+      if (!Array.isArray(o.coef) || !Array.isArray(o.intercept)) return null;
+      if ((o.coef as unknown[]).length !== (o.intercept as unknown[]).length) return null;
+      return o as unknown as PermatchArtifact;
+    }
+    if (o?.model_type === "lstm") {
+      return o as unknown as PermatchArtifact;
+    }
+    if (!Array.isArray(o.mu) || !Array.isArray(o.sd)) return null;
+    const n = (o.weights as unknown[]).length;
+    if (n === 0 || (o.mu as unknown[]).length !== n || (o.sd as unknown[]).length !== n) return null;
+    if (Array.isArray(o.features) && (o.features as unknown[]).length !== n) return null;
+    return o as unknown as PermatchArtifact;
+  } catch {
+    return null;
+  }
+}
+
+export async function loadArtifactAsync(league: string, ver: string): Promise<PermatchArtifact | null> {
+  try {
+    const { createServerSupabaseClient } = await import("@/lib/supabase/server");
+    const supabase = createServerSupabaseClient();
+    const { data, error } = await supabase
+      .from("models")
+      .select("artifact")
+      .eq("league_code", league)
+      .eq("ver", ver)
+      .limit(1);
+    if (!error && data && data.length > 0) {
+      const raw = (data[0] as { artifact?: unknown }).artifact;
+      if (raw && typeof raw === "object") {
+        const o = raw as Record<string, unknown>;
+        if (o?.model_type === "ensemble") {
+          const ens = await readEnsembleAsync(league, o);
+          if (ens) return ens;
+        } else {
+          const c = coerceArtifact(raw);
+          if (c) return c;
+        }
+      }
+    }
+  } catch {
+    // fall through to local
+  }
+  return loadArtifact(league, ver);
+}
+
+async function readEnsembleAsync(league: string, a: Record<string, unknown>): Promise<PermatchArtifact | null> {
+  try {
+    const baseVer = typeof a.base_ver === "string" ? a.base_ver : "";
+    if (!baseVer) return null;
+    const baseRaw = await loadArtifactAsync(league, baseVer);
+    if (!baseRaw || !Array.isArray(baseRaw.weights)) return null;
+    const xgbFile = typeof a.xgb_file === "string" ? a.xgb_file : "";
+    if (!xgbFile) return null;
+    const xp = `${process.cwd()}/ml/permatch/${xgbFile}`;
+    if (!existsSync(xp)) return null;
+    const slim = slimBooster(JSON.parse(readFileSync(xp, "utf-8")));
+    if (!slim) return null;
+    const w = typeof a.blend_w === "number" && Number.isFinite(a.blend_w) ? a.blend_w : 1;
+    const feats = Array.isArray(a.features) ? (a.features as string[]) : baseRaw.features;
+    return {
+      model_type: "ensemble",
+      base_ver: baseVer,
+      blend_w: Math.max(0, Math.min(1, w)),
+      features: feats,
+      train_seasons: [],
+      base: baseRaw,
+      xgb: slim,
+    } as unknown as PermatchArtifact;
+  } catch {
+    return null;
+  }
+}
 export function loadArtifact(league: string, ver: string): PermatchArtifact | null {
   try {
     const p = `${process.cwd()}/ml/permatch/${league}_${ver}.json`;
@@ -213,13 +299,13 @@ export function predictForRow(m: SoccerMatch, art: PermatchArtifact, ver: string
   }
 }
 
-export function buildPredMap(
+export async function buildPredMap(
   rows: SoccerMatch[],
   league: string,
   ver: string
-): Record<string, PredEntry> {
+): Promise<Record<string, PredEntry>> {
   const map: Record<string, PredEntry> = {};
-  const art = loadArtifact(league, ver);
+  const art = await loadArtifactAsync(league, ver);
   if (!art) return map;
   for (const m of rows) {
     const p = predictForRow(m, art, ver);
@@ -234,12 +320,12 @@ function parseScore(v: string | null | undefined): number | null {
   return Number.isNaN(n) ? null : n;
 }
 
-export function computeAccuracy(
+export async function computeAccuracy(
   rows: SoccerMatch[],
   league: string,
   ver: string
-): Record<string, { n: number; hit: number; acc: number | null }> {
-  const map = buildPredMap(rows, league, ver);
+): Promise<Record<string, { n: number; hit: number; acc: number | null }>> {
+  const map = await buildPredMap(rows, league, ver);
   const stats: Record<string, { n: number; hit: number }> = {};
   for (const m of rows) {
     const p = map[m.source_match_id || String(m.id)];

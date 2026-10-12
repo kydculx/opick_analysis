@@ -327,7 +327,7 @@ export async function getMatchesBySeasons(
   try {
     const all = (await fetchMatchesRaw(league, seasons)).map((m) => ({ ...m }));
     const { buildPredMap } = await import("@/lib/predict");
-    const preds = modelVer ? buildPredMap(all, league, modelVer) : {};
+    const preds = modelVer ? await buildPredMap(all, league, modelVer) : {};
     for (const m of all) {
       const key = m.source_match_id || String(m.id);
       m.pred = preds[key] ?? null;
