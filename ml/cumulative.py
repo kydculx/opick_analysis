@@ -89,7 +89,10 @@ def main():
 
     base = None
     if args.base:
-        base = json.load(open(os.path.join(ROOT, "ml", "permatch", f"{args.league}_{args.base}.json"), encoding="utf-8"))
+        base = pm.load_artifact_any(args.league, args.base)
+        if not isinstance(base, dict):
+            print("베이스 아티팩트 없음 (파일/DB 확인)")
+            sys.exit(2)
         if not isinstance(base.get("weights"), list):
             print("legacy 베이스만 지원 (현재: %s)" % base.get("model_type"))
             sys.exit(2)
@@ -336,7 +339,14 @@ def main():
                                "walk": walk, "static_acc": static_acc, "test": test,
                                "draw_spec": draw_spec, "draw_alert_t": args.alert_t}})
     out_p = os.path.join(ROOT, "ml", "permatch", f"{args.league}_{args.ver}.json")
-    json.dump(art, open(out_p, "w", encoding="utf-8"))
+    try:
+        import supabase_models as _sm
+        _sm.upsert_model(args.league, args.ver, art, print)
+        _local = _sm.save_local_enabled()
+    except Exception:
+        _local = True
+    if _local:
+        json.dump(art, open(out_p, "w", encoding="utf-8"))
     with open(os.path.join(ROOT, "ml", "permatch", f"{args.league}_{args.ver}.cumu.json"), "w", encoding="utf-8") as f:
         json.dump({"league": args.league, "ver": args.ver, "walk": walk,
                    "static_acc": static_acc, "test": test, "picks": picks}, f)

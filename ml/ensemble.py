@@ -81,8 +81,10 @@ def main():
                     help="선발식 무승부 가중 (acc + rec_w*rec, 0=순수 적중)")
     args = ap.parse_args()
 
-    base = json.load(open(os.path.join(
-        ROOT, "ml", "permatch", f"{args.league}_{args.base}.json"), encoding="utf-8"))
+    base = pm.load_artifact_any(args.league, args.base)
+    if not isinstance(base, dict):
+        print("베이스 아티팩트 없음 (파일/DB 확인)")
+        sys.exit(2)
     if not isinstance(base.get("weights"), list):
         print("legacy 아티팩트가 아님")
         sys.exit(2)
@@ -146,8 +148,17 @@ def main():
            "train_seasons": train_s, "valid": valid_s,
            "metrics": {"acc": bm["acc"], "ll": bm["ll"], "draw_rec": bm["draw_rec"]}}
     p = os.path.join(ROOT, "ml", "permatch", f"{args.league}_{ens_ver}.json")
-    json.dump(art, open(p, "w"))
-    print(f"saved {p} + {xgb_file}")
+    try:
+        import supabase_models as _sm
+        _sm.upsert_model(args.league, ens_ver, art, print)
+        _local = _sm.save_local_enabled()
+    except Exception:
+        _local = True
+    if _local:
+        json.dump(art, open(p, "w"))
+        print(f"saved {p} + {xgb_file}")
+    else:
+        print(f"saved supabase models/{ens_ver} + {xgb_file}")
 
 
 if __name__ == "__main__":

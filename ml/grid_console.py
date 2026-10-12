@@ -181,7 +181,7 @@ def list_versions(league):
     try:
         files = os.listdir(d)
     except OSError:
-        return []
+        files = []
     out = []
     for f in files:
         if not f.startswith(league + "_") or not f.endswith(".json"):
@@ -190,7 +190,47 @@ def list_versions(league):
             continue
         ver = f[len(league) + 1:-5]
         out.append(ver)
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "ml"))
+        import supabase_models as _sm
+        sb = _sm._client()
+        if sb is not None:
+            res = sb.table("models").select("ver").eq("league_code", league).execute()
+            for r in res.data or []:
+                if r.get("ver") and r["ver"] not in out:
+                    out.append(r["ver"])
+    except Exception:
+        pass
     return sorted(out)
+
+
+def load_tune(league, ver):
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "ml"))
+        import supabase_models as _sm
+        art = _sm.load_model_artifact(league, ver)
+        if isinstance(art, dict):
+            return art
+    except Exception:
+        pass
+    try:
+        with open(tune_path(league, ver), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def load_tune_strict(league, ver):
+    art = load_tune(league, ver)
+    if not isinstance(art, dict):
+        raise FileNotFoundError(tune_path(league, ver))
+    return art
+
+
+def tune_exists(league, ver):
+    if ver and os.path.exists(tune_path(league, ver)):
+        return True
+    return isinstance(load_tune(league, ver), dict)
 
 
 class Runner:
@@ -411,7 +451,7 @@ def main():
         sel = selected_feats()
         if v_mode.get() in ("grid", "auto"):
             cur = v_ver.get().strip()
-            if not (cur and os.path.exists(tune_path(lg, cur))):
+            if not (cur and tune_exists(lg, cur)):
                 cands = list_versions(lg)
                 v_ver.set(cands[-1] if cands else "")
         elif v_mode.get() == "cumu":
@@ -524,8 +564,10 @@ def main():
     ttk.Label(fr_common1, text="버전", width=6).pack(side="left")
     fr_ver = ttk.Frame(fr_common1)
     fr_ver.pack(side="left")
-    cb_ver = _reg(ttk.Combobox(fr_ver, textvariable=v_ver, width=44))
+    cb_ver = _reg(ttk.Combobox(fr_ver, textvariable=v_ver, width=40))
     cb_ver.pack(side="left")
+    _reg(ttk.Button(fr_ver, text="⟳", width=3,
+                    command=lambda: (refresh_ver_list(),))).pack(side="left", padx=(2, 0))
     ver_label = ttk.Label(fr_ver, textvariable=v_ver, foreground="gray")
     btn_del_ver = _reg(ttk.Button(fr_ver, text="삭제", width=5,
                     command=lambda: on_delete_ver()))
@@ -583,7 +625,7 @@ def main():
                 if "cumu" not in _v:
                     continue
                 try:
-                    _a = json.load(open(tune_path(lg, _v), encoding="utf-8"))
+                    _a = load_tune_strict(lg, _v)
                 except (OSError, ValueError):
                     continue
                 if isinstance(_a, dict) and isinstance(_a.get("weights"), list):
@@ -608,10 +650,11 @@ def main():
         if not ver:
             return
         tp = tune_path(v_league.get(), ver)
-        if not os.path.exists(tp):
+        art = load_tune(v_league.get(), ver)
+        if not isinstance(art, dict):
             return
         try:
-            names = json.load(open(tp, encoding="utf-8")).get("features")
+            names = art.get("features")
         except (OSError, ValueError):
             return
         if not isinstance(names, list) or not names:
@@ -646,7 +689,7 @@ def main():
             except (ValueError, AttributeError, tk.TclError):
                 pass
         try:
-            art = json.load(open(tune_path(league, ver), encoding="utf-8"))
+            art = load_tune_strict(league, ver)
         except (OSError, ValueError):
             art = None
         if isinstance(art, dict):
@@ -794,8 +837,7 @@ def main():
 
     def _acc_run(league, ver, tok):
         try:
-            tp = tune_path(league, ver)
-            art = json.load(open(tp, encoding="utf-8")) if ver and os.path.exists(tp) else None
+            art = load_tune(league, ver) if ver else None
         except (OSError, ValueError):
             art = None
         txt = _acc_text_for(art, league, ver)
@@ -838,7 +880,7 @@ def main():
         if not ver:
             return
         try:
-            d = json.load(open(tune_path(lg, ver), encoding="utf-8"))
+            d = load_tune_strict(lg, ver)
         except (OSError, ValueError):
             return
         feats = d.get("features")
@@ -885,7 +927,7 @@ def main():
             return
         lg, ver = v_league.get(), v_ver.get().strip()
         try:
-            d = json.load(open(tune_path(lg, ver), encoding="utf-8"))
+            d = load_tune_strict(lg, ver)
             feats = d.get("features")
         except (OSError, ValueError):
             feats = None
@@ -929,7 +971,7 @@ def main():
         txt = "편집 미리보기: 검증 시즌 없음"
         acc = None
         try:
-            art = json.load(open(tune_path(league, ver), encoding="utf-8"))
+            art = load_tune_strict(league, ver)
             if isinstance(art, dict):
                 art = dict(art)
                 art["weights"] = list(weights)
@@ -1941,16 +1983,14 @@ def main():
         key = f"{league}|{ver}"
         if feat_cache["key"] == key and feat_cache["names"] is not None:
             return feat_cache["names"]
-        tp = tune_path(league, ver)
-        if os.path.exists(tp):
-            try:
-                names = json.load(open(tp, encoding="utf-8")).get("features")
-                feat_cache["key"] = key
-                feat_cache["names"] = names
-                return names
-            except (OSError, ValueError):
-                return feat_cache["names"] if feat_cache["key"] == key else None
-        return None
+        try:
+            _fa = load_tune(league, ver)
+            names = _fa.get("features") if isinstance(_fa, dict) else None
+            feat_cache["key"] = key
+            feat_cache["names"] = names
+            return names
+        except (OSError, ValueError):
+            return feat_cache["names"] if feat_cache["key"] == key else None
 
     def _fmt_eta(eta_s):
         if eta_s != eta_s or eta_s == float("inf"):
@@ -2266,7 +2306,7 @@ def main():
                 v_status.set("버전을 선택하세요 (상세에서 확인)")
                 return
             try:
-                art0 = json.load(open(tune_path(o["league"], o["ver"]), encoding="utf-8"))
+                art0 = load_tune_strict(o["league"], o["ver"])
             except (OSError, ValueError):
                 art0 = None
             if not isinstance(art0, dict):
@@ -2279,7 +2319,7 @@ def main():
             _cb = o.get("cumu_base", "")
             if _cb:
                 try:
-                    art0 = json.load(open(tune_path(o["league"], _cb), encoding="utf-8"))
+                    art0 = load_tune_strict(o["league"], _cb)
                 except (OSError, ValueError):
                     art0 = None
                 if not isinstance(art0, dict):
