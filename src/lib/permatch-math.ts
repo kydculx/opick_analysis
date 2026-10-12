@@ -55,7 +55,7 @@ export function rowFeatures(m: SoccerMatch): number[] {
   const th = m.team_info?.avg_stats?.home ?? {};
   const ta = m.team_info?.avg_stats?.away ?? {};
   const imp = sameWdl(m);
-  const market = imp ? imp.home - imp.away : 0;
+  const market = imp ? imp.home - imp.away : NaN;
   return [
     fnum(m.home_rank) - fnum(m.away_rank),
     fnum(sh.power) - fnum(sa.power),
@@ -117,7 +117,7 @@ export function drawFeatures(m: SoccerMatch): number[] {
     }
   }
   const pg = Math.abs(fnum(th.possession) - fnum(ta.possession));
-  return [poissonDraw(xgH, xgA), rg, xgH + xgA, imp ? imp.draw : 0, hd5, ad5, hd, Math.abs(xgH - xgA), sc5, pg, co5];
+  return [poissonDraw(xgH, xgA), rg, xgH + xgA, imp ? imp.draw : NaN, hd5, ad5, hd, Math.abs(xgH - xgA), sc5, pg, co5];
 }
 
 export function sigmoid(s: number): number {
@@ -141,7 +141,7 @@ export type LegacyArt = {
 };
 
 export function stdVec(x: number[], mu: number[], sd: number[]): number[] {
-  return x.map((v, i) => (v - mu[i]) / sd[i]);
+  return x.map((v, i) => (Number.isNaN(v) ? 0 : (v - mu[i]) / sd[i]));
 }
 
 export function legacyParts(
@@ -201,6 +201,26 @@ export function dcProba(lam: number, mu: number, rho: number, maxGoals = 10): nu
     }
   }
   return [hw, Math.max(0, 1 - hw - aw), aw];
+}
+
+export function applyDrawBoost(
+  p: number[],
+  total: number,
+  boost = 0,
+  margin = 0.12,
+  totalMax = 2.55,
+): number[] {
+  const b = Number(boost);
+  if (!(b > 0) || !Number.isFinite(b)) return [...p];
+  const m = Number.isFinite(margin) && margin > 0 ? margin : 0.12;
+  const tm = Number.isFinite(totalMax) && totalMax > 0 ? totalMax : 2.55;
+  if (!(Number.isFinite(total) && total <= tm)) return [...p];
+  const s = [...p].sort((a, b2) => b2 - a);
+  if (s[0] - s[1] > m) return [...p];
+  const q = [...p];
+  q[1] = Math.min(0.99, q[1] + b);
+  const sum = q[0] + q[1] + q[2];
+  return sum > 0 ? q.map((v) => v / sum) : [...p];
 }
 
 export function applyTemp(p: number[], T: number): number[] {

@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import type { SoccerMatch } from "@/lib/queries";
-import { applyTemp, blendProbs, cappedDot, dcProba, drawFeatures, legacyParts, logregProba, rowFeatures, selectFeatures, sigmoid } from "./permatch-math";
+import { applyDrawBoost, applyTemp, blendProbs, cappedDot, dcProba, drawFeatures, legacyParts, logregProba, rowFeatures, selectFeatures, sigmoid } from "./permatch-math";
 import { slimBooster, xgbProba, type XgbSlim } from "./xgb";
 
 export type PermatchArtifact = {
@@ -21,6 +21,9 @@ export type PermatchArtifact = {
   pattern_tau?: number;
   pattern_taus?: Record<string, number> | null;
   pattern_alpha?: number;
+  draw_boost?: number;
+  draw_close_margin?: number;
+  draw_total_max?: number;
   contrib_cap?: number | null;
   base_ver?: string;
   blend_w?: number;
@@ -174,6 +177,9 @@ export function predictForRow(m: SoccerMatch, art: PermatchArtifact, ver: string
     let taus = art.pattern_taus ?? null;
     let palpha = art.pattern_alpha ?? 0.5;
     let pw: number[] | null = art.weights ?? null;
+    let boost = art.draw_boost ?? 0;
+    let boostMargin = art.draw_close_margin ?? 0.12;
+    let boostTotal = art.draw_total_max ?? 2.55;
     let T = art.T;
     if (art.model_type === "ensemble" && art.base && art.xgb) {
       const b = legacyParts(m, art.base);
@@ -188,6 +194,9 @@ export function predictForRow(m: SoccerMatch, art: PermatchArtifact, ver: string
       taus = art.base.pattern_taus ?? null;
       palpha = art.base.pattern_alpha ?? 0.5;
       pw = art.base.weights ?? null;
+      boost = art.base.draw_boost ?? 0;
+      boostMargin = art.base.draw_close_margin ?? 0.12;
+      boostTotal = art.base.draw_total_max ?? 2.55;
       T = art.base.T;
     } else {
       const b = legacyParts(m, art);
@@ -195,7 +204,8 @@ export function predictForRow(m: SoccerMatch, art: PermatchArtifact, ver: string
       lin = [b.ph * (1 - b.dd), b.dd, (1 - b.ph) * (1 - b.dd)];
       x = b.x;
     }
-    const p = applyTemp(blendProbs(lin, x, pats, tau, palpha, pw, taus), T);
+    const total = drawFeatures(m)[2];
+    const p = applyDrawBoost(applyTemp(blendProbs(lin, x, pats, tau, palpha, pw, taus), T), total, boost, boostMargin, boostTotal);
     if (p.some((v) => !Number.isFinite(v))) return null;
     return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertThreshold(art) };
   } catch {
