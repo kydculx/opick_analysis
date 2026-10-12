@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { ALL_FEATURES } from "@/lib/permatch-math";
-import { JOB_DIR, isJobId, readJob, startJob } from "@/lib/jobs";
+import { JOB_DIR, isJobId, killJob, readJob, startJob } from "@/lib/jobs";
 
 export const dynamic = "force-dynamic";
 
@@ -100,4 +100,14 @@ export async function GET(req: Request) {
     progress = null;
   }
   return NextResponse.json({ ok: true, job, progress, tail });
+}
+
+export async function DELETE(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const id = searchParams.get("jobId") ?? "";
+  if (!isJobId(id)) {
+    return NextResponse.json({ ok: false, error: "jobId가 필요" }, { status: 400 });
+  }
+  const stopped = killJob(id);
+  return NextResponse.json({ ok: stopped });
 }

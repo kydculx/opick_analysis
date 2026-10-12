@@ -1,7 +1,6 @@
 import { NextResponse } from "next/server";
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
-import { loadArtifact } from "@/lib/predict";
 
 function diskVersions(league: string): { ver: string; model_type: string }[] {
   const dir = `${process.cwd()}/ml/permatch`;
@@ -37,12 +36,33 @@ export async function GET(req: Request) {
     }
     try {
       const p = `${process.cwd()}/ml/permatch/${league}_${ver}.json`;
-      if (!existsSync(p)) {
+      let a: Record<string, unknown> | null = null;
+      try {
+        const supabase = createServerSupabaseClient();
+        const { data } = await supabase
+          .from("models")
+          .select("artifact")
+          .eq("league_code", league)
+          .eq("ver", ver)
+          .limit(1);
+        const raw = (data?.[0] as { artifact?: unknown } | undefined)?.artifact;
+        if (raw && typeof raw === "object") a = raw as Record<string, unknown>;
+      } catch {
+        a = null;
+      }
+      if (!a && existsSync(p)) {
+        try {
+          a = JSON.parse(readFileSync(p, "utf-8"));
+        } catch {
+          a = null;
+        }
+      }
+      if (!a) {
         return NextResponse.json({ ok: true, league, ver, model_type: "unknown", detail: null });
       }
-      const a = JSON.parse(readFileSync(p, "utf-8"));
       if (a?.model_type === "ensemble") {
-        const art = loadArtifact(league, ver);
+        const { loadArtifactAsync } = await import("@/lib/predict");
+        const art = await loadArtifactAsync(league, ver);
         if (!art || art.model_type !== "ensemble" || !art.base || !art.xgb) {
           return NextResponse.json({ ok: true, league, ver, model_type: "unknown", detail: null });
         }

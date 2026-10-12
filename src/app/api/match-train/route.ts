@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { JOB_DIR, isJobId, readJob, startJob } from "@/lib/jobs";
+import { JOB_DIR, isJobId, killJob, readJob, startJob } from "@/lib/jobs";
 import { ALL_FEATURES } from "@/lib/permatch-math";
 
 // GUI ml/grid_console.py make_ver와 동일 규칙: tr{시즌수}-f{피처수}-d{무가중}-x{해시4}-{년월일시분}
@@ -110,4 +110,14 @@ export async function GET(req: Request) {
     progress = null;
   }
   return NextResponse.json({ ok: true, job, progress, tail });
+}
+
+export async function DELETE(req: Request) {
+  const { searchParams } = new URL(req.url);
+  const id = searchParams.get("jobId") ?? "";
+  if (!isJobId(id)) {
+    return NextResponse.json({ ok: false, error: "jobId가 필요" }, { status: 400 });
+  }
+  const stopped = killJob(id);
+  return NextResponse.json({ ok: stopped });
 }
