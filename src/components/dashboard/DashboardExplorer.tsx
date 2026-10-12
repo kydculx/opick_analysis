@@ -163,6 +163,7 @@ export function DashboardExplorer() {
   const lastPreviewMapRef = useRef<AccuracyMap | null>(null);
   const [models, setModels] = useState<SavedModel[]>([]);
   const [selVer, setSelVer] = useState("");
+  const [delSel, setDelSel] = useState<string[]>([]);
   const [accuracy, setAccuracy] = useState<Record<string, { n: number; hit: number; acc: number | null }>>({});
   type ModelDetail = {
     model_type: string;
@@ -258,6 +259,7 @@ export function DashboardExplorer() {
     setAppliedVer("");
     setModels([]);
     setSelVer("");
+    setDelSel([]);
     setAccuracy({});
     setRawMatches([]);
     setPredMap({});
@@ -1257,7 +1259,7 @@ export function DashboardExplorer() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-visible lg:flex-row lg:overflow-hidden">
-      <aside className="w-full shrink-0 space-y-4 rounded-2xl border border-zinc-200 p-4 dark:border-zinc-800 lg:max-h-full lg:w-64 lg:overflow-y-auto">
+      <aside className="w-full shrink-0 space-y-4 rounded-2xl border border-zinc-200 p-4 dark:border-zinc-800 lg:max-h-full lg:w-72 lg:overflow-y-auto">
         <div>
           <label className="text-xs font-medium text-zinc-500">리그 선택</label>
           <select
@@ -1329,7 +1331,7 @@ export function DashboardExplorer() {
                         return a?.acc != null ? { s, i, acc: a.acc, n: a.n, hit: a.hit } : null;
                       })
                       .filter((p): p is { s: string; i: number; acc: number; n: number; hit: number } => p !== null));
-                const W = 232, H = 118, PL = 3, PR = 3, PT = 8, PB = 14;
+                const W = 232, H = 124, PL = 22, PR = 4, PT = 10, PB = 16;
                 const n = chrono.length;
                 const X = (i: number) => (n <= 1 ? PL + (W - PL - PR) / 2 : PL + (i / (n - 1)) * (W - PL - PR));
                 const Y = (acc: number) => PT + (1 - Math.max(0, Math.min(1, acc))) * (H - PT - PB);
@@ -1351,113 +1353,9 @@ export function DashboardExplorer() {
                           {overall != null ? `${(overall * 100).toFixed(1)}` : "−"}
                           <span className="text-sm font-medium text-zinc-400">%</span>
                         </div>
-                        <div className="mt-0.5 font-mono text-[10px] text-zinc-400">
+                        <div className="mt-0.5 font-mono text-[10px] tabular-nums text-zinc-400">
                           {totN > 0 ? `${totHit}/${totN} 적중` : "모델 적용 시 표시"}
                         </div>
-                        {(() => {
-                          if (applyState !== "done") return null;
-                          const minOdds = Number(minOddsText);
-                          const cutoff = Number.isFinite(minOdds) && minOdds > 0 ? minOdds : 0;
-                          let n = 0, hit = 0, staked = 0, returned = 0, hitOdds = 0, noOdds = 0;
-                          const bySeason = new Map<string, { n: number; hit: number; staked: number; returned: number; hitOdds: number; noOdds: number }>();
-                          const inScope = (s: string) => (validSet ? validSet.has(s) : !trainSet.has(s));
-                          for (const m of rawMatches) {
-                            const s = String(m.season);
-                            if (!checked.includes(s) || !inScope(s)) continue;
-                            const h = parseScoreLocal(m.home_score);
-                            const a = parseScoreLocal(m.away_score);
-                            if (h == null || a == null) continue;
-                            const p = predMap[m.source_match_id || String(m.id)];
-                            if (!p) continue;
-                            const o = decimalOdds(m);
-                            if (!o) continue;
-                            const probs = [p.home, p.draw, p.away];
-                            const pick = probs.indexOf(Math.max(...probs));
-                            const actual = h > a ? 0 : h === a ? 1 : 2;
-                            const odds = [o.home, o.draw, o.away][pick];
-                            if (odds < cutoff) continue;
-                            n++;
-                            staked += BET_STAKE;
-                            const r = bySeason.get(s) ?? { n: 0, hit: 0, staked: 0, returned: 0, hitOdds: 0, noOdds: 0 };
-                            r.n++;
-                            r.staked += BET_STAKE;
-                            if (pick === actual) {
-                              hit++;
-                              hitOdds += odds;
-                              returned += Math.round(BET_STAKE * odds);
-                              r.hit++;
-                              r.hitOdds += odds;
-                              r.returned += Math.round(BET_STAKE * odds);
-                            }
-                            bySeason.set(s, r);
-                          }
-                          if (n === 0) {
-                            return (
-                              <div className="mt-1 font-mono text-[10px] leading-tight">
-                                <div className="flex min-w-0 items-center justify-between gap-1 px-0.5">
-                                  <span className="font-semibold text-zinc-400">수익률 −</span>
-                                  <label className="flex shrink-0 items-center gap-1 text-zinc-400">
-                                    최소배당
-                                    <input
-                                      value={minOddsText}
-                                      onChange={(e) => setMinOddsText(e.target.value.replace(/[^0-9.]/g, ""))}
-                                      inputMode="decimal"
-                                      aria-label="최소배당"
-                                      placeholder="1.5"
-                                      className="w-10 rounded-md border border-zinc-300 bg-white px-1 py-px text-right font-mono text-[10px] text-zinc-700 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
-                                    />
-                                  </label>
-                                </div>
-                                <span className="text-zinc-400"> 조건에 맞는 경기 없음</span>
-                              </div>
-                            );
-                          }
-                          const pnl = returned - staked;
-                          const roi = (pnl / staked) * 100;
-                          const up = pnl >= 0;
-                          const rows = [...bySeason.entries()]
-                            .filter(([, r]) => r.n > 0)
-                            .sort((a, b) => (a[0] < b[0] ? -1 : 1));
-                          return (
-                            <div className="mt-1 font-mono text-[10px] leading-tight" title="매경기 1천원, 적중 시 3사 평균배당 그대로 수령">
-                              <div className="flex min-w-0 items-center justify-between gap-1 px-0.5">
-                                <span className={`font-semibold ${up ? "text-emerald-600 dark:text-emerald-400" : "text-rose-500 dark:text-rose-400"}`}>
-                                  수익률 {up ? "+" : ""}{roi.toFixed(1)}%
-                                </span>
-                                <label className="flex shrink-0 items-center gap-1 text-zinc-400">
-                                  최소배당
-                                  <input
-                                    value={minOddsText}
-                                    onChange={(e) => setMinOddsText(e.target.value.replace(/[^0-9.]/g, ""))}
-                                    inputMode="decimal"
-                                    aria-label="최소배당"
-                                    placeholder="1.5"
-                                    className="w-10 rounded-md border border-zinc-300 bg-white px-1 py-px text-right font-mono text-[10px] text-zinc-700 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
-                                  />
-                                </label>
-                              </div>
-                              <span className="text-zinc-400"> ({up ? "+" : "−"}{Math.abs(pnl).toLocaleString()}원)</span>
-                              <div className="mt-1 space-y-0.5">
-                                {rows.map(([s, r]) => {
-                                  const sp = r.returned - r.staked;
-                                  const sr = (sp / r.staked) * 100;
-                                  const sup = sp >= 0;
-                                  return (
-                                    <div
-                                      key={s}
-                                      className="flex min-w-0 items-baseline justify-between gap-1 px-0.5"
-                                    >
-                                      <span className="shrink-0 text-zinc-500">{s}</span>
-                                      <span className={`truncate whitespace-nowrap ${sup ? "text-emerald-600 dark:text-emerald-400" : "text-rose-500 dark:text-rose-400"}`}>
-                                        {sup ? "+" : ""}{sr.toFixed(1)}% ({sup ? "+" : "−"}{Math.abs(sp).toLocaleString()}원)
-                                      </span>
-                                    </div>
-                                  );
-                                })}
-                              </div>
-                            </div>
-                          );
-                        })()}
                       </div>
                     </div>
                     <svg viewBox={`0 0 ${W} ${H}`} className="mt-1 w-full" role="img" aria-label="시즌 적중률 추이">
@@ -1467,8 +1365,13 @@ export function DashboardExplorer() {
                           <stop offset="100%" stopColor="#2563eb" stopOpacity={0.02} />
                         </linearGradient>
                       </defs>
-                      {[0, 0.5, 1].map((g) => (
-                        <line key={g} x1={PL} x2={W - PR} y1={Y(g)} y2={Y(g)} stroke="#52525b" strokeWidth={0.5} opacity={0.3} />
+                      {[1, 0.5, 0].map((g) => (
+                        <g key={g}>
+                          <line x1={PL} x2={W - PR} y1={Y(g)} y2={Y(g)} stroke="#52525b" strokeWidth={0.5} opacity={g === 0.5 ? 0.45 : 0.25} strokeDasharray={g === 0.5 ? "" : "2 3"} />
+                          <text x={PL - 3} y={Y(g) + 2.5} textAnchor="end" fontSize={6.5} fill="#71717a" fontFamily="monospace">
+                            {`${Math.round(g * 100)}`}
+                          </text>
+                        </g>
                       ))}
                       {overall != null && (
                         <line x1={PL} x2={W - PR} y1={Y(overall)} y2={Y(overall)} stroke="#a1a1aa" strokeWidth={1} strokeDasharray="3 3" opacity={0.8}>
@@ -1479,18 +1382,18 @@ export function DashboardExplorer() {
                         <polygon points={`${PL},${H - PB} ${line} ${W - PR},${H - PB}`} fill={`url(#${gid})`} />
                       )}
                       {pts.length > 1 && (
-                        <polyline points={line} fill="none" stroke="#2563eb" strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" />
+                        <polyline points={line} fill="none" stroke="#2563eb" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" />
                       )}
                       {pts.map((p) => (
                         <g key={p.s}>
                           <title>{`${p.s} ${(p.acc * 100).toFixed(1)}% (${p.hit}/${p.n})${best && p.s === best.s ? " · 최고" : ""}${worst && p.s === worst.s ? " · 최저" : ""}`}</title>
                           {best && p.s === best.s && (
-                            <circle cx={X(p.i)} cy={Y(p.acc)} r={5.5} fill="none" stroke="#10b981" strokeWidth={1.5} opacity={0.8} />
+                            <circle cx={X(p.i)} cy={Y(p.acc)} r={6.5} fill="none" stroke="#10b981" strokeWidth={1.5} opacity={0.9} />
                           )}
                           {worst && p.s === worst.s && (!best || p.s !== best.s) && (
-                            <circle cx={X(p.i)} cy={Y(p.acc)} r={5.5} fill="none" stroke="#f43f5e" strokeWidth={1.5} opacity={0.8} />
+                            <circle cx={X(p.i)} cy={Y(p.acc)} r={6.5} fill="none" stroke="#f43f5e" strokeWidth={1.5} opacity={0.9} />
                           )}
-                          <circle cx={X(p.i)} cy={Y(p.acc)} r={3} fill={dotColor(p.acc)} stroke="#fff" strokeWidth={1} />
+                          <circle cx={X(p.i)} cy={Y(p.acc)} r={3.5} fill={dotColor(p.acc)} stroke="#fff" strokeWidth={1.2} />
                         </g>
                       ))}
                       {chrono.map((s, i) => {
@@ -1511,6 +1414,92 @@ export function DashboardExplorer() {
                       <span className="text-zinc-500">
                         최저 <span className="font-semibold text-rose-500 dark:text-rose-400">{worst ? `${short(worst.s)} ${(worst.acc * 100).toFixed(1)}%` : "−"}</span>
                       </span>
+                    </div>
+                    <div className="mt-2 border-t border-zinc-200 pt-2 dark:border-zinc-800">
+                      <div className="flex min-w-0 items-center justify-between gap-1 px-0.5">
+                        <span className="text-[11px] font-medium text-zinc-500">
+                          배팅 수익률 <span className="font-normal text-zinc-400">(1천원)</span>
+                        </span>
+                        <label className="flex shrink-0 items-center gap-1 font-mono text-[10px] text-zinc-400">
+                          최소배당
+                          <input
+                            value={minOddsText}
+                            onChange={(e) => setMinOddsText(e.target.value.replace(/[^0-9.]/g, ""))}
+                            inputMode="decimal"
+                            aria-label="최소배당"
+                            placeholder="1.5"
+                            className="w-10 rounded-md border border-zinc-300 bg-white px-1 py-px text-right font-mono text-[10px] text-zinc-700 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
+                          />
+                        </label>
+                      </div>
+                      {(() => {
+                        if (applyState !== "done") return null;
+                        const minOdds = Number(minOddsText);
+                        const cutoff = Number.isFinite(minOdds) && minOdds > 0 ? minOdds : 0;
+                        let n = 0, staked = 0, returned = 0;
+                        const bySeason = new Map<string, { n: number; staked: number; returned: number }>();
+                        const inScope = (s: string) => (validSet ? validSet.has(s) : !trainSet.has(s));
+                        for (const m of rawMatches) {
+                          const s = String(m.season);
+                          if (!checked.includes(s) || !inScope(s)) continue;
+                          const h = parseScoreLocal(m.home_score);
+                          const a = parseScoreLocal(m.away_score);
+                          if (h == null || a == null) continue;
+                          const p = predMap[m.source_match_id || String(m.id)];
+                          if (!p) continue;
+                          const o = decimalOdds(m);
+                          if (!o) continue;
+                          const probs = [p.home, p.draw, p.away];
+                          const pick = probs.indexOf(Math.max(...probs));
+                          const actual = h > a ? 0 : h === a ? 1 : 2;
+                          if ([o.home, o.draw, o.away][pick] < cutoff) continue;
+                          n++;
+                          staked += BET_STAKE;
+                          const r = bySeason.get(s) ?? { n: 0, staked: 0, returned: 0 };
+                          r.n++;
+                          r.staked += BET_STAKE;
+                          if (pick === actual) {
+                            const win = Math.round(BET_STAKE * [o.home, o.draw, o.away][pick]);
+                            returned += win;
+                            r.returned += win;
+                          }
+                          bySeason.set(s, r);
+                        }
+                        if (n === 0) {
+                          return <div className="mt-1 px-0.5 font-mono text-[10px] text-zinc-400">조건에 맞는 경기 없음</div>;
+                        }
+                        const pnl = returned - staked;
+                        const roi = (pnl / staked) * 100;
+                        const up = pnl >= 0;
+                        const rows = [...bySeason.entries()]
+                          .filter(([, r]) => r.staked > 0)
+                          .sort((a, b) => (a[0] < b[0] ? 1 : -1));
+                        return (
+                          <div className="mt-1 font-mono leading-tight" title="매경기 1천원, 적중 시 3사 평균배당 그대로 수령">
+                            <div className="flex items-baseline gap-1.5 px-0.5 tabular-nums">
+                              <span className={`text-sm font-bold ${up ? "text-emerald-600 dark:text-emerald-400" : "text-rose-500 dark:text-rose-400"}`}>
+                                {up ? "+" : ""}{roi.toFixed(1)}%
+                              </span>
+                              <span className="text-[10px] text-zinc-400">({up ? "+" : "−"}{Math.abs(pnl).toLocaleString()}원 · 배팅 {n}경기)</span>
+                            </div>
+                            <div className="mt-1 space-y-0.5 text-[10px]">
+                              {rows.map(([s, r]) => {
+                                const sp = r.returned - r.staked;
+                                const sr = (sp / r.staked) * 100;
+                                const sup = sp >= 0;
+                                return (
+                                  <div key={s} className="flex min-w-0 items-baseline justify-between gap-1 px-0.5">
+                                    <span className="shrink-0 text-zinc-500">{s}</span>
+                                      <span className={`truncate whitespace-nowrap tabular-nums ${sup ? "text-emerald-600 dark:text-emerald-400" : "text-rose-500 dark:text-rose-400"}`}>
+                                        {sup ? "+" : ""}{sr.toFixed(1)}% ({sup ? "+" : "−"}{Math.abs(sp).toLocaleString()}원 · {r.n}경기)
+                                      </span>
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        );
+                      })()}
                     </div>
                   </div>
                 );
@@ -1776,33 +1765,71 @@ export function DashboardExplorer() {
               })
             )}
           </select>
-          <button
-            disabled={!selVer}
-            onClick={async () => {
-              if (!window.confirm(`모델 ${selVer} 삭제? 예측값도 함께 지워집니다.`)) return;
-              const res = await fetch(
-                `/api/models?league=${encodeURIComponent(league)}&ver=${encodeURIComponent(selVer)}`,
-                { method: "DELETE" }
-              ).then((r) => r.json());
-              if (res.ok) {
-                const delVer = selVer;
-                setSelVer("");
-                setApplyState("idle");
-                setAppliedVer("");
-                setPredMap({});
-                appliedKeyRef.current = "";
-                setAccuracy({});
-                delete predCacheRef.current[cacheKey(league, delVer)];
-                delete accCacheRef.current[cacheKey(league, delVer)];
-                await fetchModels(league);
-              } else {
-                setError(res.error ?? "모델 삭제 실패");
-              }
-            }}
-            className="mt-2 w-full text-center text-xs text-red-500 underline underline-offset-2 disabled:opacity-40 dark:text-red-400"
-          >
-            선택 모델 삭제
-          </button>
+          {models.length > 0 && (
+            <details className="mt-2 rounded-xl border border-zinc-200 dark:border-zinc-800">
+              <summary className="cursor-pointer px-2.5 py-1.5 text-xs font-medium text-zinc-500">
+                모델삭제 {delSel.length > 0 ? `(${delSel.length})` : ""}
+              </summary>
+              <div className="max-h-44 space-y-0.5 overflow-y-auto px-2.5 pb-1">
+                {models.map((m) => (
+                  <label key={m.ver} className="flex cursor-pointer items-center gap-2 text-xs text-zinc-600 dark:text-zinc-400">
+                    <input
+                      type="checkbox"
+                      checked={delSel.includes(m.ver)}
+                      onChange={() =>
+                        setDelSel((prev) => (prev.includes(m.ver) ? prev.filter((v) => v !== m.ver) : [...prev, m.ver]))
+                      }
+                      className="h-3.5 w-3.5 shrink-0 accent-red-500"
+                    />
+                    <span className="min-w-0 truncate font-mono text-[11px]">{m.ver}</span>
+                  </label>
+                ))}
+              </div>
+              <div className="flex gap-1.5 px-2.5 pb-2">
+                <button
+                  disabled={delSel.length === 0}
+                  onClick={() => setDelSel(models.map((m) => m.ver))}
+                  className="flex-1 rounded-lg border border-zinc-300 px-2 py-1 text-[11px] text-zinc-600 disabled:opacity-40 dark:border-zinc-700 dark:text-zinc-400"
+                >
+                  전체선택
+                </button>
+                <button
+                  disabled={delSel.length === 0}
+                  onClick={async () => {
+                    if (!window.confirm(`모델 ${delSel.length}개 삭제? 예측값도 함께 지워집니다.`)) return;
+                    let failed = 0;
+                    for (const ver of delSel) {
+                      try {
+                        const res = await fetch(
+                          `/api/models?league=${encodeURIComponent(league)}&ver=${encodeURIComponent(ver)}`,
+                          { method: "DELETE" }
+                        ).then((r) => r.json());
+                        if (!res.ok) failed++;
+                      } catch {
+                        failed++;
+                      }
+                      delete predCacheRef.current[cacheKey(league, ver)];
+                      delete accCacheRef.current[cacheKey(league, ver)];
+                    }
+                    if (delSel.includes(selVer)) {
+                      setSelVer("");
+                      setApplyState("idle");
+                      setAppliedVer("");
+                      setPredMap({});
+                      appliedKeyRef.current = "";
+                      setAccuracy({});
+                    }
+                    setDelSel([]);
+                    await fetchModels(league);
+                    if (failed > 0) setError(`${failed}개 삭제 실패`);
+                  }}
+                  className="flex-1 rounded-lg bg-red-500 px-2 py-1 text-[11px] text-white hover:brightness-110 disabled:opacity-40 dark:bg-red-400 dark:text-black"
+                >
+                  선택 삭제{delSel.length > 0 ? ` (${delSel.length})` : ""}
+                </button>
+              </div>
+            </details>
+          )}
           {modelDetail?.model_type === "permatch" && modelDetail.detail && (() => {
             const d = modelDetail.detail;
             const eff = gridding && gridLive ? gridLive.weights : (tweaked ?? d.weights);
