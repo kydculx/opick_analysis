@@ -883,7 +883,10 @@ def load_seasons(league: str, seasons: list[str], use_cache: bool = True):
 
 def tune_weights(league: str, ver: str, tune_s: set, max_sweeps: int = 6,
                  use_cache: bool = True, draw_w: float = 0.0, recency_w: float = 0.0):
-    art = json.load(open(model_path(league, ver)))
+    art = load_artifact_any(league, ver)
+    if not isinstance(art, dict):
+        log(f"아티팩트 없음: {model_path(league, ver)} (먼저 학습 필요)")
+        return False
     if not isinstance(art.get("weights"), list):
         log(f"조절/탐색은 legacy 가중치 모델만 지원 (현재: {art.get('model_type')})")
         return False
@@ -992,10 +995,10 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
               grid_step: float = 0.0, draw_w: float = 0.0, recency_w: float = 0.0):
     import numpy as _np
     p = model_path(league, ver)
-    if not os.path.exists(p):
+    art = load_artifact_any(league, ver)
+    if not isinstance(art, dict):
         log(f"아티팩트 없음: {p} (먼저 학습 필요)")
         return False
-    art = json.load(open(p))
     if not isinstance(art.get("weights"), list):
         log(f"조절/탐색은 legacy 가중치 모델만 지원 (현재: {art.get('model_type')})")
         return False
@@ -1102,21 +1105,17 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
         return min(wmax, max(wmin, round(v, 4)))
 
     def persist():
-        try:
-            cur = json.load(open(model_path(league, ver)))
+        cur = load_artifact_any(league, ver)
+        if isinstance(cur, dict):
             cw, chh = cur.get("weights"), cur.get("hfa")
             if isinstance(cw, list) and len(cw) == nw and isinstance(chh, (int, float)):
                 facc, frec = accrec_of(cw, chh)
                 if _sel_bonus(facc, frec, draw_w) > _sel_bonus(best, best_rec, draw_w):
                     return ("adopted", list(cw), float(chh), facc, frec)
-        except (OSError, ValueError):
-            pass
-        try:
-            cur0 = json.load(open(model_path(league, ver)))
+        cur0 = load_artifact_any(league, ver)
+        if isinstance(cur0, dict):
             if cur0.get("weights") == list(bestW) and cur0.get("hfa") == bestHfa:
                 return ("same", list(bestW), bestHfa, best, best_rec)
-        except (OSError, ValueError):
-            pass
         art["weights"] = list(bestW)
         art["hfa"] = bestHfa
         save_artifact(league, ver, art)
@@ -1322,10 +1321,10 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
                 jobs: int = 1, draw_w: float = 0.0, recency_w: float = 0.0):
     import numpy as _np
     p = model_path(league, ver)
-    if not os.path.exists(p):
+    art = load_artifact_any(league, ver)
+    if not isinstance(art, dict):
         log(f"아티팩트 없음: {p} (먼저 학습 필요)")
         return False
-    art = json.load(open(p))
     if not isinstance(art.get("weights"), list):
         log(f"조절/탐색은 legacy 가중치 모델만 지원 (현재: {art.get('model_type')})")
         return False
@@ -1505,21 +1504,17 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
                        "curW": curW, "curHfa": curHfa, "curAcc": curAcc}, f)
 
     def persist():
-        try:
-            cur = json.load(open(model_path(league, ver)))
+        cur = load_artifact_any(league, ver)
+        if isinstance(cur, dict):
             cw, chh = cur.get("weights"), cur.get("hfa")
             if isinstance(cw, list) and len(cw) == nw and isinstance(chh, (int, float)):
                 facc, frec = accrec_of(cw, chh)
                 if _sel_bonus(facc, frec, draw_w) > _sel_bonus(best, best_rec, draw_w):
                     return ("adopted", list(cw), float(chh), facc, frec)
-        except (OSError, ValueError):
-            pass
-        try:
-            cur0 = json.load(open(model_path(league, ver)))
+        cur0 = load_artifact_any(league, ver)
+        if isinstance(cur0, dict):
             if cur0.get("weights") == list(bestW) and cur0.get("hfa") == bestHfa:
                 return ("same", list(bestW), bestHfa, best, best_rec)
-        except (OSError, ValueError):
-            pass
         art["weights"] = list(bestW)
         art["hfa"] = bestHfa
         save_artifact(league, ver, art)
@@ -1546,7 +1541,9 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
                 if _sel_bonus(cb, cr, draw_w) > _sel_bonus(best, best_rec, draw_w):
                     best, best_rec, bestW, bestHfa = cb, cr, list(c["bestW"]), c.get("bestHfa", 0.0)
             try:
-                cur = json.load(open(model_path(league, ver)))
+                cur = load_artifact_any(league, ver)
+                if not isinstance(cur, dict):
+                    raise ValueError("no artifact")
                 cw, chh = cur.get("weights"), cur.get("hfa")
                 if isinstance(cw, list) and len(cw) == nw and isinstance(chh, (int, float)):
                     facc, frec = accrec_of(cw, chh)
@@ -1564,7 +1561,9 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
                 except (OSError, ValueError, KeyError, TypeError):
                     pass
             try:
-                cur = json.load(open(model_path(league, ver)))
+                cur = load_artifact_any(league, ver)
+                if not isinstance(cur, dict):
+                    raise ValueError("no artifact")
                 cw, chh = cur.get("weights"), cur.get("hfa")
                 if isinstance(cw, list) and len(cw) == nw and isinstance(chh, (int, float)):
                     facc, frec = accrec_of(cw, chh)
@@ -1856,10 +1855,33 @@ if _HAVE_NUMBA:
 
 
 def save_artifact(league: str, ver: str, artifact: dict):
+    try:
+        import supabase_models as _sm
+        _sm.upsert_model(league, ver, artifact, log)
+        _local = _sm.save_local_enabled()
+    except Exception:
+        _local = True
+    if not _local:
+        return
     os.makedirs(os.path.dirname(model_path(league, ver)), exist_ok=True)
     with open(model_path(league, ver), "w") as f:
         json.dump(artifact, f)
     log(f"saved {model_path(league, ver)}")
+
+
+def load_artifact_any(league: str, ver: str):
+    try:
+        import supabase_models as _sm
+        art = _sm.load_model_artifact(league, ver)
+        if isinstance(art, dict):
+            return art
+    except Exception:
+        pass
+    try:
+        with open(model_path(league, ver), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
 
 
 # ---------------------------------------------------------------- single-train (--fast)
@@ -2034,10 +2056,10 @@ def fit_linear(train_X, train_y, draw_prior: float, valid_X=None, valid_y=None,
 def drawfit(league: str, ver: str, extra_s: set, use_cache: bool = True):
     import numpy as _np
     p = model_path(league, ver)
-    if not os.path.exists(p):
+    art = load_artifact_any(league, ver)
+    if not isinstance(art, dict):
         log(f"아티팩트 없음: {p}")
         return False
-    art = json.load(open(p))
     w, hfa = list(art["weights"]), art["hfa"]
     d = art["draw_prior"]
     mu, sd = art["mu"], art["sd"]
@@ -2696,13 +2718,10 @@ def fit_trial(Xn, ty, Vn, vy, d, mu, sd, cfg):
 
 def load_existing_best(league: str, ver: str, matches, train_s: set, valid_s: set):
     """--new가 아닐 때 기존 아티팩트를 최고점으로 복원. 없으면 None."""
+    art = load_artifact_any(league, ver)
+    if not isinstance(art, dict):
+        return None, None
     p = model_path(league, ver)
-    if not os.path.exists(p):
-        return None, None
-    try:
-        art = json.load(open(p))
-    except (OSError, ValueError):
-        return None, None
     if not isinstance(art.get("weights"), list) or len(art["weights"]) != len(FEATURES):
         log(f"기존 아티팩트 형식 불일치, 무시: {p}")
         return None, None
@@ -2805,8 +2824,10 @@ def main():
 
     if args.mode == "predict":
         assert args.predict, "--predict 필요"
-        with open(model_path(league, ver)) as f:
-            art = json.load(f)
+        art = load_artifact_any(league, ver)
+        if not isinstance(art, dict):
+            log(f"아티팩트 없음: {model_path(league, ver)}")
+            return
         T = art["T"]
         mu, sd = art.get("mu"), art.get("sd")
         e = art.get("emphasis", [1.0] * len(art.get("features", [])))
@@ -2918,8 +2939,8 @@ def main():
             if m.get("n"):
                 log(f"[{split}] n={m['n']} acc={m['acc']:.3f} logloss={m['ll']:.4f}")
         if not args.new:
-            try:
-                old = json.load(open(model_path(league, ver)))
+            old = load_artifact_any(league, ver)
+            if isinstance(old, dict):
                 old_met = eval_artifact(rows, train_s, valid_s, old)
                 new_acc = metrics.get("valid", {}).get("acc", 0.0)
                 old_acc = old_met.get("valid", {}).get("acc", 0.0)
@@ -2927,8 +2948,6 @@ def main():
                 if old_acc > new_acc:
                     log("기존 유지 (덮어쓰기 안 함). --new로 강제 저장 가능")
                     return
-            except FileNotFoundError:
-                pass
         save_artifact(league, ver, artifact)
         w = artifact["weights"]
         log(f"FINAL W {{{', '.join(f'{n}:{v:+.3f}' for n, v in zip(FEATURES, w))}}} T={artifact['T']}")
@@ -3090,8 +3109,8 @@ def main():
         Ve_best, vy, best["weights"], best["hfa"], d, pats, tau, ptaus,
         palpha_new, best_T, None, 0.0, None, contrib_cap, d_va_raw)
     log(f"draw_boost={b_new:.2f} margin={m_new:.2f} total_max={tm_new:.2f}")
-    try:
-        _art = json.load(open(model_path(league, ver)))
+    _art = load_artifact_any(league, ver)
+    if isinstance(_art, dict):
         if _art.get("trials", 0) != trial_ids[-1]:
             _art["trials"] = trial_ids[-1]
         _art["T"] = best_T
@@ -3105,8 +3124,8 @@ def main():
         _art["draw_total_max"] = tm_new
         _art["pattern_stats"] = pstats
         save_artifact(league, ver, _art)
-    except (OSError, ValueError):
-        pass
+    else:
+        log("아티팩트 없음: 최종 패턴 저장 생략")
     if args.auto_ensemble:
         run_auto_ensemble()
     log(f"FINAL best acc={best['acc']:.3f} ll={best['ll']:.4f} trial={best['trial']} ver={ver} total={(time.time() - _START) / 60:.1f}m")
