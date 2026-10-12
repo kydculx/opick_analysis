@@ -54,7 +54,6 @@ export async function POST(req: Request) {
         "--ver", ver,
         "--trials", String(trials),
         "--jobs", String(jobs),
-        "--auto-ensemble",
         ...(drawW ? ["--draw-w", String(drawW)] : []),
         ...recArg,
         ...(feats.length !== ALL_FEATURES.length ? ["--features", feats.join(",")] : []),
@@ -65,7 +64,6 @@ export async function POST(req: Request) {
         "--valid", "auto",
         "--ver", ver,
         "--fast",
-        "--auto-ensemble",
         ...recArg,
         ...(feats.length !== ALL_FEATURES.length ? ["--features", feats.join(",")] : []),
       ];
@@ -77,7 +75,7 @@ export async function POST(req: Request) {
     script: "ml/permatch_mode.py",
     argv,
   });
-  return NextResponse.json({ ok: true, jobId: job.id, ver: `${ver}-ens` });
+  return NextResponse.json({ ok: true, jobId: job.id, ver });
 }
 
 export const dynamic = "force-dynamic";
