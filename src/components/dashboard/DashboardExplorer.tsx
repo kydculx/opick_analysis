@@ -442,10 +442,12 @@ export function DashboardExplorer() {
     base: string,
     jobId: string,
     maxRounds = 150,
-    onProgress?: (p: { done: number; total: number } | null, tail?: string[]) => void
-  ): Promise<"done" | "error"> {
+    onProgress?: (p: { done: number; total: number } | null, tail?: string[]) => void,
+    isCancelled?: () => boolean,
+  ): Promise<"done" | "error" | "stopped"> {
     for (let i = 0; i < maxRounds; i++) {
       await new Promise((r) => setTimeout(r, 2000));
+      if (isCancelled?.()) return "stopped";
       try {
         const st = await fetch(`${base}?jobId=${encodeURIComponent(jobId)}`).then((r) => r.json());
         if (st.ok && onProgress) onProgress(st.progress ?? null, st.tail ?? undefined);
@@ -457,6 +459,50 @@ export function DashboardExplorer() {
       }
     }
     return "error";
+  }
+
+  const trainJobRef = useRef<{ base: string; id: string } | null>(null);
+  const trainStopRef = useRef(false);
+
+  async function stopTrain() {
+    const j = trainJobRef.current;
+    trainStopRef.current = true;
+    if (j) {
+      try {
+        await fetch(`${j.base}?jobId=${encodeURIComponent(j.id)}`, { method: "DELETE" });
+      } catch {
+      }
+      trainJobRef.current = null;
+    }
+  }
+
+  async function reloadModels() {
+    genRef.current += 1;
+    const gen = genRef.current;
+    predCacheRef.current = {};
+    accCacheRef.current = {};
+    appliedKeyRef.current = "";
+    setDelSel([]);
+    await fetchModels(league, gen);
+    if (!league || !selVerRef.current) return;
+    try {
+      const lg = leagueRef.current;
+      const ver = selVerRef.current;
+      const j = await fetch(`/api/models?league=${encodeURIComponent(lg)}&ver=${encodeURIComponent(ver)}`, { cache: "no-store" }).then((r) => r.json());
+      if (gen !== genRef.current) return;
+      if (j.ok && j.detail) {
+        setModelDetail({ model_type: j.model_type, detail: j.detail });
+        const ws = j.detail?.weights;
+        if (Array.isArray(ws)) {
+          setWOrder(ws.map((_: number, i: number) => i).sort((a: number, b: number) => Math.abs((ws as number[])[b]) - Math.abs((ws as number[])[a])));
+          tweakedRef.current = null;
+          setTweaked(null);
+          previewWith(ws as number[], typeof j.detail?.hfa === "number" ? j.detail.hfa : 0);
+        }
+        loadAccuracy(lg, ver, checkedRef.current);
+      }
+    } catch {
+    }
   }
 
   async function fetchModels(lg: string, gen?: number) {
@@ -509,6 +555,8 @@ export function DashboardExplorer() {
         return;
       }
       let lastTail: string[] = [];
+      trainStopRef.current = false;
+      trainJobRef.current = { base: "/api/cumulative", id: res.jobId as string };
       const done = await pollJob(
         "/api/cumulative",
         res.jobId as string,
@@ -516,8 +564,15 @@ export function DashboardExplorer() {
         (p, tail) => {
           setTrainProg(p ? { ...p, line: tail?.[tail.length - 1] } : null);
           if (tail) lastTail = tail;
-        }
+        },
+        () => trainStopRef.current,
       );
+      trainJobRef.current = null;
+      if (done === "stopped") {
+        setTrainState("idle");
+        setTrainProg(null);
+        return;
+      }
       setTrainState(done);
       if (done === "done") {
         const summary = lastTail.filter((l) => /walk acc=|static base acc=/.test(l)).slice(-2);
@@ -563,12 +618,21 @@ export function DashboardExplorer() {
         setTrainState("error");
         return;
       }
+      trainStopRef.current = false;
+      trainJobRef.current = { base: "/api/match-train", id: res.jobId as string };
       const done = await pollJob(
         "/api/match-train",
         res.jobId as string,
         fullTrain ? 1800 : 150,
-        (p, tail) => setTrainProg(p ? { ...p, line: tail?.[tail.length - 1] } : null)
+        (p, tail) => setTrainProg(p ? { ...p, line: tail?.[tail.length - 1] } : null),
+        () => trainStopRef.current,
       );
+      trainJobRef.current = null;
+      if (done === "stopped") {
+        setTrainState("idle");
+        setTrainProg(null);
+        return;
+      }
       setTrainState(done);
       if (done === "done") {
         await fetchModels(league);
@@ -1575,7 +1639,7 @@ export function DashboardExplorer() {
                         {m.ver}
                       </option>
                     ))}
-                </select>
+          </select>
               </label>
               <label className="flex items-center gap-1 text-xs text-zinc-500">
                 lr
@@ -1731,6 +1795,14 @@ export function DashboardExplorer() {
                   ? "실패 · 다시 시도"
                   : `학습하기${trainingOrdered.length > 0 ? ` (${trainingOrdered.length})` : ""}`}
           </Button>
+          {trainState === "running" && (
+            <button
+              onClick={stopTrain}
+              className="mt-1.5 w-full rounded-lg bg-red-500 px-2 py-1 text-xs text-white hover:brightness-110 dark:bg-red-400 dark:text-black"
+            >
+              중지 (프로세스 종료)
+            </button>
+          )}
           {trainState === "running" && trainProg?.line && (
             <p className="mt-1 truncate px-0.5 font-mono text-[10px] text-zinc-400" title={trainProg.line}>
               {trainProg.line.length > 90 ? trainProg.line.slice(-90) : trainProg.line}
@@ -1764,7 +1836,6 @@ export function DashboardExplorer() {
               models.map((m) => {
                 const labelParts = [
                   m.ver.replace("_", " "),
-                  m.train_seasons.join(","),
                   m.metrics?.valid_acc != null ? `acc ${m.metrics.valid_acc.toFixed(3)}` : "",
                 ].filter((p) => p !== "");
                 return (
@@ -1775,6 +1846,12 @@ export function DashboardExplorer() {
               })
             )}
           </select>
+          <button
+            onClick={reloadModels}
+            className="mt-1.5 w-full rounded-lg border border-zinc-300 px-2 py-1 text-[11px] text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"
+          >
+            ⟳ 모델 새로고침
+          </button>
           {models.length > 0 && (
             <details className="mt-2 rounded-xl border border-zinc-200 dark:border-zinc-800">
               <summary className="cursor-pointer px-2.5 py-1.5 text-xs font-medium text-zinc-500">
