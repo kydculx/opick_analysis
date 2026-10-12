@@ -47,10 +47,19 @@ ver_hash() {
 }
 
 make_ver() {
+  # 웹(match-train) 규칙과 동일: tr{시즌수}-f{피처수}-d{무가중}-x{해시4}[-r{최근가중}]-{시각}
   _n=$(printf '%s' "$1" | awk -F',' '{print NF}')
   _m=$(printf '%s' "$2" | awk -F',' '{print NF}')
-  _h=$(ver_hash "$1|$2")
-  printf 'tr%s-f%s-x%s' "$_n" "$_m" "$_h"
+  _dw="${DRAW_W:-0}"
+  _rw="${RECENCY_W:-0}"
+  _dw=$(printf '%s' "$_dw" | sed 's/^$/0/')
+  _rw=$(printf '%s' "$_rw" | sed 's/^$/0/')
+  _key="$1|$2|$_dw|r$_rw"
+  _h=$(ver_hash "$_key")
+  _tag=$(printf '%s' "$_dw" | tr '.' '_')
+  _v=$(printf 'tr%s-f%s-d%s-x%s' "$_n" "$_m" "$_tag" "$_h")
+  if [ "$_rw" != "0" ]; then _v="$_v-r$(printf '%s' "$_rw" | tr '.' '_')"; fi
+  printf '%s-%s' "$_v" "$(date '+%y-%m-%d_%H-%M')"
 }
 
 league_ko() {
@@ -128,6 +137,12 @@ run_permatch() {
     *) FEATS="$ALL_FEATS" ;;
   esac
   [ -z "$FEATS" ] && FEATS="$ALL_FEATS"
+  case "$extra" in
+    *--draw-w*) DRAW_W=$(printf '%s' "$extra" | sed -n 's/.*--draw-w[ =]\([^ ]*\).*/\1/p') ;;
+  esac
+  case "$extra" in
+    *--recency-w*) RECENCY_W=$(printf '%s' "$extra" | sed -n 's/.*--recency-w[ =]\([^ ]*\).*/\1/p') ;;
+  esac
   VER=$(make_ver "$TRAIN" "$FEATS")
   case "$extra" in
     *--features*) echo "→ permatch autotune: [$(league_short "$league")] train=[$TRAIN] valid=[미학습전체] ver=$VER feats=[$FEATS] trials=$trials" ;;

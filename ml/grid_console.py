@@ -316,8 +316,7 @@ def build_command(o):
     else:
         cmd += ["--train", o["train"], "--valid", o["valid"] or "auto",
                 "--trials", o.get("trials") or "10000",
-                "--jobs", o.get("jobs") or "1",
-                "--auto-ensemble"]
+                "--jobs", o.get("jobs") or "1"]
         if o.get("draw_w"):
             cmd += ["--draw-w", o["draw_w"]]
         if o.get("recency_w"):
