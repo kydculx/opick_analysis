@@ -279,7 +279,7 @@ def row_features(m: dict) -> list:
     ti = (m.get("team_info") or {}).get("avg_stats") or {}
     th, ta = ti.get("home") or {}, ti.get("away") or {}
     ph, _, pa = implied_probs(same_odds_wdl(m.get("same_odds"))) or (math.nan, math.nan, math.nan)
-    market = (ph - pa) if not (isinstance(ph, float) and math.isnan(ph)) else 0.0
+    market = (ph - pa) if not (isinstance(ph, float) and math.isnan(ph)) else float("nan")
     x = [
         fnum(m.get("home_rank")) - fnum(m.get("away_rank")),
         fnum(sh.get("power")) - fnum(sa.get("power")),
@@ -557,6 +557,123 @@ def tune_pattern_alpha(Xe_va, yva, w, hfa, d, pats, tau, taus, T=1.0, dw=None, d
     return best_a
 
 
+def apply_draw_boost(p, total, mkt, boost: float, margin: float, total_max: float):
+    try:
+        b = float(boost)
+    except (TypeError, ValueError):
+        return p
+    if not (b > 0) or not math.isfinite(b):
+        return list(p)
+    try:
+        m = float(margin)
+    except (TypeError, ValueError):
+        m = 0.12
+    try:
+        tm = float(total_max)
+    except (TypeError, ValueError):
+        tm = 2.55
+    q = [float(v) for v in p]
+    s = sorted(q, reverse=True)
+    gap = s[0] - s[1] if len(s) > 1 else 1.0
+    try:
+        tot = float(total)
+    except (TypeError, ValueError):
+        tot = 99.0
+    if not (math.isfinite(tot) and tot <= tm):
+        return q
+    if not (gap <= m):
+        return q
+    q[1] = min(0.99, q[1] + b)
+    s2 = sum(q)
+    if s2 <= 0:
+        return list(p)
+    return [v / s2 for v in q]
+
+
+def tune_draw_boost(Xe_va, yva, w, hfa, d, pats, tau, taus, alpha, T=1.0, dw=None,
+                    db: float = 0.0, Xde_va=None, cap=None, draw_raw_va=None):
+    import numpy as _np
+    if not len(Xe_va) or not len(yva):
+        return 0.0, 0.12, 2.55
+    Vn = _np.asarray(Xe_va, dtype=float)
+    yn = _np.asarray(yva, dtype=int)
+    Dn = _np.asarray(Xde_va, dtype=float) if Xde_va is not None else None
+    totals, mkts = [], []
+    for xd in (draw_raw_va or []):
+        try:
+            totals.append(float(xd[2]))
+        except (TypeError, ValueError, IndexError):
+            totals.append(99.0)
+        try:
+            mk = float(xd[3])
+            mkts.append(mk if math.isfinite(mk) else 0.0)
+        except (TypeError, ValueError, IndexError):
+            mkts.append(0.0)
+    if len(totals) != len(Vn):
+        totals = [99.0] * len(Vn)
+        mkts = [0.0] * len(Vn)
+
+    def _ev_at(b, m, tm):
+        Plin = batch_proba(Vn, w, hfa, d, 1.0, None, dw, db, Dn, cap)
+        out = []
+        for i in range(len(Vn)):
+            pp = pattern_proba(list(Vn[i]), pats, tau, w, taus) if pats and tau else None
+            lin = list(Plin[i])
+            base = [alpha * q + (1.0 - alpha) * c for q, c in zip(pp, lin)] if pp is not None else lin
+            out.append(apply_draw_boost(base, totals[i], mkts[i], b, m, tm))
+        P = _np.asarray(out, dtype=float)
+        if T != 1.0:
+            L = _np.log(_np.maximum(P, 1e-9)) / T
+            L = L - L.max(axis=1, keepdims=True)
+            E = _np.exp(L)
+            P = E / E.sum(axis=1, keepdims=True)
+        home, dr, away = P[:, 0], P[:, 1], P[:, 2]
+        pick = _np.where((home >= dr) & (home >= away), 0, _np.where(dr >= away, 1, 2))
+        acc = float((pick == yn).mean())
+        nll = float((-_np.log(_np.maximum(P[_np.arange(len(yn)), yn], 1e-12))).mean())
+        return acc, nll
+
+    best = (0.0, 0.12, 2.55)
+    best_key = None
+    for b in (0.0, 0.01, 0.02, 0.03):
+        for m in (0.08, 0.12):
+            for tm in (2.3, 2.55):
+                acc, ll = _ev_at(b, m, tm)
+                key = (acc, -ll)
+                if best_key is None or key > best_key:
+                    best_key, best = key, (b, m, tm)
+    return best
+
+
+def served_proba(xe, xde_std, w, hfa, d, dw, db, cap, pats, tau, alpha, taus, T,
+                 boost, margin, total_max, total_raw, mkt_raw):
+    lin = full_proba(xe, w, hfa, d, dw, db, xde_std, cap)
+    p = apply_temp(blend_proba(lin, xe, pats, tau, alpha, w, taus), T)
+    return apply_draw_boost(p, total_raw, mkt_raw, boost, margin, total_max)
+
+
+def _boost_params_from_art(art: dict):
+    try:
+        b = float(art.get("draw_boost", 0.0))
+    except (TypeError, ValueError):
+        b = 0.0
+    try:
+        m = float(art.get("draw_close_margin", 0.12))
+    except (TypeError, ValueError):
+        m = 0.12
+    try:
+        tm = float(art.get("draw_total_max", 2.55))
+    except (TypeError, ValueError):
+        tm = 2.55
+    if not (math.isfinite(b) and b >= 0):
+        b = 0.0
+    if not (math.isfinite(m) and m > 0):
+        m = 0.12
+    if not (math.isfinite(tm) and tm > 0):
+        tm = 2.55
+    return b, m, tm
+
+
 def draw_row_features(m: dict) -> list:
     ti = (m.get("team_info") or {}).get("avg_stats") or {}
     th, ta = ti.get("home") or {}, ti.get("away") or {}
@@ -586,22 +703,47 @@ def draw_row_features(m: dict) -> list:
             co5 += fnum(_q.get("conceded"))
     pg = abs(fnum(th.get("possession")) - fnum(ta.get("possession")))
     return [pd, rg, xg_h + xg_a,
-            pd_mkt if not (isinstance(pd_mkt, float) and math.isnan(pd_mkt)) else 0.0,
+            pd_mkt if not (isinstance(pd_mkt, float) and math.isnan(pd_mkt)) else float("nan"),
             float(hd5), float(ad5), float(hd), abs(xg_h - xg_a),
             sc5, pg, co5]
 
 
 def standardize(Xtr):
-    mu = [sum(c) / len(c) for c in zip(*Xtr)]
+    mu = []
+    for c in zip(*Xtr):
+        vals = [v for v in c if not (isinstance(v, float) and math.isnan(v))]
+        mu.append(sum(vals) / len(vals) if vals else 0.0)
     sd = []
     for j in range(len(mu)):
-        v = sum((r[j] - mu[j]) ** 2 for r in Xtr) / len(Xtr)
+        vals = [r[j] for r in Xtr if not (isinstance(r[j], float) and math.isnan(r[j]))]
+        v = sum((a - mu[j]) ** 2 for a in vals) / len(vals) if vals else 0.0
         sd.append(math.sqrt(v) if v > 1e-9 else 1.0)
     return mu, sd
 
 
 def apply_std(x, mu, sd):
-    return [(a - b) / s for a, b, s in zip(x, mu, sd)]
+    out = []
+    for a, b, s in zip(x, mu, sd):
+        if isinstance(a, float) and math.isnan(a):
+            out.append(0.0)
+        else:
+            out.append((a - b) / s)
+    return out
+
+
+def std_vec_row(x, mu, sd):
+    out = []
+    for a, b, s in zip(x, mu, sd):
+        try:
+            v = (a - b) / s
+        except (TypeError, ZeroDivisionError):
+            out.append(0.0)
+            continue
+        if isinstance(v, float) and math.isnan(v):
+            out.append(0.0)
+        else:
+            out.append(v)
+    return out
 
 
 def apply_temp(probs, T: float):
@@ -773,13 +915,13 @@ def tune_weights(league: str, ver: str, tune_s: set, max_sweeps: int = 6,
     import numpy as _np
     Xn = _np.asarray(feats, dtype=float)
     yn = _np.asarray(labels, dtype=int)
-    sw = _recency_weights(ssn, recency_w)
-    if sw is not None:
+    sample_w = _recency_weights(ssn, recency_w)
+    if sample_w is not None:
         log(f"최신가중 적용 (strength={recency_w})")
 
     def key_of(wv, hv):
-        a, r = batch_accrec(Xn, yn, wv, hv, d, sw=sw)
-        return (_sel_bonus(a, r, draw_w), -batch_ll(Xn, yn, wv, hv, d, sw=sw), a)
+        a, r = batch_accrec(Xn, yn, wv, hv, d, sw=sample_w)
+        return (_sel_bonus(a, r, draw_w), -batch_ll(Xn, yn, wv, hv, d, sw=sample_w), a)
 
     def season_acc(wv, hv):
         out = {}
@@ -895,7 +1037,7 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
         labels.append(0 if hs > aws else (1 if hs == aws else 2))
         ssn.append(str(r.get("season")))
         if use_draw:
-            xds.append([(a - b) / s for a, b, s in zip(draw_row_features(r), mu_d, sd_d)])
+            xds.append(std_vec_row(draw_row_features(r), mu_d, sd_d))
     if not feats:
         log("조절용 데이터 없음")
         return False
@@ -1225,7 +1367,7 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
         labels.append(0 if hs > aws else (1 if hs == aws else 2))
         ssn.append(str(r.get("season")))
         if use_draw:
-            xds.append([(a - b) / s for a, b, s in zip(draw_row_features(r), mu_d, sd_d)])
+            xds.append(std_vec_row(draw_row_features(r), mu_d, sd_d))
     if not feats:
         log("조절용 데이터 없음")
         return False
@@ -1723,8 +1865,8 @@ def save_artifact(league: str, ver: str, artifact: dict):
 # ---------------------------------------------------------------- single-train (--fast)
 def fit_draw(Xm_tr, ty, Xm_va, vy, Xd_tr, Xd_va, w, hfa, d, e, steps=(0.05, 0.2, 0.5)):
     mu_d, sd_d = standardize(Xd_tr if Xd_tr else [[0.0] * len(DRAW_FEATURES)])
-    Dn = [[(a - b) / s for a, b, s in zip(x, mu_d, sd_d)] for x in Xd_tr]
-    Dv = [[(a - b) / s for a, b, s in zip(x, mu_d, sd_d)] for x in (Xd_va or [])]
+    Dn = [std_vec_row(x, mu_d, sd_d) for x in Xd_tr]
+    Dv = [std_vec_row(x, mu_d, sd_d) for x in (Xd_va or [])]
     Xe = [apply_emphasis(x, e) for x in Xm_tr]
     Ve = [apply_emphasis(x, e) for x in Xm_va] if len(Xm_va) else []
     base_tr = []
@@ -1860,9 +2002,9 @@ def fit_linear(train_X, train_y, draw_prior: float, valid_X=None, valid_y=None,
     if draw_tr:
         dw, db, mu_d, sd_d = fit_draw(Xn, train_y, Vn, valid_y, draw_tr, draw_va,
                                       w, hfa, draw_prior, e)
-        Dn = np.asarray([[(a - b) / s for a, b, s in zip(x, mu_d, sd_d)] for x in draw_tr],
+        Dn = np.asarray([std_vec_row(x, mu_d, sd_d) for x in draw_tr],
                         dtype=float)
-        Dv = np.asarray([[(a - b) / s for a, b, s in zip(x, mu_d, sd_d)] for x in (draw_va or [])],
+        Dv = np.asarray([std_vec_row(x, mu_d, sd_d) for x in (draw_va or [])],
                         dtype=float).reshape(-1, len(DRAW_FEATURES))
     else:
         dw, db = None, 0.0
@@ -1932,7 +2074,7 @@ def drawfit(league: str, ver: str, extra_s: set, use_cache: bool = True):
     dw, db, mu_d, sd_d = fit_draw(Xm_tr, ty, Xm_va, vy, Xd_tr, Xd_va, w, hfa, d, e)
     Vn = _np.asarray([apply_emphasis(x, e) for x in Xm_va], dtype=float)
     vy_n = _np.asarray(vy, dtype=int)
-    Dv = _np.asarray([[(a - b) / s for a, b, s in zip(x, mu_d, sd_d)] for x in Xd_va],
+    Dv = _np.asarray([std_vec_row(x, mu_d, sd_d) for x in Xd_va],
                      dtype=float).reshape(-1, len(DRAW_FEATURES))
     keep, new_acc, new_ll, old_acc, old_ll = draw_accept(w, hfa, e, dw, db, Dv, Vn, vy_n, d)
     log(f"drawvec={[round(v, 2) for v in dw]} bias={db:.2f}")
@@ -1940,19 +2082,22 @@ def drawfit(league: str, ver: str, extra_s: set, use_cache: bool = True):
         log(f"drawfit 개선 없음, 유지 (ll {old_ll:.4f} vs {new_ll:.4f}, acc {old_acc:.3f} vs {new_acc:.3f})")
         return False
     _tau_df, _taus_df, _w_df, _alpha_df = _pat_params_from_art(art)
+    _b_df, _m_df, _tm_df = _boost_params_from_art(art)
     pats, tau, taus, palpha = art.get("patterns"), _tau_df, _taus_df, _alpha_df
     cap = art.get("contrib_cap")
     Xe_key = [apply_emphasis(x, e) for x in Xm_va]
     Xd_key = None
     if mu_d and sd_d:
-        Xd_key = [[(a - b) / s for a, b, s in zip(x, mu_d, sd_d)] for x in Xd_va]
+        Xd_key = [std_vec_row(x, mu_d, sd_d) for x in Xd_va]
 
     def served_metrics(Tc):
         n = hit = tot = 0.0
         for i, x in enumerate(Xe_key):
             xd = Xd_key[i] if Xd_key is not None else None
-            p = apply_temp(blend_proba(full_proba(x, w, hfa, d, dw, db, xd, cap),
-                                       x, pats, tau, palpha, w, taus), Tc)
+            raw = Xd_va[i] if i < len(Xd_va) else []
+            p = served_proba(x, xd, w, hfa, d, dw, db, cap, pats, tau, palpha, w, Tc,
+                             _b_df, _m_df, _tm_df,
+                             raw[2] if len(raw) > 2 else 99.0, raw[3] if len(raw) > 3 else 0.0)
             y = vy[i]
             n += 1
             hit += (p.index(max(p)) == y)
@@ -2034,8 +2179,8 @@ def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", d
     Xe_tr = [apply_emphasis(apply_std(x, mu, sd), e) for x in vX]
     Xe_va = [apply_emphasis(apply_std(x, mu, sd), e) for x in vvX]
     if mu_d and sd_d:
-        Xde_tr = [[(a - b) / s for a, b, s in zip(x, mu_d, sd_d)] for x in d_tr]
-        Xde_va = [[(a - b) / s for a, b, s in zip(x, mu_d, sd_d)] for x in d_va]
+        Xde_tr = [std_vec_row(x, mu_d, sd_d) for x in d_tr]
+        Xde_va = [std_vec_row(x, mu_d, sd_d) for x in d_va]
     else:
         Xde_tr = Xde_va = None
     contrib_cap, T = tune_contrib(Xe_tr, vy, Xe_va, vvy, w, hfa, draw_prior, dw, db, Xde_tr, Xde_va)
@@ -2045,7 +2190,7 @@ def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", d
         return apply_emphasis(apply_std(x, mu, sd), e)
 
     def _evd(xd):
-        return [(a - b) / s for a, b, s in zip(xd, mu_d, sd_d)] if mu_d and sd_d else xd
+        return std_vec_row(xd, mu_d, sd_d) if mu_d and sd_d else xd
     patterns, pattern_tau, pattern_stats, pattern_taus = build_patterns(
         [x for x, s, y in zip(feats, splits, labels) if s == "train" and y is not None],
         [y for s, y in zip(splits, labels) if s == "train" and y is not None],
@@ -2058,9 +2203,17 @@ def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", d
                                        pattern_tau, pattern_taus, T, dw, db, Xde_va,
                                        contrib_cap, sw_va)
     log(f"pattern_alpha={pattern_alpha:.1f}")
+    draw_boost, draw_close_margin, draw_total_max = tune_draw_boost(
+        Xe_va, vvy, w, hfa, draw_prior, patterns, pattern_tau, pattern_taus,
+        pattern_alpha, T, dw, db, Xde_va, contrib_cap, d_va)
+    log(f"draw_boost={draw_boost:.2f} margin={draw_close_margin:.2f} total_max={draw_total_max:.2f}")
     metrics = {}
     for split in ("train", "valid", "test"):
-        rows = [{"probs": apply_temp(blend_proba(full_proba(_ev(x), w, hfa, draw_prior, dw, db, _evd(xd), contrib_cap), _ev(x), patterns, pattern_tau, pattern_alpha, w, pattern_taus), T), "label": y}
+        rows = [{"probs": served_proba(_ev(x), _evd(xd), w, hfa, draw_prior, dw, db, contrib_cap,
+                                  patterns, pattern_tau, pattern_alpha, pattern_taus, T,
+                                  draw_boost, draw_close_margin, draw_total_max,
+                                  xd[2] if len(xd) > 2 else 99.0, xd[3] if len(xd) > 3 else 0.0),
+                 "label": y}
                 for x, xd, s, y in zip(feats, dfeats, splits, labels) if s == split and y is not None]
         acc, ll = dataset_metrics(rows)
         metrics[split] = {"n": len(rows), "acc": acc, "ll": ll}
@@ -2071,6 +2224,8 @@ def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", d
                 "draw_mu": mu_d, "draw_sd": sd_d, "draw_features": DRAW_FEATURES,
                 "features": FEATURES, "patterns": patterns, "pattern_tau": pattern_tau,
                 "pattern_taus": pattern_taus, "pattern_alpha": pattern_alpha,
+                "draw_boost": draw_boost, "draw_close_margin": draw_close_margin,
+                "draw_total_max": draw_total_max,
                 "pattern_stats": pattern_stats, "contrib_cap": contrib_cap,
                 "recency_w": recency_w,
                 "train_seasons": sorted(train_s), "valid": sorted(valid_s),
@@ -2085,6 +2240,7 @@ def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", d
 def eval_artifact(matches, train_s: set, valid_s: set, artifact: dict):
     mu, sd = artifact["mu"], artifact["sd"]
     tau, taus, _w, alpha = _pat_params_from_art(artifact)
+    boost, margin, total_max = _boost_params_from_art(artifact)
     pats = artifact.get("patterns")
     T = artifact.get("T", 1.0)
     out = {}
@@ -2105,10 +2261,15 @@ def eval_artifact(matches, train_s: set, valid_s: set, artifact: dict):
                 continue
             y = 0 if hs > aws else (1 if hs == aws else 2)
             x = apply_emphasis(apply_std(row_features(r), mu, sd), e)
-            xd = draw_row_features(r)
+            xd_raw = draw_row_features(r)
             if mu_d and sd_d:
-                xd = [(a - b) / s_ for a, b, s_ in zip(xd, mu_d, sd_d)]
-            p = apply_temp(blend_proba(full_proba(x, w, hfa, d, dw, db, xd, cap), x, pats, tau, alpha, w, taus), T)
+                xd = std_vec_row(xd_raw, mu_d, sd_d)
+            else:
+                xd = xd_raw
+            p = served_proba(x, xd, w, hfa, d, dw, db, cap, pats, tau, alpha, w, T,
+                             boost, margin, total_max,
+                             xd_raw[2] if len(xd_raw) > 2 else 99.0,
+                             xd_raw[3] if len(xd_raw) > 3 else 0.0)
             n += 1
             hit += (p.index(max(p)) == y)
             tot += -math.log(max(p[y], 1e-12))
@@ -2650,6 +2811,7 @@ def main():
         mu, sd = art.get("mu"), art.get("sd")
         e = art.get("emphasis", [1.0] * len(art.get("features", [])))
         _tau_p, _taus_p, _w_p, _alpha_p = _pat_params_from_art(art)
+        _b_p, _m_p, _tm_p = _boost_params_from_art(art)
         pats, tau, taus, palpha = art.get("patterns"), _tau_p, _taus_p, _alpha_p
         w, hfa, d = art["weights"], art["hfa"], art["draw_prior"]
         dw = art.get("draw_weights")
@@ -2666,10 +2828,15 @@ def main():
             if mu and sd:
                 x = apply_std(x, mu, sd)
             xe = apply_emphasis(x, e)
-            xd = draw_row_features(r)
+            xd_raw = draw_row_features(r)
             if mu_d and sd_d:
-                xd = [(a - b) / s for a, b, s in zip(xd, mu_d, sd_d)]
-            return apply_temp(blend_proba(full_proba(xe, w, hfa, d, dw, db, xd, cap), xe, pats, tau, palpha, w, taus), T)
+                xd = std_vec_row(xd_raw, mu_d, sd_d)
+            else:
+                xd = xd_raw
+            return served_proba(xe, xd, w, hfa, d, dw, db, cap, pats, tau, palpha, w, T,
+                                _b_p, _m_p, _tm_p,
+                                xd_raw[2] if len(xd_raw) > 2 else 99.0,
+                                xd_raw[3] if len(xd_raw) > 3 else 0.0)
         probas = [_px(r) for r in targets]
         n, hit = len(targets), 0
         for r, p in zip(targets, probas):
@@ -2831,8 +2998,8 @@ def main():
             import numpy as _np
             _Ve = _np.asarray(Ve, dtype=float)
             _vy = _np.asarray(vy, dtype=int)
-            return (batch_acc(_Ve, _vy, w_, hfa_, T_, d, sw=sw_trials),
-                    batch_ll(_Ve, _vy, w_, hfa_, T_, d, sw=sw_trials))
+            return (batch_acc(_Ve, _vy, w_, hfa_, d, T_, sw=sw_trials),
+                    batch_ll(_Ve, _vy, w_, hfa_, d, T_, sw=sw_trials))
         _, ll = metrics_of(w_, hfa_, T_, d, Xe, ty)
         return 0.0, ll
 
@@ -2911,6 +3078,18 @@ def main():
     palpha_new = tune_pattern_alpha(Ve_best, vy, best["weights"], best["hfa"], d, pats, tau,
                                     ptaus, best_T)
     log(f"patterns: home/draw/away x 5, tau={tau:.3f} alpha={palpha_new:.1f}")
+    d_va_raw = []
+    for r in rows:
+        if str(r.get("season")) not in valid_s:
+            continue
+        hs, aws = parse_score(r.get("home_score")), parse_score(r.get("away_score"))
+        if hs is None or aws is None:
+            continue
+        d_va_raw.append(draw_row_features(r))
+    b_new, m_new, tm_new = tune_draw_boost(
+        Ve_best, vy, best["weights"], best["hfa"], d, pats, tau, ptaus,
+        palpha_new, best_T, None, 0.0, None, contrib_cap, d_va_raw)
+    log(f"draw_boost={b_new:.2f} margin={m_new:.2f} total_max={tm_new:.2f}")
     try:
         _art = json.load(open(model_path(league, ver)))
         if _art.get("trials", 0) != trial_ids[-1]:
@@ -2921,6 +3100,9 @@ def main():
         _art["pattern_tau"] = tau
         _art["pattern_taus"] = ptaus
         _art["pattern_alpha"] = palpha_new
+        _art["draw_boost"] = b_new
+        _art["draw_close_margin"] = m_new
+        _art["draw_total_max"] = tm_new
         _art["pattern_stats"] = pstats
         save_artifact(league, ver, _art)
     except (OSError, ValueError):
