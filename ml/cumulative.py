@@ -106,6 +106,7 @@ def main():
         mu_d, sd_d = base.get("draw_mu"), base.get("draw_sd")
         pats, tau, T = base.get("patterns"), base.get("pattern_tau", 0.0) or 0.0, base.get("T", 1.0)
         _taus_c, _alpha_c = base.get("pattern_taus"), base.get("pattern_alpha", 0.5)
+        _b_c, _m_c, _tm_c = base.get("draw_boost", 0.0), base.get("draw_close_margin", 0.12), base.get("draw_total_max", 2.55)
         if not isinstance(_taus_c, dict):
             _taus_c = None
         try:
@@ -126,6 +127,7 @@ def main():
         dw, db, mu_d, sd_d = None, 0.0, None, None
         pats, tau, T, cap = None, 0.0, 1.0, None
         _taus_c, _alpha_c = None, 0.5
+        _b_c, _m_c, _tm_c = 0.0, 0.12, 2.55
         print(f"콜드스타트 w=0 draw_prior={d:.3f}")
     if not (dw and mu_d and sd_d):
         Xdall = [pm.draw_row_features(r) for r in scored]
@@ -165,11 +167,14 @@ def main():
     for n, r in enumerate(scored, 1):
         y = B.parse_label(r)
         x = pm.apply_emphasis(pm.apply_std(pm.row_features(r), mu, sd), e)
-        xd = pm.draw_row_features(r)
+        xd_raw = pm.draw_row_features(r)
+        tot_raw = xd_raw[2] if len(xd_raw) > 2 else 99.0
         if mu_d and sd_d:
-            xd = [(a - b) / s_ for a, b, s_ in zip(xd, mu_d, sd_d)]
+            xd = pm.std_vec_row(xd_raw, mu_d, sd_d)
+        else:
+            xd = xd_raw
         lin = pm.full_proba(x, w, hfa, d, dw, db, xd, cap)
-        p = pm.apply_temp(pm.blend_proba(lin, x, pats, tau, _alpha_c, w, _taus_c), T)
+        p = pm.apply_draw_boost(pm.apply_temp(pm.blend_proba(lin, x, pats, tau, _alpha_c, w, _taus_c), T), tot_raw, 0.0, _b_c, _m_c, _tm_c)
         dd_now = lin[1]
         if draw_t > 0 and dd_now > draw_t and max(p[0], p[2]) < draw_c:
             pick = 1
@@ -198,7 +203,7 @@ def main():
             conf_hit += float(max(p))
         sw, shfa = list(w0), float(hfa0)
         slin = pm.full_proba(x, sw, shfa, d, dw0, db0, xd, cap)
-        sp = pm.apply_temp(pm.blend_proba(slin, x, pats, tau, _alpha_c, w0, _taus_c), T)
+        sp = pm.apply_draw_boost(pm.apply_temp(pm.blend_proba(slin, x, pats, tau, _alpha_c, w0, _taus_c), T), tot_raw, 0.0, _b_c, _m_c, _tm_c)
         stat_hit += (sp.index(max(sp)) == y)
         stat_tot += 1
         s_lin = max(-30.0, min(30.0, sum(a * b for a, b in zip(x, w)) + hfa))
@@ -288,11 +293,14 @@ def main():
             if y is None:
                 continue
             x = pm.apply_emphasis(pm.apply_std(pm.row_features(r), mu, sd), e)
-            xd = pm.draw_row_features(r)
+            xd_raw = pm.draw_row_features(r)
+            tot_raw = xd_raw[2] if len(xd_raw) > 2 else 99.0
             if mu_d and sd_d:
-                xd = [(a - b) / s_ for a, b, s_ in zip(xd, mu_d, sd_d)]
+                xd = pm.std_vec_row(xd_raw, mu_d, sd_d)
+            else:
+                xd = xd_raw
             lin = pm.full_proba(x, w, hfa, d, dw, db, xd, cap)
-            p = pm.apply_temp(pm.blend_proba(lin, x, pats, tau, _alpha_c, w, _taus_c), T)
+            p = pm.apply_draw_boost(pm.apply_temp(pm.blend_proba(lin, x, pats, tau, _alpha_c, w, _taus_c), T), tot_raw, 0.0, _b_c, _m_c, _tm_c)
             if _tt > 0 and lin[1] > _tt and max(p[0], p[2]) < _tc:
                 _pick = 1
             else:

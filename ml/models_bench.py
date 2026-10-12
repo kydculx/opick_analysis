@@ -189,13 +189,21 @@ def feat_matrix(rows):
     return X, y
 
 
+def _impute_nan(X):
+    import numpy as _np
+    Xa = _np.asarray(X, dtype=float)
+    col = _np.nanmean(Xa, axis=0)
+    col = _np.where(_np.isnan(col), 0.0, col)
+    return _np.where(_np.isnan(Xa), col, Xa).tolist()
+
+
 def run_logreg(Xtr, ytr, Xva, yva):
     from sklearn.linear_model import LogisticRegression
     from sklearn.preprocessing import StandardScaler
-    sc = StandardScaler().fit(Xtr)
+    sc = StandardScaler().fit(_impute_nan(Xtr))
     clf = LogisticRegression(max_iter=2000, C=1.0)
-    clf.fit(sc.transform(Xtr), ytr)
-    return clf.predict_proba(sc.transform(Xva)).tolist()
+    clf.fit(sc.transform(_impute_nan(Xtr)), ytr)
+    return clf.predict_proba(sc.transform(_impute_nan(Xva))).tolist()
 
 
 def run_xgb(Xtr, ytr, Xva, yva):

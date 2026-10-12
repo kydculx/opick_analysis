@@ -32,24 +32,29 @@ def legacy_parts(art, rows):
     out = []
     for r in rows:
         x = pm.apply_emphasis(pm.apply_std(pm.row_features(r), mu, sd), e)
-        xd = pm.draw_row_features(r)
+        xd_raw = pm.draw_row_features(r)
         if mu_d and sd_d:
-            xd = [(a - b) / s_ for a, b, s_ in zip(xd, mu_d, sd_d)]
+            xd = pm.std_vec_row(xd_raw, mu_d, sd_d)
+        else:
+            xd = xd_raw
         lin = pm.full_proba(x, w, hfa, d, dw, db, xd, cap)
         s = lin[0] + lin[2]
-        out.append((x, lin[0] / s if s > 1e-12 else 0.5, lin[1]))
+        tot = xd_raw[2] if len(xd_raw) > 2 else 99.0
+        out.append((x, lin[0] / s if s > 1e-12 else 0.5, lin[1], tot))
     return out
 
 
 def legacy_proba_rows(art, rows):
     _tau, _taus, _w, _alpha = pm._pat_params_from_art(art)
+    _b, _m, _tm = pm._boost_params_from_art(art)
     pats, tau, taus, palpha = art.get("patterns"), _tau, _taus, _alpha
     T = art.get("T", 1.0)
     w = art.get("weights")
     out = []
-    for x, ph, dd in legacy_parts(art, rows):
+    for x, ph, dd, tot in legacy_parts(art, rows):
         lin = [ph * (1 - dd), dd, (1 - ph) * (1 - dd)]
-        out.append(pm.apply_temp(pm.blend_proba(lin, x, pats, tau, palpha, w, taus), T))
+        p = pm.apply_temp(pm.blend_proba(lin, x, pats, tau, palpha, w, taus), T)
+        out.append(pm.apply_draw_boost(p, tot, 0.0, _b, _m, _tm))
     return out
 
 
@@ -106,6 +111,7 @@ def main():
     best = None
     table = []
     _tau2, _taus2, _w2, _alpha2 = pm._pat_params_from_art(base)
+    _b2, _m2, _tm2 = pm._boost_params_from_art(base)
     pats, tau, taus, palpha = base.get("patterns"), _tau2, _taus2, _alpha2
     T = base.get("T", 1.0)
     w = base.get("weights")
@@ -114,10 +120,11 @@ def main():
     while al <= 1.0001:
         al = round(al, 2)
         pb = []
-        for (x, ph, ddl), p2 in zip(parts, px):
+        for (x, ph, ddl, tot), p2 in zip(parts, px):
             dd = al * ddl + (1 - al) * p2[1]
             lin = [ph * (1 - dd), dd, (1 - ph) * (1 - dd)]
-            pb.append(pm.apply_temp(pm.blend_proba(lin, x, pats, tau, palpha, w, taus), T))
+            p = pm.apply_temp(pm.blend_proba(lin, x, pats, tau, palpha, w, taus), T)
+            pb.append(pm.apply_draw_boost(p, tot, 0.0, _b2, _m2, _tm2))
         m = B.metrics_of(pb, yva)
         key = (m["acc"] + args.rec_w * m["draw_rec"], -m["ll"])
         table.append((al, m))
