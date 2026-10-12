@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useRef } from "react";
 import type { SoccerMatch, League } from "@/lib/queries";
-import { ALL_FEATURES, applyTemp, blendProbs, cappedDot, dcProba, drawFeatures, legacyParts, logregProba, patternProbs, rowFeatures, selectFeatures, sigmoid } from "@/lib/permatch-math";
+import { ALL_FEATURES, applyDrawBoost, applyTemp, blendProbs, cappedDot, dcProba, drawFeatures, legacyParts, logregProba, patternProbs, rowFeatures, selectFeatures, sigmoid } from "@/lib/permatch-math";
 import { xgbProba, type XgbSlim } from "@/lib/xgb";
 import type { PermatchArtifact } from "@/lib/predict";
 import { SoccerMatchesTable, COLUMNS, CORE_COLUMNS, FIELD_GROUPS, SINGLE_COLUMNS, type ColumnId } from "@/components/data/SoccerMatchesTable";
@@ -94,13 +94,15 @@ function predictLocal(m: SoccerMatch, art: PermatchArtifact, ver: string) {
       const dd = alpha * b.dd + (1 - alpha) * qx[1];
       const lin = [b.ph * (1 - dd), dd, (1 - b.ph) * (1 - dd)];
       const bb = art.base;
-      const p = applyTemp(blendProbs(lin, b.x, bb.patterns, bb.pattern_tau ?? 0, bb.pattern_alpha ?? 0.5, bb.weights ?? null, bb.pattern_taus ?? null), bb.T);
+      const total = drawFeatures(m)[2];
+      const p0 = applyTemp(blendProbs(lin, b.x, bb.patterns, bb.pattern_tau ?? 0, bb.pattern_alpha ?? 0.5, bb.weights ?? null, bb.pattern_taus ?? null), bb.T);
+      const p = applyDrawBoost(p0, total, bb.draw_boost ?? 0, bb.draw_close_margin ?? 0.12, bb.draw_total_max ?? 2.55);
       if (p.some((v) => !Number.isFinite(v))) return null;
       return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertT };
     }
     const e = art.emphasis ?? new Array(art.features?.length ?? art.mu.length).fill(1);
     const rf = selectFeatures(rowFeatures(m), art.features);
-    const x = rf.map((v, i) => (v - art.mu[i]) / art.sd[i]).map((v, i) => v * (e[i] ?? 1));
+    const x = rf.map((v, i) => Number.isNaN(v) ? 0 : (v - art.mu[i]) / art.sd[i]).map((v, i) => v * (e[i] ?? 1));
     let lin: number[];
     if (art.weights && art.hfa != null && art.draw_prior != null) {
       const s = cappedDot(x, art.weights, art.hfa, art.contrib_cap ?? null);
@@ -109,7 +111,7 @@ function predictLocal(m: SoccerMatch, art: PermatchArtifact, ver: string) {
       if (art.draw_weights && art.draw_mu && art.draw_sd) {
         const df = drawFeatures(m);
         const n = Math.min(df.length, art.draw_weights.length, art.draw_mu.length, (art.draw_sd as number[]).length);
-        const xd = (art.draw_mu as number[]).slice(0, n).map((mu, i) => (df[i] - mu) / (art.draw_sd as number[])[i]);
+        const xd = (art.draw_mu as number[]).slice(0, n).map((mu, i) => Number.isNaN(df[i]) ? 0 : (df[i] - mu) / (art.draw_sd as number[])[i]);
         const ds = xd.reduce((a, v, i) => a + v * (art.draw_weights as number[])[i], 0) + (art.draw_bias ?? 0);
         dd = sigmoid(ds);
       } else {
@@ -119,7 +121,9 @@ function predictLocal(m: SoccerMatch, art: PermatchArtifact, ver: string) {
     } else {
       return null;
     }
-    const p = applyTemp(blendProbs(lin, x, art.patterns, art.pattern_tau ?? 0, art.pattern_alpha ?? 0.5, art.weights ?? null, art.pattern_taus ?? null), art.T);
+    const dfTotal = drawFeatures(m)[2];
+    const p0 = applyTemp(blendProbs(lin, x, art.patterns, art.pattern_tau ?? 0, art.pattern_alpha ?? 0.5, art.weights ?? null, art.pattern_taus ?? null), art.T);
+    const p = applyDrawBoost(p0, dfTotal, art.draw_boost ?? 0, art.draw_close_margin ?? 0.12, art.draw_total_max ?? 2.55);
     if (p.some((v) => !Number.isFinite(v))) return null;
     return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertT };
   } catch {
@@ -191,6 +195,9 @@ export function DashboardExplorer() {
       pattern_tau: number | null;
       pattern_taus?: Record<string, number> | null;
       pattern_alpha?: number | null;
+      draw_boost?: number | null;
+      draw_close_margin?: number | null;
+      draw_total_max?: number | null;
       pattern_stats: Record<string, { rank: number; freq: number; acc: number }[]> | null;
       base_ver?: string;
       blend_w?: number;
@@ -697,6 +704,9 @@ export function DashboardExplorer() {
       pattern_tau: d.pattern_tau ?? 0,
       pattern_taus: d.pattern_taus ?? null,
       pattern_alpha: d.pattern_alpha ?? 0.5,
+      draw_boost: d.draw_boost ?? 0,
+      draw_close_margin: d.draw_close_margin ?? 0.12,
+      draw_total_max: d.draw_total_max ?? 2.55,
       contrib_cap: d.contrib_cap ?? null,
     };
     const map: Record<string, PredMapEntry> = {};
@@ -797,11 +807,11 @@ export function DashboardExplorer() {
       const a = parseScoreLocal(m.away_score) as number;
       labels.push(h > a ? 0 : h === a ? 1 : 2);
       const rf = selectFeatures(rowFeatures(m), d.features);
-      Xe.push(rf.map((v, i) => (v - (d.mu as number[])[i]) / (d.sd as number[])[i]).map((v, i) => v * (e[i] ?? 1)));
+      Xe.push(rf.map((v, i) => Number.isNaN(v) ? 0 : (v - (d.mu as number[])[i]) / (d.sd as number[])[i]).map((v, i) => v * (e[i] ?? 1)));
       if (d.draw_weights && d.draw_mu && d.draw_sd) {
         const df = drawFeatures(m);
         const dw = d.draw_weights as number[];
-        const ds = d.draw_mu.map((mu, i) => (df[i] - mu) / (d.draw_sd as number[])[i])
+        const ds = d.draw_mu.map((mu, i) => Number.isNaN(df[i]) ? 0 : (df[i] - mu) / (d.draw_sd as number[])[i])
           .reduce((acc, v, i) => acc + v * dw[i], 0) + (d.draw_bias ?? 0);
         ddArr.push(sigmoid(ds));
       } else {
