@@ -24,6 +24,10 @@ export type PermatchArtifact = {
   draw_boost?: number;
   draw_close_margin?: number;
   draw_total_max?: number;
+  grid_params?: {
+    grid_step?: unknown; jobs?: unknown; batch?: unknown;
+    draw_w?: unknown; recency_w?: unknown; wmin?: unknown; wmax?: unknown;
+  } | null;
   contrib_cap?: number | null;
   base_ver?: string;
   blend_w?: number;
