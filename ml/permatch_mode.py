@@ -1394,6 +1394,10 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
     X32 = _np.ascontiguousarray(Xn, dtype=f32)
     dd32 = _np.ascontiguousarray(ddArr, dtype=f32)
     PP32 = _np.ascontiguousarray(PP, dtype=f32) if PP is not None else None
+    art["grid_params"] = {"grid_step": grid_step, "jobs": jobs, "batch": batch,
+                          "draw_w": draw_w, "recency_w": recency_w,
+                          "wmin": wmin, "wmax": wmax}
+    save_artifact(league, ver, art)
 
     def _acc_batch(Wmat, hvec):
         B = Wmat.shape[0]
@@ -2148,7 +2152,7 @@ def drawfit(league: str, ver: str, extra_s: set, use_cache: bool = True):
 
 
 def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", draw_w: float = 0.0,
-                recency_w: float = 0.0):
+                recency_w: float = 0.0, draw_boost=None, draw_margin=None, draw_total=None):
     feats, splits, labels, rounds, dfeats = [], [], [], [], []
     for r in matches:
         s = str(r["season"])
@@ -2225,9 +2229,19 @@ def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", d
                                        pattern_tau, pattern_taus, T, dw, db, Xde_va,
                                        contrib_cap, sw_va)
     log(f"pattern_alpha={pattern_alpha:.1f}")
-    draw_boost, draw_close_margin, draw_total_max = tune_draw_boost(
-        Xe_va, vvy, w, hfa, draw_prior, patterns, pattern_tau, pattern_taus,
-        pattern_alpha, T, dw, db, Xde_va, contrib_cap, d_va)
+    def _num(v, fb):
+        try:
+            f = float(v)
+            return f if math.isfinite(f) else fb
+        except (TypeError, ValueError):
+            return fb
+    if draw_boost is None and draw_margin is None and draw_total is None:
+        draw_boost, draw_close_margin, draw_total_max = tune_draw_boost(
+            Xe_va, vvy, w, hfa, draw_prior, patterns, pattern_tau, pattern_taus,
+            pattern_alpha, T, dw, db, Xde_va, contrib_cap, d_va)
+    else:
+        draw_boost, draw_close_margin, draw_total_max = (
+            _num(draw_boost, 0.0), _num(draw_margin, 0.12), _num(draw_total, 2.55))
     log(f"draw_boost={draw_boost:.2f} margin={draw_close_margin:.2f} total_max={draw_total_max:.2f}")
     metrics = {}
     for split in ("train", "valid", "test"):
@@ -2648,6 +2662,17 @@ def fit_trial(Xn, ty, Vn, vy, d, mu, sd, cfg):
     nw = nf
     rng = random.Random()
     dw_ = cfg.get("draw_w", 0.0)
+    try:
+        _wmin = float(cfg.get("wmin", -3.0))
+    except (TypeError, ValueError):
+        _wmin = -3.0
+    try:
+        _wmax = float(cfg.get("wmax", 3.0))
+    except (TypeError, ValueError):
+        _wmax = 3.0
+    if not (_wmin < _wmax):
+        _wmin, _wmax = -3.0, 3.0
+    clamp = lambda v: min(_wmax, max(_wmin, round(float(v), 4)))
     inits = []
     for restart in range(cfg["restarts"]):
         rng.seed(1000 + restart)
@@ -2677,8 +2702,8 @@ def fit_trial(Xn, ty, Vn, vy, d, mu, sd, cfg):
         scored.append((key, list(w), hfa))
     scored.sort(key=lambda t: t[0], reverse=True)
     top = scored[:max(cfg["top_k"], 1)]
-    w = [sum(c[j] for _, c, _ in top) / len(top) for j in range(nw)]
-    hfa = sum(c for _, _, c in top) / len(top)
+    w = [clamp(sum(c[j] for _, c, _ in top) / len(top)) for j in range(nw)]
+    hfa = clamp(sum(c for _, _, c in top) / len(top))
 
     e = [1.0] * nw
     if cfg["emphasis"]:
@@ -2756,6 +2781,9 @@ def main():
     ap.add_argument("--features", default="", help="임의 피처 선택, 콤마 구분 (예: rank,power,att). 지정 시 --five보다 우선")
     ap.add_argument("--model", default="legacy", choices=["legacy"], help="모델 구조 (legacy 단일)")
     ap.add_argument("--draw-w", type=float, default=0.0, help="무승부 가중 (선발 리콜가중 + 샘플가중, 0=끄기, 예: 0.5)")
+    ap.add_argument("--draw-boost", type=float, default=None, help="무 부스트 직접 지정 (valid 튜닝 생략, 예: 0.02)")
+    ap.add_argument("--draw-margin", type=float, default=None, help="부스트 접전 조건 직접 지정 (예: 0.12)")
+    ap.add_argument("--draw-total", type=float, default=None, help="부스트 저득점 조건 직접 지정 (예: 2.55)")
     ap.add_argument("--recency-w", type=float, default=0.0, help="최신시즌 가중 (valid/tune 선발만, 0=끄기, 예: 1.0이면 최신시즌 2배)")
     ap.add_argument("--auto-ensemble", action="store_true", help="학습 후 legacy+XGB 앙상블 자동 적합")
     ap.add_argument("--ens-rec-w", type=float, default=0.5, help="앙상블 선발식 무승부 가중")
@@ -2769,6 +2797,8 @@ def main():
     ap.add_argument("--auto-step", type=float, default=0.0, help="auto 랜덤 격자 간격(wmin/wmax 구간 스냅, 0=연속)")
     ap.add_argument("--wmin", type=float, default=-3.0)
     ap.add_argument("--wmax", type=float, default=3.0)
+    ap.add_argument("--auto-range", action="store_true", help="단발 fit 결과 범위로 trials 범위 자동 설정")
+    ap.add_argument("--range-pad", type=float, default=0.5, help="auto-range 여유폭")
     ap.add_argument("--log-every", type=int, default=200, help="auto 랜덤 진행 로그 간격")
     ap.add_argument("--grid-step", type=float, default=0.5, help="grid 모드 축 간격")
     ap.add_argument("--max-combos", type=int, default=0, help="grid 모드 최대 평가 수 (0=끝까지)")
@@ -2933,7 +2963,9 @@ def main():
     # ---- 단발 모드
     if args.fast:
         artifact, metrics = train_model(rows, train_s, valid_s, ver, args.test,
-                                        draw_w=args.draw_w, recency_w=args.recency_w)
+                                        draw_w=args.draw_w, recency_w=args.recency_w,
+                                        draw_boost=args.draw_boost, draw_margin=args.draw_margin,
+                                        draw_total=args.draw_total)
         for split in ("train", "valid", "test"):
             m = metrics.get(split, {})
             if m.get("n"):
@@ -2993,6 +3025,17 @@ def main():
     sw_trials = _recency_weights(vy_ssn, args.recency_w)
     if sw_trials is not None:
         log(f"최신가중 적용 (strength={args.recency_w})")
+    if args.auto_range:
+        _rw0, _rh0, *_ = fit_linear(feats, labels, d)
+        try:
+            _pad = float(args.range_pad)
+        except (TypeError, ValueError):
+            _pad = 0.5
+        if not (_pad >= 0):
+            _pad = 0.5
+        args.wmin = min(min(_rw0), _rh0) - _pad
+        args.wmax = max(max(_rw0), _rh0) + _pad
+        log(f"auto-range: 단발fit 범위 [{min(_rw0):.3f},{max(_rw0):.3f}] → wmin={args.wmin:.3f} wmax={args.wmax:.3f}")
 
     best, old_art = (None, None) if args.new else load_existing_best(league, ver, rows, train_s, valid_s)
     if args.new:
@@ -3029,6 +3072,8 @@ def main():
     for c in cfgs:
         c["no_halving"] = args.no_halving
         c["draw_w"] = args.draw_w
+        c["wmin"] = args.wmin
+        c["wmax"] = args.wmax
     log(f"trials 계산 시작: {len(trial_ids)}건 jobs={args.jobs}")
     results: list = [None] * len(cfgs)
     if args.jobs > 1:
@@ -3105,9 +3150,19 @@ def main():
         if hs is None or aws is None:
             continue
         d_va_raw.append(draw_row_features(r))
-    b_new, m_new, tm_new = tune_draw_boost(
-        Ve_best, vy, best["weights"], best["hfa"], d, pats, tau, ptaus,
-        palpha_new, best_T, None, 0.0, None, contrib_cap, d_va_raw)
+    if args.draw_boost is None and args.draw_margin is None and args.draw_total is None:
+        b_new, m_new, tm_new = tune_draw_boost(
+            Ve_best, vy, best["weights"], best["hfa"], d, pats, tau, ptaus,
+            palpha_new, best_T, None, 0.0, None, contrib_cap, d_va_raw)
+    else:
+        def _num2(v, fb):
+            try:
+                f = float(v)
+                return f if math.isfinite(f) else fb
+            except (TypeError, ValueError):
+                return fb
+        b_new, m_new, tm_new = (_num2(args.draw_boost, 0.0), _num2(args.draw_margin, 0.12),
+                               _num2(args.draw_total, 2.55))
     log(f"draw_boost={b_new:.2f} margin={m_new:.2f} total_max={tm_new:.2f}")
     _art = load_artifact_any(league, ver)
     if isinstance(_art, dict):
