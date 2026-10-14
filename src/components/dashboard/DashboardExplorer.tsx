@@ -142,13 +142,10 @@ export function DashboardExplorer() {
   const [trialsText, setTrialsText] = useState("10000");
   const [jobsText, setJobsText] = useState("4");
   const [recencyWText, setRecencyWText] = useState("0");
+  const [drawBoostText, setDrawBoostText] = useState("");
+  const [drawMarginText, setDrawMarginText] = useState("");
+  const [drawTotalText, setDrawTotalText] = useState("");
   const [trainProg, setTrainProg] = useState<{ done: number; total: number; line?: string } | null>(null);
-  const [cumuLr, setCumuLr] = useState("0.05");
-  const [cumuDecayOn, setCumuDecayOn] = useState(false);
-  const [cumuRollbackOn, setCumuRollbackOn] = useState(false);
-  const [cumuRecencyOn, setCumuRecencyOn] = useState(true);
-  const [cumuBase, setCumuBase] = useState("");
-  const [cumuResult, setCumuResult] = useState<string | null>(null);
   const [matches, setMatches] = useState<SoccerMatch[]>([]);
   const [hiddenCols, setHiddenCols] = useState<ColumnId[]>([]);
   const [loadingLeagues, setLoadingLeagues] = useState(true);
@@ -156,7 +153,6 @@ export function DashboardExplorer() {
   const [loadingMatches, setLoadingMatches] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [trainState, setTrainState] = useState<"idle" | "running" | "done" | "error">("idle");
-  const [learnMode, setLearnMode] = useState<"match" | "cumulative">("match");
   const [rawMatches, setRawMatches] = useState<SoccerMatch[]>([]);
   const [predMap, setPredMap] = useState<Record<string, PredMapEntry>>({});
   const rawCacheRef = useRef<Record<string, SoccerMatch[]>>({});
@@ -169,6 +165,7 @@ export function DashboardExplorer() {
   const [selVer, setSelVer] = useState("");
   const [delSel, setDelSel] = useState<string[]>([]);
   const [accuracy, setAccuracy] = useState<Record<string, { n: number; hit: number; acc: number | null }>>({});
+  const [accLoaded, setAccLoaded] = useState(false);
   type ModelDetail = {
     model_type: string;
     detail: {
@@ -198,6 +195,10 @@ export function DashboardExplorer() {
       draw_boost?: number | null;
       draw_close_margin?: number | null;
       draw_total_max?: number | null;
+      grid_params?: {
+        grid_step?: unknown; jobs?: unknown; batch?: unknown;
+        draw_w?: unknown; recency_w?: unknown; wmin?: unknown; wmax?: unknown;
+      } | null;
       pattern_stats: Record<string, { rank: number; freq: number; acc: number }[]> | null;
       base_ver?: string;
       blend_w?: number;
@@ -224,7 +225,6 @@ export function DashboardExplorer() {
   const [gridLive, setGridLive] = useState<{ weights: number[]; hfa: number; acc: number } | null>(null);
   const [gridStepText, setGridStepText] = useState("0.01");
   const [gridJobsText, setGridJobsText] = useState("4");
-  const [gridBatchText, setGridBatchText] = useState("4096");
   const [gridWminText, setGridWminText] = useState("-3.0");
   const [gridWmaxText, setGridWmaxText] = useState("3.0");
   const [gridDrawWText, setGridDrawWText] = useState("0");
@@ -368,19 +368,30 @@ export function DashboardExplorer() {
     if (hit) {
       setAccuracy(hit);
       baseMapRef.current = hit;
+      setAccLoaded(true);
       return;
     }
+    const gen = genRef.current;
+    setAccLoaded(false);
     const qs = new URLSearchParams({ league: lg, model_ver: ver, seasons: seasonList.join(",") });
     fetch(`/api/accuracy?${qs.toString()}`, { cache: "no-store" })
       .then((r) => r.json())
       .then((j) => {
+        if (gen !== genRef.current) return;
         if (j.ok) {
           accCacheRef.current[ck] = j.data;
           setAccuracy(j.data);
           baseMapRef.current = j.data;
+        } else {
+          setError(j.error ?? "적중률 조회 실패");
         }
+        setAccLoaded(true);
       })
-      .catch(() => setAccuracy({}));
+      .catch(() => {
+        if (gen !== genRef.current) return;
+        setAccuracy({});
+        setAccLoaded(true);
+      });
   }
 
   useEffect(() => {
@@ -522,75 +533,7 @@ export function DashboardExplorer() {
     }
   }
 
-  async function handleCumulative() {
-    if (trainingOrdered.length === 0 || trainState === "running") return;
-    if (featSel.length === 0) {
-      setError("피처를 1개 이상 선택하세요");
-      return;
-    }
-    setTrainState("running");
-    setTrainProg(null);
-    setCumuResult(null);
-    setAppliedVer("");
-    setPredMap({});
-    appliedKeyRef.current = "";
-    try {
-      const res = await fetch("/api/cumulative", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          league,
-          seasons: trainingOrdered,
-          base: cumuBase,
-          lr: cumuLr,
-          ...(featSel.length !== ALL_FEATURES.length ? { features: featSel } : {}),
-          ...(cumuDecayOn ? { lrDecay: 0.0002 } : {}),
-          ...(cumuRollbackOn ? { rollback: true } : {}),
-          ...(!cumuRecencyOn ? { recencyOff: true } : {}),
-        }),
-      }).then((r) => r.json());
-      if (!res.ok) {
-        setTrainState("error");
-        setError(res.error ?? "누적 학습 실패");
-        return;
-      }
-      let lastTail: string[] = [];
-      trainStopRef.current = false;
-      trainJobRef.current = { base: "/api/cumulative", id: res.jobId as string };
-      const done = await pollJob(
-        "/api/cumulative",
-        res.jobId as string,
-        900,
-        (p, tail) => {
-          setTrainProg(p ? { ...p, line: tail?.[tail.length - 1] } : null);
-          if (tail) lastTail = tail;
-        },
-        () => trainStopRef.current,
-      );
-      trainJobRef.current = null;
-      if (done === "stopped") {
-        setTrainState("idle");
-        setTrainProg(null);
-        return;
-      }
-      setTrainState(done);
-      if (done === "done") {
-        const summary = lastTail.filter((l) => /walk acc=|static base acc=/.test(l)).slice(-2);
-        setCumuResult(summary.length > 0 ? summary.join(" / ") : "완료");
-        await fetchModels(league);
-        setSelVer(res.ver as string);
-        setApplyState("idle");
-      }
-    } catch {
-      setTrainState("error");
-    }
-  }
-
   async function handleTrain() {
-    if (learnMode === "cumulative") {
-      await handleCumulative();
-      return;
-    }
     if (trainingOrdered.length === 0 || trainState === "running") return;
     if (featSel.length === 0) {
       setError("피처를 1개 이상 선택하세요");
@@ -701,6 +644,31 @@ export function DashboardExplorer() {
           if (Array.isArray(ws)) {
             setWOrder(ws.map((_, i) => i).sort((a, b) => Math.abs((ws as number[])[b]) - Math.abs((ws as number[])[a])));
           }
+          const gp = j.detail?.grid_params as Record<string, unknown> | null | undefined;
+          if (gp && typeof gp === "object") {
+            const num = (v: unknown, fb: string) => {
+              const n = Number(v);
+              return Number.isFinite(n) ? String(n) : fb;
+            };
+            if (gp.grid_step !== undefined) setGridStepText(num(gp.grid_step, gridStepText));
+            if (gp.jobs !== undefined) setGridJobsText(num(gp.jobs, gridJobsText));
+            if (gp.draw_w !== undefined) setGridDrawWText(num(gp.draw_w, gridDrawWText));
+            if (gp.recency_w !== undefined) setGridRecWText(num(gp.recency_w, gridRecWText));
+            if (gp.wmin !== undefined) setGridWminText(num(gp.wmin, gridWminText));
+            if (gp.wmax !== undefined) setGridWmaxText(num(gp.wmax, gridWmaxText));
+          }
+          const db = j.detail as {
+            draw_boost?: unknown; draw_close_margin?: unknown; draw_total_max?: unknown;
+          } | null | undefined;
+          if (db && typeof db === "object") {
+            const num = (v: unknown, fb: string) => {
+              const n = Number(v);
+              return Number.isFinite(n) ? String(n) : fb;
+            };
+            if (db.draw_boost !== undefined) setDrawBoostText(num(db.draw_boost, drawBoostText));
+            if (db.draw_close_margin !== undefined) setDrawMarginText(num(db.draw_close_margin, drawMarginText));
+            if (db.draw_total_max !== undefined) setDrawTotalText(num(db.draw_total_max, drawTotalText));
+          }
         } else {
           setModelDetail(null);
         }
@@ -751,6 +719,10 @@ export function DashboardExplorer() {
   function previewWith(weights: number[], hfa?: number, full = true): number | null {
     const d = modelDetail?.detail;
     if (!d || !d.mu || !d.sd || rawMatches.length === 0) return null;
+    const numOr = (t: string, fb: number) => {
+      const n = Number(t);
+      return t.trim() !== "" && Number.isFinite(n) ? n : fb;
+    };
     const art: PermatchArtifact = {
       weights,
       hfa: hfa ?? d.hfa ?? 0,
@@ -768,9 +740,9 @@ export function DashboardExplorer() {
       pattern_tau: d.pattern_tau ?? 0,
       pattern_taus: d.pattern_taus ?? null,
       pattern_alpha: d.pattern_alpha ?? 0.5,
-      draw_boost: d.draw_boost ?? 0,
-      draw_close_margin: d.draw_close_margin ?? 0.12,
-      draw_total_max: d.draw_total_max ?? 2.55,
+      draw_boost: numOr(drawBoostText, d.draw_boost ?? 0),
+      draw_close_margin: numOr(drawMarginText, d.draw_close_margin ?? 0.12),
+      draw_total_max: numOr(drawTotalText, d.draw_total_max ?? 2.55),
       contrib_cap: d.contrib_cap ?? null,
     };
     const map: Record<string, PredMapEntry> = {};
@@ -802,6 +774,13 @@ export function DashboardExplorer() {
     setAccuracy(out);
     return ov;
   }
+
+  useEffect(() => {
+    const d = modelDetail?.detail;
+    if (!d || !d.weights || applyState !== "done" || tuningRef.current) return;
+    previewWith(tweakedRef.current ?? d.weights, d.hfa ?? 0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drawBoostText, drawMarginText, drawTotalText]);
 
   function nudgeStep(): number {
     const s = Number.parseFloat(gridStepText);
@@ -1147,11 +1126,6 @@ export function DashboardExplorer() {
       setError("jobs는 1 이상 정수로 입력하세요");
       return;
     }
-    const batch = Math.floor(Number(gridBatchText));
-    if (!Number.isFinite(batch) || batch < 1) {
-      setError("묶음은 1 이상 정수로 입력하세요");
-      return;
-    }
     const wmin = Number(gridWminText);
     const wmax = Number(gridWmaxText);
     if (!Number.isFinite(wmin) || !Number.isFinite(wmax) || !(wmin < wmax)) {
@@ -1195,7 +1169,7 @@ export function DashboardExplorer() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           league, ver: selVer, tune, five, jobs, grid_step: step,
-          batch, wmin, wmax, draw_w: drawW, recency_w: recW,
+          batch: 4096, wmin, wmax, draw_w: drawW, recency_w: recW,
         }),
       }).then((r) => r.json());
       if (!res.ok) {
@@ -1309,7 +1283,7 @@ export function DashboardExplorer() {
   const validSet = validList ? new Set(validList) : null;
   const scopeOf = (m: Record<string, { n: number; hit: number }>) =>
     Object.fromEntries(
-      Object.entries(m).filter(([s]) => (validSet ? validSet.has(s) : !trainSet.has(s)))
+      Object.entries(m).filter(([s]) => !trainSet.has(s))
     );
   const upcomingOf = (m: Record<string, { n: number; hit: number; acc: number | null }>) => {
     if (viewSeasons.length === 0) return [];
@@ -1360,7 +1334,7 @@ export function DashboardExplorer() {
               <span className="text-xs font-medium text-zinc-500">
                 {cumuWalkCount > 0
                   ? `시즌 적중률 (누적 ${cumuWalkCount})`
-                  : `시즌 적중률 (검증 ${validSet ? [...validSet].filter((s) => viewSeasons.includes(s)).length : viewSeasons.filter((s) => !trainSet.has(s)).length}/${viewSeasons.length})`}
+                  : `시즌 적중률 (미학습 ${viewSeasons.filter((s) => !trainSet.has(s)).length}/${viewSeasons.length})`}
               </span>
             </div>
             {(() => {
@@ -1384,7 +1358,7 @@ export function DashboardExplorer() {
               <p className="px-2 py-1 text-sm text-zinc-500">조회할 시즌이 없습니다.</p>
             ) : (
               (() => {
-                const inScope = (s: string) => (validSet ? validSet.has(s) : !trainSet.has(s));
+                const inScope = (s: string) => !trainSet.has(s);
                 const walk = showWalk ? modelDetail?.detail?.cumulative?.walk : undefined;
                 const walkSeasons = walk?.seasons;
                 const chrono = walkSeasons
@@ -1428,7 +1402,13 @@ export function DashboardExplorer() {
                           <span className="text-sm font-medium text-zinc-400">%</span>
                         </div>
                         <div className="mt-0.5 font-mono text-[10px] tabular-nums text-zinc-400">
-                          {totN > 0 ? `${totHit}/${totN} 적중` : "모델 적용 시 표시"}
+                          {totN > 0
+                            ? `${totHit}/${totN} 적중`
+                            : applyState !== "done"
+                              ? "모델 적용 시 표시"
+                              : !accLoaded
+                                ? "계산 중"
+                                : "해당 시즌 확정 경기 없음"}
                         </div>
                       </div>
                     </div>
@@ -1511,8 +1491,8 @@ export function DashboardExplorer() {
                         const minOdds = Number(minOddsText);
                         const cutoff = Number.isFinite(minOdds) && minOdds > 0 ? minOdds : 0;
                         let n = 0, staked = 0, returned = 0;
-                        const bySeason = new Map<string, { n: number; staked: number; returned: number }>();
-                        const inScope = (s: string) => (validSet ? validSet.has(s) : !trainSet.has(s));
+                          const bySeason = new Map<string, { n: number; staked: number; returned: number }>();
+                          const inScope = (s: string) => !trainSet.has(s);
                         for (const m of rawMatches) {
                           const s = String(m.season);
                           if (!checked.includes(s) || !inScope(s)) continue;
@@ -1599,91 +1579,6 @@ export function DashboardExplorer() {
               />
             </label>
           </div>
-            <div className="mt-2 flex gap-4 text-sm" role="radiogroup" aria-label="학습 모드">
-              <label className="flex cursor-pointer items-center gap-1.5">
-              <input
-                type="radio"
-                name="learn-mode"
-                checked={learnMode === "match"}
-                onChange={() => setLearnMode("match")}
-                className="h-3.5 w-3.5 accent-blue-600 dark:accent-blue-400"
-              />
-              <span>경기당</span>
-            </label>
-            <label className="flex cursor-pointer items-center gap-1.5">
-              <input
-                type="radio"
-                name="learn-mode"
-                checked={learnMode === "cumulative"}
-                onChange={() => setLearnMode("cumulative")}
-                className="h-3.5 w-3.5 accent-blue-600 dark:accent-blue-400"
-              />
-              <span>누적</span>
-            </label>
-            </div>
-            {learnMode === "cumulative" && (
-              <div className="mt-2 space-y-1.5">
-              <label className="flex items-center gap-1 text-xs text-zinc-500">
-                베이스
-                <select
-                  value={cumuBase}
-                  onChange={(e) => setCumuBase(e.target.value)}
-                  disabled={trainState === "running"}
-                  className="max-w-40 rounded-lg border border-zinc-300 bg-white px-1 py-0.5 font-mono text-xs text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
-                >
-                  <option value="">처음부터</option>
-                  {models
-                    .filter((m) => m.model_type === "permatch" && m.ver.includes("cumu"))
-                    .map((m) => (
-                      <option key={m.ver} value={m.ver}>
-                        {m.ver}
-                      </option>
-                    ))}
-          </select>
-              </label>
-              <label className="flex items-center gap-1 text-xs text-zinc-500">
-                lr
-                <input
-                  value={cumuLr}
-                  onChange={(e) => setCumuLr(e.target.value.replace(/[^0-9.]/g, ""))}
-                  disabled={trainState === "running"}
-                  inputMode="decimal"
-                  aria-label="학습률"
-                  className="w-14 rounded-lg border border-zinc-300 bg-white px-2 py-0.5 text-right font-mono text-xs text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
-                />
-              </label>
-              <label className="flex cursor-pointer items-center gap-1 text-xs text-zinc-500">
-                <input
-                  type="checkbox"
-                  checked={cumuDecayOn}
-                  onChange={() => setCumuDecayOn((v) => !v)}
-                  disabled={trainState === "running"}
-                  className="h-3.5 w-3.5 accent-blue-600 disabled:opacity-40 dark:accent-blue-400"
-                />
-                <span>lr감쇠</span>
-              </label>
-              <label className="flex cursor-pointer items-center gap-1 text-xs text-zinc-500">
-                <input
-                  type="checkbox"
-                  checked={cumuRollbackOn}
-                  onChange={() => setCumuRollbackOn((v) => !v)}
-                  disabled={trainState === "running"}
-                  className="h-3.5 w-3.5 accent-blue-600 disabled:opacity-40 dark:accent-blue-400"
-                />
-                <span>롤백</span>
-              </label>
-              <label className="flex cursor-pointer items-center gap-1 text-xs text-zinc-500">
-                <input
-                  type="checkbox"
-                  checked={cumuRecencyOn}
-                  onChange={() => setCumuRecencyOn((v) => !v)}
-                  disabled={trainState === "running"}
-                  className="h-3.5 w-3.5 accent-blue-600 disabled:opacity-40 dark:accent-blue-400"
-                />
-                <span>최신가중</span>
-              </label>
-              </div>
-            )}
           <details open className="mt-2 rounded-xl border border-zinc-200 dark:border-zinc-800">
             <summary className="cursor-pointer px-2.5 py-1.5 text-xs font-medium text-zinc-500">
               피처 선택 ({featSel.length}/{ALL_FEATURES.length})
@@ -1714,7 +1609,6 @@ export function DashboardExplorer() {
               </button>
             </div>
           </details>
-          {learnMode === "match" && (
           <details open className="mt-2 rounded-xl border border-zinc-200 dark:border-zinc-800">
             <summary className="cursor-pointer px-2.5 py-1.5 text-xs font-medium text-zinc-500">
               학습 방식 ({fullTrain ? `전체 ${trialsText}회` : "빠른 단발"})
@@ -1770,13 +1664,10 @@ export function DashboardExplorer() {
               )}
             </div>
           </details>
-          )}
           <Button
             size="sm"
             disabled={
-              learnMode === "cumulative"
-                ? trainingOrdered.length === 0 || trainState === "running" || (trainState === "done" && cumuBase !== "")
-                : trainingOrdered.length === 0 || trainState === "running" || trainState === "done"
+              trainingOrdered.length === 0 || trainState === "running" || trainState === "done"
             }
             onClick={handleTrain}
             className={
@@ -1807,9 +1698,6 @@ export function DashboardExplorer() {
             <p className="mt-1 truncate px-0.5 font-mono text-[10px] text-zinc-400" title={trainProg.line}>
               {trainProg.line.length > 90 ? trainProg.line.slice(-90) : trainProg.line}
             </p>
-          )}
-          {learnMode === "cumulative" && cumuResult && trainState !== "running" && (
-            <p className="mt-1 px-0.5 font-mono text-[10px] text-zinc-500">{cumuResult}</p>
           )}
         </div>
 
@@ -1986,11 +1874,13 @@ export function DashboardExplorer() {
                   {[
                     { label: "축간격", value: gridStepText, set: setGridStepText, ph: "0.01" },
                     { label: "jobs", value: gridJobsText, set: setGridJobsText, ph: "4" },
-                    { label: "묶음", value: gridBatchText, set: setGridBatchText, ph: "4096" },
                     { label: "무가중", value: gridDrawWText, set: setGridDrawWText, ph: "0" },
                     { label: "최근가중", value: gridRecWText, set: setGridRecWText, ph: "0" },
                     { label: "wmin", value: gridWminText, set: setGridWminText, ph: "-3.0" },
                     { label: "wmax", value: gridWmaxText, set: setGridWmaxText, ph: "3.0" },
+                    { label: "무부스트", value: drawBoostText, set: setDrawBoostText, ph: "-" },
+                    { label: "접전", value: drawMarginText, set: setDrawMarginText, ph: "-" },
+                    { label: "득점", value: drawTotalText, set: setDrawTotalText, ph: "-" },
                   ].map((f) => (
                     <label key={f.label} className="flex items-center gap-1 text-[11px] text-zinc-500">
                       <span className="shrink-0">{f.label}</span>
