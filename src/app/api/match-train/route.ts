@@ -25,6 +25,7 @@ export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as {
     league?: unknown; seasons?: unknown; features?: unknown;
     mode?: unknown; trials?: unknown; jobs?: unknown; drawW?: unknown; valid?: unknown; recencyW?: unknown;
+    drawBoost?: unknown; drawMargin?: unknown; drawTotal?: unknown;
   };
   const league = typeof body.league === "string" ? body.league : "";
   const seasons = Array.isArray(body.seasons) ? body.seasons.map((s) => String(s)).filter(Boolean) : [];
@@ -39,6 +40,13 @@ export async function POST(req: Request) {
   const jobs = Math.max(1, Math.min(16, Number.parseInt(String(body.jobs ?? "4"), 10) || 4));
   const drawW = Number.parseFloat(String(body.drawW ?? "0")) || 0;
   const recencyW = Number.parseFloat(String(body.recencyW ?? "0")) || 0;
+  const boostArg: string[] = [];
+  const _b = Number(body.drawBoost);
+  const _m = Number(body.drawMargin);
+  const _t = Number(body.drawTotal);
+  if (Number.isFinite(_b)) boostArg.push("--draw-boost", String(_b));
+  if (Number.isFinite(_m)) boostArg.push("--draw-margin", String(_m));
+  if (Number.isFinite(_t)) boostArg.push("--draw-total", String(_t));
   const valid = Array.isArray(body.valid)
     ? body.valid.map((s) => String(s)).filter(Boolean)
     : "auto";
@@ -56,6 +64,7 @@ export async function POST(req: Request) {
         "--jobs", String(jobs),
         ...(drawW ? ["--draw-w", String(drawW)] : []),
         ...recArg,
+        ...boostArg,
         ...(feats.length !== ALL_FEATURES.length ? ["--features", feats.join(",")] : []),
       ]
     : [
@@ -65,6 +74,7 @@ export async function POST(req: Request) {
         "--ver", ver,
         "--fast",
         ...recArg,
+        ...boostArg,
         ...(feats.length !== ALL_FEATURES.length ? ["--features", feats.join(",")] : []),
       ];
   const job = startJob({
