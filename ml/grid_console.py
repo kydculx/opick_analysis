@@ -17,17 +17,17 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 LEAGUES = [
-    ("premier_league", "프리미어리그"),
     ("k_league_1", "K리그 1"),
     ("k_league_2", "K리그 2"),
-    ("j1_league", "J1리그"),
+    ("premier_league", "프리미어리그"),
     ("bundesliga", "분데스리가"),
     ("laliga", "라리가"),
-    ("ligue_1", "리그1(프랑스)"),
+    ("j1_league", "J1리그"),
     ("serie_a", "세리에A"),
+    ("ligue_1", "리그1(프랑스)"),
+    ("a_league", "A리그(호주)"),
     ("eredivisie", "에레디비시"),
     ("mls", "MLS"),
-    ("a_league", "A리그(호주)"),
 ]
 KO2CODE = {ko: code for code, ko in LEAGUES}
 CODE2KO = {code: ko for code, ko in LEAGUES}
@@ -123,7 +123,6 @@ MODES = [
     ("train", "새학습"),
     ("grid", "전수탐색"),
     ("auto", "랜덤탐색"),
-    ("cumu", "누적학습"),
 ]
 MO2CODE = {mo: code for code, mo in MODES}
 CODE2MO = {code: mo for code, mo in MODES}
@@ -327,32 +326,6 @@ def build_command(o):
                     cmd += ["--recency-w", str(o["recency_w"]).strip()]
             except (ValueError, AttributeError):
                 pass
-    elif mode == "cumu":
-        walk = ",".join([s for s in (o.get("train", "") + "," + o.get("valid", "")).split(",") if s.strip()])
-        feats = o.get("features", "")
-        base = o.get("cumu_base", "")
-        if o.get("cumu_ver"):
-            outver = o["cumu_ver"]
-        elif base:
-            outver = base + "-cumu"
-        else:
-            _ft = f"-f{len(feats.split(','))}" if feats else ""
-            outver = f"cumu{_ft}-{now_tag()}"
-        cmd = [py, "ml/cumulative.py", "--league", o["league"],
-               "--ver", outver, "--lr", o.get("cumu_lr") or "0.05"]
-        if base:
-            cmd += ["--base", base]
-        if o.get("cumu_decay"):
-            cmd += ["--lr-decay", o["cumu_decay"]]
-        if o.get("cumu_rb"):
-            cmd.append("--rollback")
-        if o.get("cumu_norec"):
-            cmd.append("--no-recency")
-        if feats:
-            cmd += ["--features", feats]
-        if walk:
-            cmd += ["--seasons", walk]
-        return cmd
     else:
         cmd += ["--train", o["train"], "--valid", o["valid"] or "auto",
                 "--trials", o.get("trials") or "10000",
@@ -363,6 +336,15 @@ def build_command(o):
             try:
                 if float(str(o["recency_w"]).strip() or "0") != 0.0:
                     cmd += ["--recency-w", str(o["recency_w"]).strip()]
+            except (ValueError, AttributeError):
+                pass
+        for _flag, _key in (("--draw-boost", "draw_boost"), ("--draw-margin", "draw_margin"),
+                            ("--draw-total", "draw_total")):
+            try:
+                _v = str(o.get(_key) or "").strip()
+                if _v != "":
+                    float(_v)
+                    cmd += [_flag, _v]
             except (ValueError, AttributeError):
                 pass
     if o.get("features"):
@@ -396,8 +378,8 @@ def main():
     _sw, _sh, _ww, _wh = app.winfo_screenwidth(), app.winfo_screenheight(), 880, 1000
     app.geometry(f"{_ww}x{_wh}+{max(0, (_sw - _ww) // 2)}+{max(0, (_sh - _wh) // 2)}")
 
-    v_league = tk.StringVar(value="premier_league")
-    v_league_ko = tk.StringVar(value=CODE2KO["premier_league"])
+    v_league = tk.StringVar(value="k_league_1")
+    v_league_ko = tk.StringVar(value=CODE2KO["k_league_1"])
     v_mode = tk.StringVar(value="grid")
     v_mode_ko = tk.StringVar(value=CODE2MO["grid"])
     v_tune = tk.StringVar()
@@ -411,6 +393,10 @@ def main():
     v_jobs = tk.StringVar(value="4")
     v_draww = tk.StringVar(value="0")
     v_recw = tk.StringVar(value="0")
+    v_drawboost = tk.StringVar(value="")
+    v_drawmargin = tk.StringVar(value="")
+    v_drawtotal = tk.StringVar(value="")
+    v_drawboost_line = tk.StringVar(value="")
     v_gridstep = tk.StringVar(value="0.5")
     v_maxcombos = tk.StringVar(value="")
     v_maxmin = tk.StringVar(value="")
@@ -419,11 +405,6 @@ def main():
     v_logsecs = tk.StringVar(value="1.0")
     v_wmin = tk.StringVar(value="-3.0")
     v_wmax = tk.StringVar(value="3.0")
-    v_cumulr = tk.StringVar(value="0.05")
-    v_cumubase = tk.StringVar(value="")
-    v_cumudecay = tk.BooleanVar(value=False)
-    v_cumurb = tk.BooleanVar(value=False)
-    v_cumurec = tk.BooleanVar(value=True)
     v_status = tk.StringVar(value="대기 중")
     v_acc = tk.StringVar(value="−")
     v_train_line = tk.StringVar(value="")
@@ -454,8 +435,6 @@ def main():
             if not (cur and tune_exists(lg, cur)):
                 cands = list_versions(lg)
                 v_ver.set(cands[-1] if cands else "")
-        elif v_mode.get() == "cumu":
-            pass
         else:
             v_ver.set(make_ver(",".join(tr), sel, v_draww.get(), now_tag(), v_recw.get()))
         try:
@@ -471,15 +450,13 @@ def main():
             "tune": v_tune.get().strip(), "features": ",".join(sel) if len(sel) != len(FEAT13) else "",
             "new": v_mode.get() == "train",
             "no_cache": v_nocache.get(), "trials": v_trials.get().strip(),
-            "jobs": v_jobs.get().strip(), "draw_w": v_draww.get().strip(), "recency_w": v_recw.get().strip(), "grid_step": v_gridstep.get().strip(),
+            "jobs": v_jobs.get().strip(), "draw_w": v_draww.get().strip(), "recency_w": v_recw.get().strip(),
+            "draw_boost": v_drawboost.get().strip(), "draw_margin": v_drawmargin.get().strip(),
+            "draw_total": v_drawtotal.get().strip(), "grid_step": v_gridstep.get().strip(),
             "max_combos": v_maxcombos.get().strip(), "max_minutes": v_maxmin.get().strip(),
-            "ckpt_every": v_ckpt.get().strip(), "batch": v_batch.get().strip(),
+            "ckpt_every": v_ckpt.get().strip(), "batch": "4096",
             "log_secs": v_logsecs.get().strip(), "wmin": v_wmin.get().strip(),
-            "wmax": v_wmax.get().strip(), "cumu_lr": v_cumulr.get().strip(),
-            "cumu_base": "" if v_cumubase.get().strip() in ("", "(처음부터)") else v_cumubase.get().strip(),
-            "cumu_decay": "0.0002" if v_cumudecay.get() else "",
-            "cumu_rb": bool(v_cumurb.get()),
-            "cumu_norec": not bool(v_cumurec.get()),
+            "wmax": v_wmax.get().strip(),
         }
 
     opt_widgets = []
@@ -553,7 +530,6 @@ def main():
         "grid": "전수탐색: 미학습 전체 기준 · 축간격/범위로 전 조합 탐색 · 종료 후 아래 슬라이더·진행 클릭으로 시점 이동",
         "train": "새학습: 학습수만 입력하면 자동배치(학습=오래된순 N개, 검증=나머지·최신 제외)",
         "auto": "랜덤탐색: 미학습 전체 · 축간격 격자 위 랜덤 점프 · 중지로 종료",
-        "cumu": "누적학습: 버전 선택 없이 콜드스타트 · 오래된 경기부터 1스텝씩 갱신",
     }
 
     detail = ttk.Frame(app, padding=8)
@@ -572,6 +548,7 @@ def main():
     btn_del_ver = _reg(ttk.Button(fr_ver, text="삭제", width=5,
                     command=lambda: on_delete_ver()))
     btn_del_ver.pack(side="left", padx=(6, 0))
+    ttk.Label(fr_ver, textvariable=v_drawboost_line, foreground="gray").pack(side="left", padx=(6, 0))
     ttk.Label(fr_common1, text="학습수").pack(side="left", padx=(8, 2))
     ent_traincount = ttk.Entry(fr_common1, textvariable=v_traincount, width=4)
     _reg(ent_traincount).pack(side="left")
@@ -617,23 +594,6 @@ def main():
         try:
             cb_ver.configure(values=list_versions(v_league.get()))
         except tk.TclError:
-            pass
-        try:
-            lg = v_league.get()
-            legacy = []
-            for _v in list_versions(lg):
-                if "cumu" not in _v:
-                    continue
-                try:
-                    _a = load_tune_strict(lg, _v)
-                except (OSError, ValueError):
-                    continue
-                if isinstance(_a, dict) and isinstance(_a.get("weights"), list):
-                    legacy.append(_v)
-            cb_cumubase.configure(values=["(처음부터)"] + legacy)
-            if v_cumubase.get().strip() not in (["(처음부터)"] + legacy):
-                v_cumubase.set("(처음부터)")
-        except (tk.TclError, NameError):
             pass
 
     def apply_ver_features(*_):
@@ -705,6 +665,52 @@ def main():
                     v_valid.set(",".join(vas))
                 finally:
                     fill_quiet["on"] = False
+            gp = art.get("grid_params")
+            if isinstance(gp, dict):
+                def _gnum(key, var):
+                    try:
+                        v = gp.get(key)
+                        if v is None:
+                            return
+                        var.set("%g" % float(v))
+                    except (ValueError, AttributeError, TypeError, tk.TclError):
+                        pass
+                _gnum("grid_step", v_gridstep)
+                _gnum("jobs", v_jobs)
+                _gnum("batch", v_batch)
+                _gnum("draw_w", v_draww)
+                _gnum("recency_w", v_recw)
+                _gnum("wmin", v_wmin)
+                _gnum("wmax", v_wmax)
+                try:
+                    _db = art.get("draw_boost")
+                    if _db is not None:
+                        v_drawboost.set("%g" % float(_db))
+                except (ValueError, AttributeError, TypeError, tk.TclError):
+                    pass
+                try:
+                    _dm = art.get("draw_close_margin")
+                    if _dm is not None:
+                        v_drawmargin.set("%g" % float(_dm))
+                except (ValueError, AttributeError, TypeError, tk.TclError):
+                    pass
+                try:
+                    _dt = art.get("draw_total_max")
+                    if _dt is not None:
+                        v_drawtotal.set("%g" % float(_dt))
+                except (ValueError, AttributeError, TypeError, tk.TclError):
+                    pass
+                try:
+                    _b = art.get("draw_boost")
+                    _m = art.get("draw_close_margin")
+                    _t = art.get("draw_total_max")
+                    if _b is None and _m is None and _t is None:
+                        v_drawboost_line.set("")
+                    else:
+                        _f = lambda v: "%g" % float(v) if v is not None else "-"
+                        v_drawboost_line.set(f"무부스트 {_f(_b)}/{_f(_m)}/{_f(_t)}")
+                except (ValueError, AttributeError, TypeError, tk.TclError):
+                    pass
         try:
             vals = json.load(open(ckpt_path(league, ver), encoding="utf-8")).get("vals")
         except (OSError, ValueError):
@@ -1059,11 +1065,17 @@ def main():
     ttk.Label(fr_auto1, text="최근가중").pack(side="left", padx=(8, 2))
     _recw_auto = ttk.Entry(fr_auto1, textvariable=v_recw, width=4)
     _reg(_recw_auto).pack(side="left")
+    ttk.Separator(f_auto, orient="horizontal").pack(fill="x", pady=2)
+    fr_auto2 = ttk.Frame(f_auto)
+    fr_auto2.pack(fill="x", pady=2)
+    for _lbl, _var in (("무부스트", v_drawboost), ("접전폭", v_drawmargin), ("총득점", v_drawtotal)):
+        ttk.Label(fr_auto2, text=_lbl).pack(side="left", padx=(8, 2))
+        _reg(ttk.Entry(fr_auto2, textvariable=_var, width=5)).pack(side="left")
 
     f_grid = ttk.Frame(detail)
     fr_grid2 = ttk.Frame(f_grid)
     fr_grid2.pack(fill="x", pady=2)
-    for lbl, var, w in [("jobs", v_jobs, 5), ("축간격", v_gridstep, 5), ("묶음", v_batch, 6),
+    for lbl, var, w in [("jobs", v_jobs, 5), ("축간격", v_gridstep, 5),
                         ("wmin", v_wmin, 5), ("wmax", v_wmax, 5)]:
         ttk.Label(fr_grid2, text=lbl).pack(side="left", padx=(0 if lbl == "jobs" else 8, 2))
         _reg(ttk.Entry(fr_grid2, textvariable=var, width=w)).pack(side="left")
@@ -1074,21 +1086,50 @@ def main():
     ttk.Label(fr_grid2, text="최근가중").pack(side="left", padx=(8, 2))
     _recw_grid = ttk.Entry(fr_grid2, textvariable=v_recw, width=4)
     _reg(_recw_grid).pack(side="left")
+    ttk.Separator(f_grid, orient="horizontal").pack(fill="x", pady=2)
+    fr_grid3 = ttk.Frame(f_grid)
+    fr_grid3.pack(fill="x", pady=2)
+    for _lbl, _var in (("무부스트", v_drawboost), ("접전폭", v_drawmargin), ("총득점", v_drawtotal)):
+        ttk.Label(fr_grid3, text=_lbl).pack(side="left", padx=(8, 2))
+        _reg(ttk.Entry(fr_grid3, textvariable=_var, width=5)).pack(side="left")
+    def _apply_drawboost(*_):
+        lg, ver = v_league.get(), v_ver.get().strip()
+        if not ver:
+            v_status.set("버전을 선택하세요")
+            return
+        art = load_tune(lg, ver)
+        if not isinstance(art, dict):
+            v_status.set(f"아티팩트 없음: {ver}")
+            return
+        try:
+            b = float(v_drawboost.get().strip())
+            m = float(v_drawmargin.get().strip())
+            t = float(v_drawtotal.get().strip())
+        except (ValueError, AttributeError):
+            v_status.set("무부스트/접전폭/총득점 숫자 확인")
+            return
+        if not (b >= 0 and m > 0 and t > 0):
+            v_status.set("무부스트≥0, 접전폭·총득점>0 필요")
+            return
+        art["draw_boost"] = b
+        art["draw_close_margin"] = m
+        art["draw_total_max"] = t
+        try:
+            with open(tune_path(lg, ver), "w", encoding="utf-8") as f:
+                json.dump(art, f)
+        except OSError:
+            pass
+        try:
+            sys.path.insert(0, os.path.join(ROOT, "ml"))
+            import supabase_models as _sm
+            _sm.upsert_model(lg, ver, art)
+        except Exception:
+            pass
+        v_status.set(f"무부스트 적용 {b:g}/{m:g}/{t:g} → {ver}")
+        refresh_wedit()
+    _reg(ttk.Button(fr_grid3, text="부스트적용", width=8, command=_apply_drawboost)).pack(side="left", padx=(8, 0))
 
-    f_cumu = ttk.Frame(detail)
-    fr_cumu = ttk.Frame(f_cumu)
-    fr_cumu.pack(fill="x", pady=2)
-    ttk.Label(fr_cumu, text="베이스").pack(side="left")
-    cb_cumubase = _reg(ttk.Combobox(fr_cumu, textvariable=v_cumubase, state="readonly", width=34,
-                                    values=["(처음부터)"]))
-    cb_cumubase.pack(side="left", padx=(2, 0))
-    ttk.Label(fr_cumu, text="lr").pack(side="left", padx=(8, 2))
-    _reg(ttk.Entry(fr_cumu, textvariable=v_cumulr, width=6)).pack(side="left")
-    _reg(ttk.Checkbutton(fr_cumu, text="lr감쇠", variable=v_cumudecay)).pack(side="left", padx=(8, 0))
-    _reg(ttk.Checkbutton(fr_cumu, text="롤백", variable=v_cumurb)).pack(side="left")
-    _reg(ttk.Checkbutton(fr_cumu, text="최신가중", variable=v_cumurec)).pack(side="left")
-
-    MODE_FRAMES = {"grid": f_grid, "train": f_train, "auto": f_auto, "cumu": f_cumu}
+    MODE_FRAMES = {"grid": f_grid, "train": f_train, "auto": f_auto}
 
     def refresh_detail():
         for m, fr in MODE_FRAMES.items():
@@ -1097,12 +1138,6 @@ def main():
         fr = MODE_FRAMES.get(cur)
         if fr is not None:
             fr.pack(fill="x", pady=2)
-        if cur == "cumu":
-            try:
-                wedit_frame.pack_forget()
-            except (tk.TclError, AttributeError, NameError):
-                pass
-        else:
             try:
                 if runner["obj"] is None:
                     btn_feat.configure(state="normal")
@@ -1118,22 +1153,6 @@ def main():
             ver_label.pack(side="left")
             lbl_acc.pack_forget()
             val_acc.pack_forget()
-            try:
-                scrub_scale.state(["disabled"])
-            except (tk.TclError, AttributeError):
-                pass
-        elif cur == "cumu":
-            cb_ver.pack_forget()
-            btn_del_ver.pack_forget()
-            ver_label.pack_forget()
-            lbl_acc.pack(side="left", padx=(8, 2))
-            val_acc.pack(side="left")
-            if v_ver.get().strip():
-                ver_sync["on"] = True
-                try:
-                    v_ver.set("")
-                finally:
-                    ver_sync["on"] = False
             try:
                 scrub_scale.state(["disabled"])
             except (tk.TclError, AttributeError):
@@ -2201,11 +2220,6 @@ def main():
             btn_stop.configure(state="disabled")
             set_opts_enabled(True)
             try:
-                if v_mode.get() == "cumu":
-                    btn_feat.configure(state="disabled")
-            except (tk.TclError, AttributeError):
-                pass
-            try:
                 os.remove(live_path(v_league.get(), v_ver.get().strip()))
             except OSError:
                 pass
@@ -2217,16 +2231,6 @@ def main():
             try:
                 if v_mode.get() == "train":
                     ev = f"{v_ver.get().strip()}-ens"
-                    if ev and os.path.exists(tune_path(v_league.get(), ev)):
-                        v_ver.set(ev)
-                elif v_mode.get() == "cumu":
-                    ev = None
-                    try:
-                        ev = cumu_out.get("ver")
-                    except NameError:
-                        ev = None
-                    if not ev:
-                        ev = f"{v_ver.get().strip()}-cumu"
                     if ev and os.path.exists(tune_path(v_league.get(), ev)):
                         v_ver.set(ev)
             except tk.TclError:
@@ -2289,10 +2293,10 @@ def main():
             _tb.print_exc()
 
     def on_start():
-        v_league.set(KO2CODE.get(v_league_ko.get(), "premier_league"))
+        v_league.set(KO2CODE.get(v_league_ko.get(), "k_league_1"))
         v_mode.set(MO2CODE.get(v_mode_ko.get(), "grid"))
         # 상세 직접 입력을 보존: 프리셋 재적용 금지, 버전 공백시에만 복원
-        if not v_ver.get().strip() and v_train.get().strip() and v_mode.get() not in ("grid", "auto", "cumu"):
+        if not v_ver.get().strip() and v_train.get().strip() and v_mode.get() not in ("grid", "auto"):
             apply_train_ver()
         o = current_options()
         if not selected_feats():
@@ -2315,25 +2319,6 @@ def main():
             if not isinstance(art0.get("weights"), list):
                 v_status.set(f"legacy 베이스 필요: {o['ver']} (현재 {art0.get('model_type')})")
                 return
-        if o["mode"] == "cumu":
-            _cb = o.get("cumu_base", "")
-            if _cb:
-                try:
-                    art0 = load_tune_strict(o["league"], _cb)
-                except (OSError, ValueError):
-                    art0 = None
-                if not isinstance(art0, dict):
-                    v_status.set(f"아티팩트 없음: {_cb} (버전 확인)")
-                    return
-                if not isinstance(art0.get("weights"), list):
-                    v_status.set(f"legacy 베이스 필요: {_cb} (현재 {art0.get('model_type')})")
-                    return
-                o["cumu_ver"] = _cb + "-cumu"
-            else:
-                _ff = o.get("features", "")
-                _ft = f"-f{len(_ff.split(','))}" if _ff else ""
-                o["cumu_ver"] = f"cumu{_ft}-{now_tag()}"
-            cumu_out["ver"] = o.get("cumu_ver", "") if o["mode"] == "cumu" else ""
         set_opts_enabled(False)
         for _w in list(_dw_widgets):
             try:
@@ -2412,6 +2397,15 @@ def main():
                 gone.append(ext)
             except OSError:
                 pass
+        try:
+            sys.path.insert(0, os.path.join(ROOT, "ml"))
+            import supabase_models as _sm
+            _sb = _sm._client()
+            if _sb is not None:
+                _sb.table("models").delete().eq("league_code", lg).eq("ver", ver).execute()
+                gone.append("db")
+        except Exception:
+            pass
         v_ver.set("")
         refresh_ver_list()
         request_acc()

@@ -20,7 +20,7 @@ export NUMBA_NUM_THREADS
 # 연속 미개선 trial 수 제한 (0=끄기). 새학습 장기 탐색 시 정체 구간 절약용.
 PATIENCE="${PATIENCE:-0}"
 
-leagues="premier_league k_league_1 k_league_2 j1_league bundesliga laliga ligue_1 serie_a eredivisie mls a_league"
+leagues="k_league_1 k_league_2 premier_league bundesliga laliga j1_league serie_a ligue_1 a_league eredivisie mls"
 
 preset_for() {
   case "$1" in
@@ -125,7 +125,7 @@ pick_league() {
     if [ "$i" = "$n" ]; then echo "$l"; return; fi
     i=$((i + 1))
   done
-  echo "premier_league"
+  echo "k_league_1"
 }
 
 run_permatch() {
@@ -215,15 +215,15 @@ menu() {
 if [ $# -eq 0 ]; then menu; exit 0; fi
 cmd="$1"; shift
 case "$cmd" in
-  permatch) league="premier_league"
+  permatch) league="k_league_1"
     case "${1:-}" in ""|-*) : ;; *) league="$1"; shift ;; esac
     league=$(league_alias "$league")
     run_permatch "$league" "$*" ;;
-  permatch-new) league="premier_league"
+  permatch-new) league="k_league_1"
     case "${1:-}" in ""|-*) : ;; *) league="$1"; shift ;; esac
     league=$(league_alias "$league")
     run_permatch "$league" "--new $*" ;;
-  permatch5|p5) league="premier_league"
+  permatch5|p5) league="k_league_1"
     case "${1:-}" in ""|-*) : ;; *) league="$1"; shift ;; esac
     league=$(league_alias "$league")
     run_permatch "$league" "--five $*" ;;
