@@ -26,7 +26,8 @@ def _client():
 
 
 def save_local_enabled() -> bool:
-    return os.environ.get("MODEL_SAVE_LOCAL", "0") != "0"
+    # DB-only 정책: 새학습은 무조건 DB에만 저장, 로컬 파일 쓰지 않음.
+    return False
 
 
 def upsert_model(league: str, ver: str, artifact: dict, log=None) -> bool:

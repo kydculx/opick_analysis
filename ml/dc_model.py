@@ -104,9 +104,16 @@ def main():
         "metrics": {"acc": m["acc"], "ll": m["ll"], "draw_rec": m["draw_rec"]},
         "draw_analysis": draw_rep,
     }
-    os.makedirs(os.path.dirname(out_p), exist_ok=True)
-    json.dump(art, open(out_p, "w", encoding="utf-8"))
-    print(f"saved {out_p}")
+    try:
+        import supabase_models as _sm
+        ok = _sm.upsert_model(args.league, args.ver, art, print)
+    except Exception as e:
+        ok = False
+        print(f"DB 저장 실패 ({type(e).__name__}): {e}")
+    if ok:
+        print(f"saved supabase models/{args.ver}")
+    else:
+        print("DB 저장 실패 → 로컬 저장 안 함 (DB-only 정책)")
 
 
 if __name__ == "__main__":

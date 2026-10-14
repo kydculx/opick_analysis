@@ -771,16 +771,27 @@ def metrics_of(w, hfa, T, d, X, y):
 
 
 # ---------------------------------------------------------------- io
+def _ephemeral_dir() -> str:
+    import tempfile
+    d = os.path.join(tempfile.gettempdir(), "opick_prog")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def _eph(name: str) -> str:
+    return os.path.join(_ephemeral_dir(), name)
+
+
 def model_path(league: str, ver: str) -> str:
     return f"ml/permatch/{league}_{ver}.json"
 
 
 def auto_prog_path(league: str, ver: str) -> str:
-    return f"ml/permatch/{league}_{ver}.auto.json"
+    return _eph(f"{league}_{ver}.auto.json")
 
 
 def live_params_path(league: str, ver: str) -> str:
-    return f"ml/permatch/{league}_{ver}.live.json"
+    return _eph(f"{league}_{ver}.live.json")
 
 
 _live_cache: dict = {}
@@ -806,7 +817,7 @@ def read_live_draw_w(league, ver, cur):
 
 
 def whist_path(league: str, ver: str) -> str:
-    return f"ml/permatch/{league}_{ver}.whist.json"
+    return _eph(f"{league}_{ver}.whist.json")
 
 
 def write_whist(league, ver, xs, W, O, a, nn, NN, tt, names):
@@ -1346,10 +1357,10 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
     db = art.get("draw_bias", 0.0) or 0.0
     mu_d, sd_d = art.get("draw_mu"), art.get("draw_sd")
     use_draw = bool(dw and mu_d and sd_d)
-    ckpt_p = f"ml/permatch/{league}_{ver}.grid.json"
+    ckpt_p = _eph(f"{league}_{ver}.grid.json")
     if split > 1:
         part = max(0, min(part, split - 1))
-        ckpt_p = f"ml/permatch/{league}_{ver}.grid.p{part}.json"
+        ckpt_p = _eph(f"{league}_{ver}.grid.p{part}.json")
     if fresh and os.path.exists(ckpt_p):
         os.remove(ckpt_p)
         log("--new: 체크포인트 삭제, 처음부터 전수탐색")
@@ -1861,16 +1872,14 @@ if _HAVE_NUMBA:
 def save_artifact(league: str, ver: str, artifact: dict):
     try:
         import supabase_models as _sm
-        _sm.upsert_model(league, ver, artifact, log)
-        _local = _sm.save_local_enabled()
-    except Exception:
-        _local = True
-    if not _local:
-        return
-    os.makedirs(os.path.dirname(model_path(league, ver)), exist_ok=True)
-    with open(model_path(league, ver), "w") as f:
-        json.dump(artifact, f)
-    log(f"saved {model_path(league, ver)}")
+        ok = _sm.upsert_model(league, ver, artifact, log)
+    except Exception as e:
+        ok = False
+        log(f"DB 저장 실패 ({type(e).__name__}): {e}")
+    if ok:
+        log(f"saved supabase models/{ver}")
+    else:
+        log(f"DB 저장 실패 → 로컬 저장 안 함 (DB-only 정책): {model_path(league, ver)}")
 
 
 def load_artifact_any(league: str, ver: str):
@@ -2139,7 +2148,7 @@ def drawfit(league: str, ver: str, extra_s: set, use_cache: bool = True):
             best_ll_s, T = ll_s, round(t, 1)
         t += 0.1
     log(f"drawfit 채택 (ll {old_ll:.4f} → {new_ll:.4f}, acc {old_acc:.3f} → {new_acc:.3f}, T {T0} → {T})")
-    with open(p + ".bak", "w") as f:
+    with open(_eph(f"{league}_{ver}.json.bak"), "w") as f:
         json.dump(art, f)
     art["draw_weights"] = dw
     art["draw_bias"] = db

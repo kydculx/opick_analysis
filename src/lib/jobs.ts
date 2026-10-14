@@ -58,6 +58,12 @@ export function startJob(opts: {
   const child = spawn(/*turbopackIgnore: true*/ python, [opts.script ?? "ml/train.py", ...opts.argv], {
     cwd: process.cwd(),
     stdio: ["ignore", logFd, logFd],
+    env: {
+      ...process.env,
+      OMP_NUM_THREADS: "1",
+      MKL_NUM_THREADS: "1",
+      OPENBLAS_NUM_THREADS: "1",
+    },
   });
   if (child.pid !== undefined) {
     job.pid = child.pid;

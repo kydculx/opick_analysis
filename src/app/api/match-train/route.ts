@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { JOB_DIR, isJobId, killJob, readJob, startJob } from "@/lib/jobs";
 import { ALL_FEATURES } from "@/lib/permatch-math";
+import { getSeasons } from "@/lib/queries";
 
 // GUI ml/grid_console.py make_ver와 동일 규칙: tr{시즌수}-f{피처수}-d{무가중}-x{해시4}-{년월일시분}
 function makeVer(trainCsv: string, feats: string[], drawW = "0", ts = "", recencyW = "0"): string {
@@ -21,6 +22,22 @@ function nowTag(d = new Date()): string {
   return `${p(d.getFullYear() % 100)}-${p(d.getMonth() + 1)}-${p(d.getDate())}_${p(d.getHours())}-${p(d.getMinutes())}`;
 }
 
+// GUI ml/grid_console.py split_train_valid 복제.
+// GUI: full=알려진 시즌 오름차순, pool=최신 제외, valid=pool-train.
+// 웹도 같은 입력(train)에 같은 valid가 나오도록 DB 기준으로 계산.
+async function guiValid(league: string, train: string[]): Promise<string> {
+  try {
+    const { data } = await getSeasons(league);
+    const asc = [...new Set(data)].sort();
+    const pool = asc.length > 1 ? asc.slice(0, -1) : asc;
+    const t = new Set(train);
+    const valid = pool.filter((s) => !t.has(s));
+    return valid.length ? valid.join(",") : "auto";
+  } catch {
+    return "auto";
+  }
+}
+
 export async function POST(req: Request) {
   const body = (await req.json().catch(() => ({}))) as {
     league?: unknown; seasons?: unknown; features?: unknown;
@@ -35,7 +52,6 @@ export async function POST(req: Request) {
   if (features.length === 0) {
     return NextResponse.json({ ok: false, error: "피처를 1개 이상 선택하세요" }, { status: 400 });
   }
-  const full = typeof body.mode === "string" && body.mode === "full";
   const trials = Math.max(1, Math.min(200000, Number.parseInt(String(body.trials ?? "10000"), 10) || 10000));
   const jobs = Math.max(1, Math.min(16, Number.parseInt(String(body.jobs ?? "4"), 10) || 4));
   const drawW = Number.parseFloat(String(body.drawW ?? "0")) || 0;
@@ -54,29 +70,21 @@ export async function POST(req: Request) {
   const feats = features.length === ALL_FEATURES.length ? [...ALL_FEATURES] : [...features];
   const ver = makeVer(sorted.join(","), feats, String(drawW), nowTag(), String(recencyW));
   const recArg = recencyW !== 0 ? ["--recency-w", String(recencyW)] : [];
-  const argv = full
-    ? [
-        "--league", league,
-        "--train", sorted.join(","),
-        "--valid", Array.isArray(valid) ? valid.join(",") : valid,
-        "--ver", ver,
-        "--trials", String(trials),
-        "--jobs", String(jobs),
-        ...(drawW ? ["--draw-w", String(drawW)] : []),
-        ...recArg,
-        ...boostArg,
-        ...(feats.length !== ALL_FEATURES.length ? ["--features", feats.join(",")] : []),
-      ]
-    : [
-        "--league", league,
-        "--train", sorted.join(","),
-        "--valid", "auto",
-        "--ver", ver,
-        "--fast",
-        ...recArg,
-        ...boostArg,
-        ...(feats.length !== ALL_FEATURES.length ? ["--features", feats.join(",")] : []),
-      ];
+  // GUI 새학습과 동일 조건: --new 강제, valid는 명시 목록
+  const validArg = Array.isArray(valid) ? valid.join(",") : await guiValid(league, sorted);
+  const argv = [
+    "--league", league,
+    "--train", sorted.join(","),
+    "--valid", validArg,
+    "--ver", ver,
+    "--trials", String(trials),
+    "--jobs", String(jobs),
+    ...(drawW ? ["--draw-w", String(drawW)] : []),
+    ...recArg,
+    ...boostArg,
+    ...(feats.length !== ALL_FEATURES.length ? ["--features", feats.join(",")] : []),
+    "--new",
+  ];
   const job = startJob({
     kind: "train",
     league,

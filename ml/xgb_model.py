@@ -97,9 +97,17 @@ def main():
         "metrics": {"acc": m["acc"], "ll": m["ll"], "draw_rec": m["draw_rec"]},
         "draw_analysis": draw_rep,
     }
-    out_p = os.path.join(ROOT, "ml", "permatch", f"{args.league}_{args.ver}.json")
-    json.dump(art, open(out_p, "w", encoding="utf-8"))
-    print(f"saved {out_p} + {xgb_file}")
+    out_p = f"supabase models/{args.ver}"
+    try:
+        import supabase_models as _sm
+        ok = _sm.upsert_model(args.league, args.ver, art, print)
+    except Exception as e:
+        ok = False
+        print(f"DB 저장 실패 ({type(e).__name__}): {e}")
+    if ok:
+        print(f"saved {out_p} + {xgb_file} (바이너리 로컬 유지)")
+    else:
+        print("DB 저장 실패 → 로컬 저장 안 함 (DB-only 정책)")
 
 
 if __name__ == "__main__":

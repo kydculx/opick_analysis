@@ -16,6 +16,19 @@ import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
+def _ephemeral_dir():
+    import tempfile
+    d = os.path.join(tempfile.gettempdir(), "opick_prog")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except OSError:
+        pass
+    return d
+
+
+def _eph(name):
+    return os.path.join(_ephemeral_dir(), name)
+
 LEAGUES = [
     ("k_league_1", "K리그 1"),
     ("k_league_2", "K리그 2"),
@@ -52,6 +65,63 @@ PRESETS = {
 YEAR_STYLE = {"k_league_1", "k_league_2", "j1_league", "mls"}
 
 
+def _db_client():
+    try:
+        sys.path.insert(0, os.path.join(ROOT, "ml"))
+        import supabase_models as _sm
+        return _sm._client()
+    except Exception:
+        return None
+
+
+def db_seasons(league):
+    sb = _db_client()
+    if sb is None:
+        return None
+    try:
+        out, off = set(), 0
+        while True:
+            res = sb.table("soccer_matches").select("season").eq("league_code", league).range(off, off + 999).execute()
+            rows = res.data or []
+            for r in rows:
+                if r.get("season") is not None:
+                    out.add(str(r["season"]))
+            if len(rows) < 1000:
+                break
+            off += 1000
+        return sorted(out) or None
+    except Exception:
+        return None
+
+
+_COLS = ("id,league_code,season,round,home_team,home_rank,away_team,away_rank,"
+         "home_score,away_score,same_odds,source_match_id,"
+         "team_info,recent_form,head_to_head,strength")
+
+
+def db_rows(league, seasons):
+    sb = _db_client()
+    if sb is None:
+        return None
+    try:
+        want = [str(s) for s in seasons]
+        rows = []
+        for s in want:
+            off = 0
+            while True:
+                res = (sb.table("soccer_matches").select(_COLS)
+                       .eq("league_code", league).eq("season", s)
+                       .order("round").order("id").range(off, off + 999).execute())
+                data = res.data or []
+                rows.extend(data)
+                if len(data) < 1000:
+                    break
+                off += 1000
+        return rows
+    except Exception:
+        return None
+
+
 def known_seasons(league):
     d = os.path.join(ROOT, "ml", ".cache")
     try:
@@ -73,6 +143,12 @@ def known_seasons(league):
                 a, b = toks[i], toks[i + 1]
                 if re.fullmatch(r"\d{4}", a) and re.fullmatch(r"\d{4}", b):
                     out.add(f"{a}-{b}")
+    try:
+        ds = db_seasons(league)
+        if ds:
+            out.update(ds)
+    except Exception:
+        pass
     if out:
         return sorted(out)
     base, va = PRESETS.get(league, ("", ""))
@@ -160,11 +236,11 @@ def load_dotenv(path):
 
 
 def ckpt_path(league, ver):
-    return os.path.join(ROOT, "ml", "permatch", f"{league}_{ver}.grid.json")
+    return _eph(f"{league}_{ver}.grid.json")
 
 
 def whist_path(league, ver):
-    return os.path.join(ROOT, "ml", "permatch", f"{league}_{ver}.whist.json")
+    return _eph(f"{league}_{ver}.whist.json")
 
 
 def tune_path(league, ver):
@@ -172,7 +248,7 @@ def tune_path(league, ver):
 
 
 def auto_prog_path(league, ver):
-    return os.path.join(ROOT, "ml", "permatch", f"{league}_{ver}.auto.json")
+    return _eph(f"{league}_{ver}.auto.json")
 
 
 def list_versions(league):
@@ -375,7 +451,8 @@ def main():
     app = tk.Tk()
     app.title("학습 콘솔")
     app.update_idletasks()
-    _sw, _sh, _ww, _wh = app.winfo_screenwidth(), app.winfo_screenheight(), 880, 1000
+    _sw, _sh = app.winfo_screenwidth(), app.winfo_screenheight()
+    _ww, _wh = 880, min(1180, max(1000, _sh - 40))
     app.geometry(f"{_ww}x{_wh}+{max(0, (_sw - _ww) // 2)}+{max(0, (_sh - _wh) // 2)}")
 
     v_league = tk.StringVar(value="k_league_1")
@@ -543,7 +620,7 @@ def main():
     cb_ver = _reg(ttk.Combobox(fr_ver, textvariable=v_ver, width=40))
     cb_ver.pack(side="left")
     _reg(ttk.Button(fr_ver, text="⟳", width=3,
-                    command=lambda: (refresh_ver_list(),))).pack(side="left", padx=(2, 0))
+                    command=lambda: (refresh_ver_list(), refresh_detail(), refresh_wedit(), request_acc()))).pack(side="left", padx=(2, 0))
     ver_label = ttk.Label(fr_ver, textvariable=v_ver, foreground="gray")
     btn_del_ver = _reg(ttk.Button(fr_ver, text="삭제", width=5,
                     command=lambda: on_delete_ver()))
@@ -755,6 +832,12 @@ def main():
                          daemon=True).start()
 
     def _acc_rows(league, seasons):
+        try:
+            rows = db_rows(league, seasons)
+            if rows:
+                return rows
+        except Exception:
+            pass
         base = os.path.join(ROOT, "ml", ".cache")
         try:
             files = os.listdir(base)
@@ -868,6 +951,7 @@ def main():
                 pass
         wedit_vars.clear()
         wedit_names.clear()
+        wedit_order.clear()
         wedit_pending["w"] = None
         try:
             wedit_info.configure(text="")
@@ -893,9 +977,12 @@ def main():
         w = d.get("weights")
         if not (isinstance(feats, list) and isinstance(w, list) and len(feats) == len(w) and w):
             return
-        for idx, (fn, wv) in enumerate(zip(feats, w)):
+        order = sorted(range(len(w)),
+                       key=lambda j: -(abs(w[j])) if isinstance(w[j], (int, float)) else 0.0)
+        for disp, j in enumerate(order):
+            fn, wv = feats[j], w[j]
             var = tk.StringVar(value=f"{wv:.4f}" if isinstance(wv, (int, float)) else "0.0000")
-            r, c = divmod(idx, 3)
+            r, c = divmod(disp, 3)
             base = c * 4
             ttk.Label(wedit_grid, text=FEATURE_KO.get(fn, fn), width=8).grid(
                 row=r, column=base, sticky="e", padx=(0, 2), pady=1)
@@ -916,6 +1003,7 @@ def main():
             bup.bind("<Leave>", lambda e: wedit_hold_stop())
             wedit_vars.append((fn, var))
             wedit_names.append(fn)
+            wedit_order.append(j)
 
     def apply_wedit():
         if runner["obj"] is not None:
@@ -931,6 +1019,12 @@ def main():
         if not vals:
             v_status.set("편집할 가중치 없음 (버전 확인)")
             return
+        if len(wedit_order) == len(vals):
+            full = [0.0] * len(vals)
+            for disp_pos, true_idx in enumerate(wedit_order):
+                if 0 <= true_idx < len(vals):
+                    full[true_idx] = vals[disp_pos]
+            vals = full
         lg, ver = v_league.get(), v_ver.get().strip()
         try:
             d = load_tune_strict(lg, ver)
@@ -1014,15 +1108,17 @@ def main():
             v_status.set("버전 확인 필요")
             return
         try:
-            p = tune_path(lg, ver)
-            d = json.load(open(p, encoding="utf-8"))
+            d = load_tune(lg, ver)
             if not (isinstance(d, dict) and isinstance(d.get("features"), list)
                     and len(d["features"]) == len(w)):
                 v_status.set("버전 확인 필요 (피처 수 불일치)")
                 return
             d["weights"] = list(w)
-            with open(p, "w", encoding="utf-8") as f:
-                json.dump(d, f)
+            sys.path.insert(0, os.path.join(ROOT, "ml"))
+            import supabase_models as _sm
+            if not _sm.upsert_model(lg, ver, d):
+                v_status.set("저장 실패: DB 저장 안 됨")
+                return
         except (OSError, ValueError) as e:
             v_status.set(f"저장 실패: {e}")
             return
@@ -1115,16 +1211,14 @@ def main():
         art["draw_close_margin"] = m
         art["draw_total_max"] = t
         try:
-            with open(tune_path(lg, ver), "w", encoding="utf-8") as f:
-                json.dump(art, f)
-        except OSError:
-            pass
-        try:
             sys.path.insert(0, os.path.join(ROOT, "ml"))
             import supabase_models as _sm
-            _sm.upsert_model(lg, ver, art)
-        except Exception:
-            pass
+            if not _sm.upsert_model(lg, ver, art):
+                v_status.set("DB 저장 실패")
+                return
+        except Exception as e:
+            v_status.set(f"DB 저장 실패: {e}")
+            return
         v_status.set(f"무부스트 적용 {b:g}/{m:g}/{t:g} → {ver}")
         refresh_wedit()
     _reg(ttk.Button(fr_grid3, text="부스트적용", width=8, command=_apply_drawboost)).pack(side="left", padx=(8, 0))
@@ -1301,6 +1395,7 @@ def main():
     wedit_grid.pack(fill="x")
     wedit_vars: list = []
     wedit_names: list = []
+    wedit_order: list = []
     wedit_pending = {"w": None, "seq": 0}
     preview_art = {"line": None}
     wedit_hold = {"after": None, "var": None, "dir": 0, "t0": 0.0}
@@ -1804,7 +1899,9 @@ def main():
         try:
             wrow = whist["W"][i]
             if wedit_vars and len(wrow) == len(wedit_vars):
-                for (_, var), v in zip(wedit_vars, wrow):
+                for pos, (_, var) in enumerate(wedit_vars):
+                    j = wedit_order[pos] if pos < len(wedit_order) else pos
+                    v = wrow[j] if 0 <= j < len(wrow) else 0.0
                     try:
                         var.set(f"{v:.4f}" if isinstance(v, (int, float)) else "0.0000")
                     except tk.TclError:
@@ -2394,7 +2491,12 @@ def main():
         for ext in (".json", ".grid.json", ".auto.json", ".live.json", ".whist.json", ".xgb.json", ".cumu.json", ".wrong.json"):
             try:
                 os.remove(base + ext)
-                gone.append(ext)
+                gone.append("로컬" + ext)
+            except OSError:
+                pass
+            try:
+                os.remove(_eph(f"{lg}_{ver}{ext}"))
+                gone.append("tmp" + ext)
             except OSError:
                 pass
         try:
@@ -2435,7 +2537,7 @@ def main():
             request_acc()
 
     def live_path(league, ver):
-        return os.path.join(ROOT, "ml", "permatch", f"{league}_{ver}.live.json")
+        return _eph(f"{league}_{ver}.live.json")
 
     def write_live_draw_w(*_, force=False):
         if runner["obj"] is None and not force:

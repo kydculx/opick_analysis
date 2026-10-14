@@ -155,7 +155,7 @@ export async function getSeasonAccuracy(
   league: string,
   modelVer?: string,
   seasons?: string[]
-): Promise<Record<string, { n: number; hit: number; acc: number | null }>> {
+): Promise<Record<string, { n: number; hit: number; acc: number | null; pending: number }>> {
   if (!modelVer) return {};
   try {
     const { computeAccuracy } = await import("@/lib/predict");

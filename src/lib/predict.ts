@@ -328,24 +328,27 @@ export async function computeAccuracy(
   rows: SoccerMatch[],
   league: string,
   ver: string
-): Promise<Record<string, { n: number; hit: number; acc: number | null }>> {
+): Promise<Record<string, { n: number; hit: number; acc: number | null; pending: number }>> {
   const map = await buildPredMap(rows, league, ver);
-  const stats: Record<string, { n: number; hit: number }> = {};
+  const stats: Record<string, { n: number; hit: number; pending: number }> = {};
   for (const m of rows) {
     const p = map[m.source_match_id || String(m.id)];
     if (!p) continue;
+    const s = String(m.season);
+    stats[s] = stats[s] || { n: 0, hit: 0, pending: 0 };
     const h = parseScore(m.home_score);
     const a = parseScore(m.away_score);
-    if (h == null || a == null) continue;
+    if (h == null || a == null) {
+      stats[s].pending += 1;
+      continue;
+    }
     const actual = h > a ? 0 : h === a ? 1 : 2;
     const probs = [p.home, p.draw, p.away];
     const pick = probs.indexOf(Math.max(...probs));
-    const s = String(m.season);
-    stats[s] = stats[s] || { n: 0, hit: 0 };
     stats[s].n += 1;
     if (pick === actual) stats[s].hit += 1;
   }
-  const out: Record<string, { n: number; hit: number; acc: number | null }> = {};
+  const out: Record<string, { n: number; hit: number; acc: number | null; pending: number }> = {};
   for (const [s, v] of Object.entries(stats)) out[s] = { ...v, acc: v.n > 0 ? v.hit / v.n : null };
   return out;
 }

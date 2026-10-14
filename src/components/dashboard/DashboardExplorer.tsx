@@ -19,7 +19,7 @@ export type SavedModel = {
 
 export type PredMapEntry = { home: number; draw: number; away: number; ver: string; drawAlert?: boolean };
 
-export type AccuracyMap = Record<string, { n: number; hit: number; acc: number | null }>;
+export type AccuracyMap = Record<string, { n: number; hit: number; acc: number | null; pending?: number }>;
 
 // 순차 탐색용 이동폭 사다리: 0.001 단위 전수 스캔(최대 4000회) 대신 12개 대표값만
 // 평가하고, 개선된 구간만 조밀하게 재탐색한다.
@@ -138,7 +138,6 @@ export function DashboardExplorer() {
   const [checked, setChecked] = useState<string[]>([]);
   const [trainCount, setTrainCount] = useState("6");
   const [featSel, setFeatSel] = useState<string[]>([...ALL_FEATURES]);
-  const [fullTrain, setFullTrain] = useState(true);
   const [trialsText, setTrialsText] = useState("10000");
   const [jobsText, setJobsText] = useState("4");
   const [recencyWText, setRecencyWText] = useState("0");
@@ -164,7 +163,7 @@ export function DashboardExplorer() {
   const [models, setModels] = useState<SavedModel[]>([]);
   const [selVer, setSelVer] = useState("");
   const [delSel, setDelSel] = useState<string[]>([]);
-  const [accuracy, setAccuracy] = useState<Record<string, { n: number; hit: number; acc: number | null }>>({});
+  const [accuracy, setAccuracy] = useState<Record<string, { n: number; hit: number; acc: number | null; pending?: number }>>({});
   const [accLoaded, setAccLoaded] = useState(false);
   type ModelDetail = {
     model_type: string;
@@ -552,9 +551,10 @@ export function DashboardExplorer() {
           league,
           seasons: trainingOrdered,
           ...(featSel.length !== ALL_FEATURES.length ? { features: featSel } : {}),
-          ...(fullTrain
-            ? { mode: "full", trials: trialsText, jobs: jobsText, recencyW: recencyWText }
-            : { mode: "fast", recencyW: recencyWText }),
+          mode: "full",
+          trials: trialsText,
+          jobs: jobsText,
+          recencyW: recencyWText,
         }),
       }).then((r) => r.json());
       if (!res.ok) {
@@ -566,7 +566,7 @@ export function DashboardExplorer() {
       const done = await pollJob(
         "/api/match-train",
         res.jobId as string,
-        fullTrain ? 1800 : 150,
+        1800,
         (p, tail) => setTrainProg(p ? { ...p, line: tail?.[tail.length - 1] } : null),
         () => trainStopRef.current,
       );
@@ -751,18 +751,21 @@ export function DashboardExplorer() {
       if (p) map[m.source_match_id || String(m.id)] = p;
     }
     if (full) setPredMap(map);
-    const stats: Record<string, { n: number; hit: number }> = {};
+    const stats: Record<string, { n: number; hit: number; pending: number }> = {};
     for (const m of rawMatches) {
       const p = map[m.source_match_id || String(m.id)];
       if (!p) continue;
+      const s = String(m.season);
+      stats[s] = stats[s] || { n: 0, hit: 0, pending: 0 };
       const h = parseScoreLocal(m.home_score);
       const a = parseScoreLocal(m.away_score);
-      if (h == null || a == null) continue;
+      if (h == null || a == null) {
+        stats[s].pending += 1;
+        continue;
+      }
       const actual = h > a ? 0 : h === a ? 1 : 2;
       const probs = [p.home, p.draw, p.away];
       const pick = probs.indexOf(Math.max(...probs));
-      const s = String(m.season);
-      stats[s] = stats[s] || { n: 0, hit: 0 };
       stats[s].n += 1;
       if (pick === actual) stats[s].hit += 1;
     }
@@ -1281,15 +1284,13 @@ export function DashboardExplorer() {
     ? (modelDetail.detail.valid as unknown[]).map(String).filter((s) => s && s !== "auto")
     : null;
   const validSet = validList ? new Set(validList) : null;
-  const scopeOf = (m: Record<string, { n: number; hit: number }>) =>
+  const scopeOf = (m: Record<string, { n: number; hit: number; pending?: number }>) =>
     Object.fromEntries(
-      Object.entries(m).filter(([s]) => !trainSet.has(s))
+      Object.entries(m).filter(([s, v]) => !trainSet.has(s) && (v.pending ?? 0) === 0)
     );
-  const upcomingOf = (m: Record<string, { n: number; hit: number; acc: number | null }>) => {
-    if (viewSeasons.length === 0) return [];
-    const latest = [...viewSeasons].sort().slice(-1)[0];
+  const upcomingOf = (m: AccuracyMap) => {
     return Object.entries(m)
-      .filter(([s]) => s === latest && !trainSet.has(s) && !(validSet ? validSet.has(s) : false))
+      .filter(([s, v]) => (v.pending ?? 0) > 0 && !trainSet.has(s) && !(validSet ? validSet.has(s) : false))
       .sort(([a], [b]) => (a < b ? -1 : 1));
   };
   const cumuWalkSeasons = modelDetail?.detail?.cumulative?.walk?.seasons;
@@ -1345,7 +1346,7 @@ export function DashboardExplorer() {
                   {upcoming.map(([s, a]) => (
                     <p key={s} className="px-0.5 font-mono text-[11px] text-zinc-500">
                       진행 중 {s} <span className="font-semibold text-zinc-700 dark:text-zinc-300">{a.acc != null ? `${(a.acc * 100).toFixed(1)}%` : "−"}</span>
-                      <span className="text-zinc-400"> ({a.hit}/{a.n})</span>
+                      <span className="text-zinc-400"> ({a.hit}/{a.n}{a.pending ? ` · 잔여 ${a.pending}` : ""})</span>
                     </p>
                   ))}
                 </div>
@@ -1358,7 +1359,7 @@ export function DashboardExplorer() {
               <p className="px-2 py-1 text-sm text-zinc-500">조회할 시즌이 없습니다.</p>
             ) : (
               (() => {
-                const inScope = (s: string) => !trainSet.has(s);
+                const inScope = (s: string) => !trainSet.has(s) && ((accuracy[s]?.pending ?? 0) === 0);
                 const walk = showWalk ? modelDetail?.detail?.cumulative?.walk : undefined;
                 const walkSeasons = walk?.seasons;
                 const chrono = walkSeasons
@@ -1611,23 +1612,12 @@ export function DashboardExplorer() {
           </details>
           <details open className="mt-2 rounded-xl border border-zinc-200 dark:border-zinc-800">
             <summary className="cursor-pointer px-2.5 py-1.5 text-xs font-medium text-zinc-500">
-              학습 방식 ({fullTrain ? `전체 ${trialsText}회` : "빠른 단발"})
+              학습 방식 (전체 {trialsText}회)
             </summary>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-2.5 pb-2">
-              <label className="flex cursor-pointer items-center gap-1 text-xs">
-                <input
-                  type="checkbox"
-                  checked={fullTrain}
-                  onChange={() => setFullTrain((v) => !v)}
-                  disabled={trainState === "running"}
-                  className="h-3.5 w-3.5 accent-blue-600 disabled:opacity-40 dark:accent-blue-400"
-                />
-                <span>새학습(전체탐색)</span>
-              </label>
-              {fullTrain && (
-                <>
-                  <label className="flex items-center gap-1 text-xs text-zinc-500">
-                    trials
+              <>
+                <label className="flex items-center gap-1 text-xs text-zinc-500">
+                  trials
                     <input
                       value={trialsText}
                       onChange={(e) => setTrialsText(e.target.value.replace(/[^0-9]/g, ""))}
@@ -1660,8 +1650,7 @@ export function DashboardExplorer() {
                       className="w-12 rounded-lg border border-zinc-300 bg-white px-2 py-0.5 text-right font-mono text-xs text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
                     />
                   </label>
-                </>
-              )}
+              </>
             </div>
           </details>
           <Button

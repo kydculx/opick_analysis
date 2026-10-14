@@ -338,19 +338,23 @@ def main():
                                "recency": use_recency,
                                "walk": walk, "static_acc": static_acc, "test": test,
                                "draw_spec": draw_spec, "draw_alert_t": args.alert_t}})
-    out_p = os.path.join(ROOT, "ml", "permatch", f"{args.league}_{args.ver}.json")
+    out_p = f"supabase models/{args.ver}"
     try:
         import supabase_models as _sm
-        _sm.upsert_model(args.league, args.ver, art, print)
-        _local = _sm.save_local_enabled()
-    except Exception:
-        _local = True
-    if _local:
-        json.dump(art, open(out_p, "w", encoding="utf-8"))
-    with open(os.path.join(ROOT, "ml", "permatch", f"{args.league}_{args.ver}.cumu.json"), "w", encoding="utf-8") as f:
+        ok = _sm.upsert_model(args.league, args.ver, art, print)
+    except Exception as e:
+        ok = False
+        print(f"DB 저장 실패 ({type(e).__name__}): {e}")
+    if not ok:
+        print(f"DB 저장 실패 → 로컬 저장 안 함 (DB-only 정책)")
+        return
+    import tempfile
+    _tmp = os.path.join(tempfile.gettempdir(), "opick_prog")
+    os.makedirs(_tmp, exist_ok=True)
+    with open(os.path.join(_tmp, f"{args.league}_{args.ver}.cumu.json"), "w", encoding="utf-8") as f:
         json.dump({"league": args.league, "ver": args.ver, "walk": walk,
                    "static_acc": static_acc, "test": test, "picks": picks}, f)
-    with open(os.path.join(ROOT, "ml", "permatch", f"{args.league}_{args.ver}.wrong.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(_tmp, f"{args.league}_{args.ver}.wrong.json"), "w", encoding="utf-8") as f:
         json.dump({"league": args.league, "ver": args.ver,
                    "summary": {"n_miss": nw, "n_draw_miss": ndm,
                                "confusion": conf_mat,
