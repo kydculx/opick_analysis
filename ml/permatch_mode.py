@@ -590,6 +590,12 @@ def apply_draw_boost(p, total, mkt, boost: float, margin: float, total_max: floa
     return [v / s2 for v in q]
 
 
+BOOST_CAND = [round(0.0025 * i, 4) for i in range(21)]
+MARGIN_CAND = [round(0.02 + 0.01 * i, 4) for i in range(29)]
+TOTAL_CAND = [round(1.8 + 0.05 * i, 4) for i in range(29)]
+DRAW_BOOST_TIE_EPS = 0.004
+
+
 def tune_draw_boost(Xe_va, yva, w, hfa, d, pats, tau, taus, alpha, T=1.0, dw=None,
                     db: float = 0.0, Xde_va=None, cap=None, draw_raw_va=None):
     import numpy as _np
@@ -598,51 +604,66 @@ def tune_draw_boost(Xe_va, yva, w, hfa, d, pats, tau, taus, alpha, T=1.0, dw=Non
     Vn = _np.asarray(Xe_va, dtype=float)
     yn = _np.asarray(yva, dtype=int)
     Dn = _np.asarray(Xde_va, dtype=float) if Xde_va is not None else None
-    totals, mkts = [], []
+    totals = []
     for xd in (draw_raw_va or []):
         try:
             totals.append(float(xd[2]))
         except (TypeError, ValueError, IndexError):
             totals.append(99.0)
-        try:
-            mk = float(xd[3])
-            mkts.append(mk if math.isfinite(mk) else 0.0)
-        except (TypeError, ValueError, IndexError):
-            mkts.append(0.0)
     if len(totals) != len(Vn):
         totals = [99.0] * len(Vn)
-        mkts = [0.0] * len(Vn)
+    tot_arr = _np.asarray(totals, dtype=float)
 
-    def _ev_at(b, m, tm):
-        Plin = batch_proba(Vn, w, hfa, d, 1.0, None, dw, db, Dn, cap)
-        out = []
-        for i in range(len(Vn)):
-            pp = pattern_proba(list(Vn[i]), pats, tau, w, taus) if pats and tau else None
-            lin = list(Plin[i])
-            base = [alpha * q + (1.0 - alpha) * c for q, c in zip(pp, lin)] if pp is not None else lin
-            out.append(apply_draw_boost(base, totals[i], mkts[i], b, m, tm))
-        P = _np.asarray(out, dtype=float)
-        if T != 1.0:
-            L = _np.log(_np.maximum(P, 1e-9)) / T
-            L = L - L.max(axis=1, keepdims=True)
-            E = _np.exp(L)
-            P = E / E.sum(axis=1, keepdims=True)
-        home, dr, away = P[:, 0], P[:, 1], P[:, 2]
-        pick = _np.where((home >= dr) & (home >= away), 0, _np.where(dr >= away, 1, 2))
-        acc = float((pick == yn).mean())
-        nll = float((-_np.log(_np.maximum(P[_np.arange(len(yn)), yn], 1e-12))).mean())
-        return acc, nll
+    Plin = batch_proba(Vn, w, hfa, d, 1.0, None, dw, db, Dn, cap)
+    rows = []
+    for i in range(len(Vn)):
+        pp = pattern_proba(list(Vn[i]), pats, tau, w, taus) if pats and tau else None
+        lin = list(Plin[i])
+        rows.append([alpha * q + (1.0 - alpha) * c for q, c in zip(pp, lin)] if pp is not None else lin)
+    B0 = _np.asarray(rows, dtype=float)
+    srt = _np.sort(B0, axis=1)
+    gap = srt[:, 2] - srt[:, 1]
+    ar = _np.arange(len(yn))
+    use_temp = T != 1.0
 
-    best = (0.0, 0.12, 2.55)
-    best_key = None
-    for b in (0.0, 0.01, 0.02, 0.03):
-        for m in (0.08, 0.12):
-            for tm in (2.3, 2.55):
-                acc, ll = _ev_at(b, m, tm)
-                key = (acc, -ll)
-                if best_key is None or key > best_key:
-                    best_key, best = key, (b, m, tm)
-    return best
+    results = []
+    for m in MARGIN_CAND:
+        in_gap = gap <= m
+        for tm in TOTAL_CAND:
+            elig = in_gap & (tot_arr <= tm)
+            has_elig = bool(elig.any())
+            for b in BOOST_CAND:
+                if b > 0.0 and has_elig:
+                    P = B0.copy()
+                    P[elig, 1] = _np.minimum(0.99, P[elig, 1] + b)
+                    P = P / P.sum(axis=1, keepdims=True)
+                else:
+                    P = B0
+                if use_temp:
+                    L = _np.log(_np.maximum(P, 1e-9)) / T
+                    L = L - L.max(axis=1, keepdims=True)
+                    E = _np.exp(L)
+                    P = E / E.sum(axis=1, keepdims=True)
+                pick = _np.where((P[:, 0] >= P[:, 1]) & (P[:, 0] >= P[:, 2]), 0,
+                                 _np.where(P[:, 1] >= P[:, 2], 1, 2))
+                acc = float((pick == yn).mean())
+                ll = float((-_np.log(_np.maximum(P[ar, yn], 1e-12))).mean())
+                results.append((b, m, tm, acc, ll))
+
+    best_acc = max(r[3] for r in results)
+    best_ll = min(r[4] for r in results if r[3] == best_acc)
+    tie_candidates = [r for r in results if r[3] == best_acc and r[4] <= best_ll + DRAW_BOOST_TIE_EPS]
+    if len(tie_candidates) == 1:
+        only = tie_candidates[0]
+        return only[0], only[1], only[2]
+    steps = (BOOST_CAND[1] - BOOST_CAND[0], MARGIN_CAND[1] - MARGIN_CAND[0], TOTAL_CAND[1] - TOTAL_CAND[0])
+    med_b = sorted(r[0] for r in tie_candidates)[len(tie_candidates) // 2]
+    med_m = sorted(r[1] for r in tie_candidates)[len(tie_candidates) // 2]
+    med_t = sorted(r[2] for r in tie_candidates)[len(tie_candidates) // 2]
+    best = min(tie_candidates, key=lambda r: (
+        abs(r[0] - med_b) / steps[0] + abs(r[1] - med_m) / steps[1] + abs(r[2] - med_t) / steps[2],
+        r[0], r[1], r[2]))
+    return best[0], best[1], best[2]
 
 
 def served_proba(xe, xde_std, w, hfa, d, dw, db, cap, pats, tau, alpha, taus, T,
@@ -782,8 +803,8 @@ def _eph(name: str) -> str:
     return os.path.join(_ephemeral_dir(), name)
 
 
-def model_path(league: str, ver: str) -> str:
-    return f"ml/permatch/{league}_{ver}.json"
+def model_ref(league: str, ver: str) -> str:
+    return f"models/{ver}"
 
 
 def auto_prog_path(league: str, ver: str) -> str:
@@ -896,7 +917,7 @@ def tune_weights(league: str, ver: str, tune_s: set, max_sweeps: int = 6,
                  use_cache: bool = True, draw_w: float = 0.0, recency_w: float = 0.0):
     art = load_artifact_any(league, ver)
     if not isinstance(art, dict):
-        log(f"아티팩트 없음: {model_path(league, ver)} (먼저 학습 필요)")
+        log(f"아티팩트 없음: {model_ref(league, ver)} (먼저 학습 필요)")
         return False
     if not isinstance(art.get("weights"), list):
         log(f"조절/탐색은 legacy 가중치 모델만 지원 (현재: {art.get('model_type')})")
@@ -1005,7 +1026,7 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
               seed: int = 7, fresh: bool = False, use_cache: bool = True,
               grid_step: float = 0.0, draw_w: float = 0.0, recency_w: float = 0.0):
     import numpy as _np
-    p = model_path(league, ver)
+    p = model_ref(league, ver)
     art = load_artifact_any(league, ver)
     if not isinstance(art, dict):
         log(f"아티팩트 없음: {p} (먼저 학습 필요)")
@@ -1331,7 +1352,7 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
                 fresh: bool = False, use_cache: bool = True,
                 jobs: int = 1, draw_w: float = 0.0, recency_w: float = 0.0):
     import numpy as _np
-    p = model_path(league, ver)
+    p = model_ref(league, ver)
     art = load_artifact_any(league, ver)
     if not isinstance(art, dict):
         log(f"아티팩트 없음: {p} (먼저 학습 필요)")
@@ -1879,7 +1900,7 @@ def save_artifact(league: str, ver: str, artifact: dict):
     if ok:
         log(f"saved supabase models/{ver}")
     else:
-        log(f"DB 저장 실패 → 로컬 저장 안 함 (DB-only 정책): {model_path(league, ver)}")
+        log("DB 저장 실패 → 저장되지 않음 (DB-only 정책)")
 
 
 def load_artifact_any(league: str, ver: str):
@@ -1890,11 +1911,7 @@ def load_artifact_any(league: str, ver: str):
             return art
     except Exception:
         pass
-    try:
-        with open(model_path(league, ver), encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return None
+    return None
 
 
 # ---------------------------------------------------------------- single-train (--fast)
@@ -1955,6 +1972,42 @@ def fit_draw(Xm_tr, ty, Xm_va, vy, Xd_tr, Xd_va, w, hfa, d, e, steps=(0.05, 0.2,
         if not improved:
             break
     return dw, db, mu_d, sd_d
+
+
+def fit_draw_branch(Xn, ty, vX, vy, d_tr, d_va, w, hfa, d, e, cap, pats, tau, taus, alpha, T):
+    if not Xn or not vX or len(vX) != len(d_va) or len(d_tr) != len(Xn):
+        return None
+    try:
+        dw, db, mu_d, sd_d = fit_draw(Xn, ty, vX, vy, d_tr, d_va, w, hfa, d, e)
+    except Exception as exc:
+        log(f"무브랜치 적합 실패: {type(exc).__name__}")
+        return None
+
+    def evaluate(use_branch):
+        n = hit = dpicks = 0
+        tot = 0.0
+        for i, y in enumerate(vy):
+            x = apply_emphasis(vX[i], e)
+            raw = d_va[i]
+            xd = std_vec_row(raw, mu_d, sd_d) if use_branch else raw
+            p = served_proba(x, xd, w, hfa, d,
+                             dw if use_branch else None, db if use_branch else 0.0,
+                             cap, pats, tau, alpha, taus, T, 0.0, 0.12, 2.55,
+                             raw[2] if len(raw) > 2 else 99.0,
+                             raw[3] if len(raw) > 3 else 0.0)
+            pk = p.index(max(p))
+            n += 1
+            hit += (pk == y)
+            dpicks += (pk == 1)
+            tot += -math.log(max(p[y], 1e-12))
+        return hit / max(n, 1), tot / max(n, 1), dpicks
+
+    acc0, ll0, _ = evaluate(False)
+    acc1, ll1, dpicks = evaluate(True)
+    keep = bool(ll1 < ll0 - 1e-4 and acc1 >= acc0 - DRAW_ACC_TOL)
+    log(f"무브랜치: acc {acc0:.3f}→{acc1:.3f} ({100 * (acc1 - acc0):+.2f}pp), "
+        f"nll {ll0:.4f}→{ll1:.4f}, 무픽 {dpicks} → {'채택' if keep else '생략(가드)'}")
+    return (dw, db, mu_d, sd_d) if keep else None
 
 
 def fit_linear(train_X, train_y, draw_prior: float, valid_X=None, valid_y=None,
@@ -2068,7 +2121,7 @@ def fit_linear(train_X, train_y, draw_prior: float, valid_X=None, valid_y=None,
 
 def drawfit(league: str, ver: str, extra_s: set, use_cache: bool = True):
     import numpy as _np
-    p = model_path(league, ver)
+    p = model_ref(league, ver)
     art = load_artifact_any(league, ver)
     if not isinstance(art, dict):
         log(f"아티팩트 없음: {p}")
@@ -2755,7 +2808,7 @@ def load_existing_best(league: str, ver: str, matches, train_s: set, valid_s: se
     art = load_artifact_any(league, ver)
     if not isinstance(art, dict):
         return None, None
-    p = model_path(league, ver)
+    p = model_ref(league, ver)
     if not isinstance(art.get("weights"), list) or len(art["weights"]) != len(FEATURES):
         log(f"기존 아티팩트 형식 불일치, 무시: {p}")
         return None, None
@@ -2794,8 +2847,6 @@ def main():
     ap.add_argument("--draw-margin", type=float, default=None, help="부스트 접전 조건 직접 지정 (예: 0.12)")
     ap.add_argument("--draw-total", type=float, default=None, help="부스트 저득점 조건 직접 지정 (예: 2.55)")
     ap.add_argument("--recency-w", type=float, default=0.0, help="최신시즌 가중 (valid/tune 선발만, 0=끄기, 예: 1.0이면 최신시즌 2배)")
-    ap.add_argument("--auto-ensemble", action="store_true", help="학습 후 legacy+XGB 앙상블 자동 적합")
-    ap.add_argument("--ens-rec-w", type=float, default=0.5, help="앙상블 선발식 무승부 가중")
     ap.add_argument("--trials", type=int, default=20)
     ap.add_argument("--sweeps", type=int, default=6, help="tune 모드용 최대 sweep 수")
     ap.add_argument("--seq-sweeps", type=int, default=1, help="auto 모드 순차 패스 수")
@@ -2827,23 +2878,6 @@ def main():
     global _LEAGUE_TAG
     _LEAGUE_TAG = league_tag(league)
 
-    def run_auto_ensemble():
-        import subprocess
-        log("앙상블 적합 시작...")
-        try:
-            r = subprocess.run(
-                [sys.executable, "ml/ensemble.py", "--league", league,
-                 "--base", ver, "--rec-w", str(args.ens_rec_w)],
-                capture_output=True, text=True, timeout=1800)
-        except Exception as e:
-            log(f"앙상블 실패: {e}")
-            return
-        for line in ((r.stdout or "") + "\n" + (r.stderr or "")).splitlines():
-            line = line.strip()
-            if line:
-                log(f"[ens] {line}")
-        if r.returncode != 0:
-            log(f"앙상블 종료코드 {r.returncode}")
     if args.features:
         names = [s.strip() for s in args.features.split(",") if s.strip()]
         bad = [n for n in names if n not in FEATURES13]
@@ -2865,7 +2899,7 @@ def main():
         assert args.predict, "--predict 필요"
         art = load_artifact_any(league, ver)
         if not isinstance(art, dict):
-            log(f"아티팩트 없음: {model_path(league, ver)}")
+            log(f"아티팩트 없음: {model_ref(league, ver)}")
             return
         T = art["T"]
         mu, sd = art.get("mu"), art.get("sd")
@@ -2992,8 +3026,6 @@ def main():
         save_artifact(league, ver, artifact)
         w = artifact["weights"]
         log(f"FINAL W {{{', '.join(f'{n}:{v:+.3f}' for n, v in zip(FEATURES, w))}}} T={artifact['T']}")
-        if args.auto_ensemble:
-            run_auto_ensemble()
         return
 
     # ---- autotune 모드
@@ -3159,10 +3191,26 @@ def main():
         if hs is None or aws is None:
             continue
         d_va_raw.append(draw_row_features(r))
+    d_tr_raw = []
+    for r in rows:
+        if str(r.get("season")) not in train_s:
+            continue
+        hs, aws = parse_score(r.get("home_score")), parse_score(r.get("away_score"))
+        if hs is None or aws is None:
+            continue
+        d_tr_raw.append(draw_row_features(r))
+    draw_branch = fit_draw_branch(Xn, ty, vX, vy, d_tr_raw, d_va_raw,
+                                  best["weights"], best["hfa"], d, best["e"],
+                                  contrib_cap, pats, tau, ptaus, palpha_new, best_T)
+    if draw_branch:
+        dw_new, db_new, mu_d_new, sd_d_new = draw_branch
+        xde_va = [std_vec_row(x, mu_d_new, sd_d_new) for x in d_va_raw]
+    else:
+        dw_new, db_new, xde_va = None, 0.0, None
     if args.draw_boost is None and args.draw_margin is None and args.draw_total is None:
         b_new, m_new, tm_new = tune_draw_boost(
             Ve_best, vy, best["weights"], best["hfa"], d, pats, tau, ptaus,
-            palpha_new, best_T, None, 0.0, None, contrib_cap, d_va_raw)
+            palpha_new, best_T, dw_new, db_new, xde_va, contrib_cap, d_va_raw)
     else:
         def _num2(v, fb):
             try:
@@ -3187,11 +3235,18 @@ def main():
         _art["draw_close_margin"] = m_new
         _art["draw_total_max"] = tm_new
         _art["pattern_stats"] = pstats
+        if draw_branch:
+            _art["draw_weights"] = dw_new
+            _art["draw_bias"] = db_new
+            _art["draw_mu"] = mu_d_new
+            _art["draw_sd"] = sd_d_new
+            _art["draw_features"] = DRAW_FEATURES
+        else:
+            for _k in ("draw_weights", "draw_bias", "draw_mu", "draw_sd", "draw_features"):
+                _art.pop(_k, None)
         save_artifact(league, ver, _art)
     else:
         log("아티팩트 없음: 최종 패턴 저장 생략")
-    if args.auto_ensemble:
-        run_auto_ensemble()
     log(f"FINAL best acc={best['acc']:.3f} ll={best['ll']:.4f} trial={best['trial']} ver={ver} total={(time.time() - _START) / 60:.1f}m")
 
 

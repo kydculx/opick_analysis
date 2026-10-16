@@ -4,7 +4,8 @@
 벤치(ml/models_bench.py build_sequences/run_lstm)와 동일한 입력
 (팀별 최근 seq경기 [득,실,승점,홈여부], hidden=32, epochs=15)을 사용.
 TS 서빙은 미지원 (LSTM 가중치를 TS로 포팅하기 전에는 python 예측만 사용).
-아티팩트는 ml/permatch/{league}_{ver}.json + {league}_{ver}.lstm.pt 로 저장.
+아티팩트는 Supabase models 테이블에만 저장하며, state_dict는 base64(lstm_state_b64)로 내장한다.
+로컬 .pt 저장 없음 (DB-only 정책).
 
 실행:
     ml/.venv/bin/python ml/lstm_model.py --league premier_league \\
@@ -12,6 +13,8 @@ TS 서빙은 미지원 (LSTM 가중치를 TS로 포팅하기 전에는 python �
       --valid 2024-2025,2025-2026 --ver lstimbase --new
 """
 import argparse
+import base64
+import io
 import json
 import os
 import sys
@@ -110,14 +113,13 @@ def main():
         loss.backward()
         opt.step()
 
-    pt_file = f"{args.league}_{args.ver}.lstm.pt"
-    pp = os.path.join(ROOT, "ml", "permatch", pt_file)
-    os.makedirs(os.path.dirname(pp), exist_ok=True)
+    buf = io.BytesIO()
     torch.save({"state": mt.state_dict(), "hidden": args.hidden, "seq": args.seq,
-                "mu": [float(v) for v in mu], "sd": [float(v) for v in sd]}, pp)
+                "mu": [float(v) for v in mu], "sd": [float(v) for v in sd]}, buf)
+    lstm_state_b64 = base64.b64encode(buf.getvalue()).decode("ascii")
     art = {
         "model_type": "lstm",
-        "lstm_file": pt_file,
+        "lstm_state_b64": lstm_state_b64,
         "seq_len": args.seq,
         "hidden": args.hidden,
         "epochs": args.epochs,
@@ -135,9 +137,9 @@ def main():
         ok = False
         print(f"DB 저장 실패 ({type(e).__name__}): {e}")
     if ok:
-        print(f"saved {out_p} + {pt_file} (바이너리 로컬 유지)")
+        print(f"saved {out_p} (state_dict DB 내장, {len(lstm_state_b64) // 1024}KB)")
     else:
-        print("DB 저장 실패 → 로컬 저장 안 함 (DB-only 정책)")
+        print("DB 저장 실패 → 저장 안 함 (DB-only 정책)")
     print("TS 서빙 미지원: python 예측만 사용")
 
 

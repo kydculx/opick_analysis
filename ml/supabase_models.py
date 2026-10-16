@@ -25,11 +25,6 @@ def _client():
         return None
 
 
-def save_local_enabled() -> bool:
-    # DB-only 정책: 새학습은 무조건 DB에만 저장, 로컬 파일 쓰지 않음.
-    return False
-
-
 def upsert_model(league: str, ver: str, artifact: dict, log=None) -> bool:
     sb = _client()
     if sb is None:

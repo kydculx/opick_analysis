@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """XGBoost 독립 모델 (학습+저장).
 
-ensemble.py fit_xgb와 동일한 하이퍼파라미터를 사용하되,
-legacy 베이스 없이 단독으로 서빙 가능한 아티팩트로 저장한다.
+부스터 JSON을 아티팩트에 통째로 담아 Supabase models 테이블에만 저장한다
+(로컬 파일 저장 없음, DB-only 정책). TS 서빙은 DB에서 부스터를 꺼내 슬림 변환한다.
 
 실행:
     ml/.venv/bin/python ml/xgb_model.py --league premier_league \\
@@ -83,13 +83,15 @@ def main():
     m = B.metrics_of(probs, labels)
     print(f"xgb          acc={m['acc']:.3f} ll={m['ll']:.4f} rec={m['draw_rec']:.3f} (n={m['n']})")
 
-    xgb_file = f"{args.league}_{args.ver}.xgb.json"
-    xp = os.path.join(ROOT, "ml", "permatch", xgb_file)
-    os.makedirs(os.path.dirname(xp), exist_ok=True)
-    clf.get_booster().save_model(xp)
+    booster = clf.get_booster()
+    try:
+        booster_json = json.loads(booster.save_raw(raw_format="json"))
+    except Exception as e:
+        print(f"부스터 직렬화 실패 ({type(e).__name__}): {e}")
+        sys.exit(2)
     art = {
         "model_type": "xgb",
-        "xgb_file": xgb_file,
+        "xgb": booster_json,
         "features": list(pm.FEATURES13),
         "params": {k: (float(v) if isinstance(v, float) else v) for k, v in PARAMS.items()},
         "train_seasons": sorted(train_s),
@@ -105,9 +107,9 @@ def main():
         ok = False
         print(f"DB 저장 실패 ({type(e).__name__}): {e}")
     if ok:
-        print(f"saved {out_p} + {xgb_file} (바이너리 로컬 유지)")
+        print(f"saved {out_p} (부스터 DB 내장)")
     else:
-        print("DB 저장 실패 → 로컬 저장 안 함 (DB-only 정책)")
+        print("DB 저장 실패 → 저장 안 함 (DB-only 정책)")
 
 
 if __name__ == "__main__":
