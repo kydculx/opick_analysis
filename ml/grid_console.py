@@ -243,28 +243,12 @@ def whist_path(league, ver):
     return _eph(f"{league}_{ver}.whist.json")
 
 
-def tune_path(league, ver):
-    return os.path.join(ROOT, "ml", "permatch", f"{league}_{ver}.json")
-
-
 def auto_prog_path(league, ver):
     return _eph(f"{league}_{ver}.auto.json")
 
 
 def list_versions(league):
-    d = os.path.join(ROOT, "ml", "permatch")
-    try:
-        files = os.listdir(d)
-    except OSError:
-        files = []
     out = []
-    for f in files:
-        if not f.startswith(league + "_") or not f.endswith(".json"):
-            continue
-        if f.endswith((".grid.json", ".live.json", ".auto.json", ".whist.json", ".xgb.json", ".cumu.json", ".wrong.json")):
-            continue
-        ver = f[len(league) + 1:-5]
-        out.append(ver)
     try:
         sys.path.insert(0, os.path.join(ROOT, "ml"))
         import supabase_models as _sm
@@ -288,23 +272,19 @@ def load_tune(league, ver):
             return art
     except Exception:
         pass
-    try:
-        with open(tune_path(league, ver), encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return None
+    return None
 
 
 def load_tune_strict(league, ver):
     art = load_tune(league, ver)
     if not isinstance(art, dict):
-        raise FileNotFoundError(tune_path(league, ver))
+        raise FileNotFoundError(f"models/{league}:{ver}")
     return art
 
 
 def tune_exists(league, ver):
-    if ver and os.path.exists(tune_path(league, ver)):
-        return True
+    if not ver:
+        return False
     return isinstance(load_tune(league, ver), dict)
 
 
@@ -686,7 +666,6 @@ def main():
         ver = v_ver.get().strip()
         if not ver:
             return
-        tp = tune_path(v_league.get(), ver)
         art = load_tune(v_league.get(), ver)
         if not isinstance(art, dict):
             return
@@ -872,7 +851,7 @@ def main():
         txt = "−"
         if isinstance(art, dict):
             mt = art.get("model_type") or "permatch"
-            if mt in ("poisson", "dixon", "logreg", "xgb", "lstm", "ensemble"):
+            if mt in ("poisson", "dixon", "logreg", "xgb", "lstm"):
                 mm = art.get("metrics") or {}
                 if isinstance(mm.get("acc"), (int, float)):
                     return f"검증 {mm['acc'] * 100:.1f}% (n={int(mm.get('n', 0))})" if mm.get("n") else f"검증 {mm['acc'] * 100:.1f}%"
@@ -1147,6 +1126,12 @@ def main():
     ttk.Label(fr_train_opt, text="최근가중").pack(side="left", padx=(8, 2))
     ent_recw = ttk.Entry(fr_train_opt, textvariable=v_recw, width=4)
     _reg(ent_recw).pack(side="left")
+    ttk.Separator(f_train, orient="horizontal").pack(fill="x", pady=2)
+    fr_train2 = ttk.Frame(f_train)
+    fr_train2.pack(fill="x", pady=2)
+    for _lbl, _var in (("무부스트", v_drawboost), ("접전폭", v_drawmargin), ("총득점", v_drawtotal)):
+        ttk.Label(fr_train2, text=_lbl).pack(side="left", padx=(8, 2))
+        _reg(ttk.Entry(fr_train2, textvariable=_var, width=5)).pack(side="left")
 
     f_auto = ttk.Frame(detail)
     fr_auto1 = ttk.Frame(f_auto)
@@ -1568,6 +1553,7 @@ def main():
     def _update_bars(vals, title_acc=None, draw=True):
         wmin, wmax, pad = _lim()
         span = wmax - wmin
+        z0 = -wmin
         ax_w.set_xlim(0, span)
         chart_state.update(kind="lin", labels=list(gfx["labels"] or []),
                            vals=list(vals), title=title_acc)
@@ -1576,21 +1562,38 @@ def main():
         else:
             ax_w.set_title("피처 가중치")
         for patch, txt, v in zip(gfx["bars"], gfx["texts"], vals):
-            d = v - wmin
-            patch.set_width(d)
-            patch.set_facecolor("#2563eb")
-            s = f"{'+' if v >= 0 else ''}{v:.3f}"
-            txt.set_text(s)
-            if d >= pad * 2:
-                txt.set_position((d - pad, txt.get_position()[1]))
-                txt.set_ha("right")
-                txt.set_color("white")
-                txt.set_weight("bold")
+            yy = txt.get_position()[1]
+            if v >= 0:
+                patch.set_x(z0)
+                patch.set_width(v)
+                patch.set_facecolor("#2563eb")
+                end = z0 + v
+                if v >= pad * 2:
+                    txt.set_position((end - pad, yy))
+                    txt.set_ha("right")
+                    txt.set_color("white")
+                    txt.set_weight("bold")
+                else:
+                    txt.set_position((end + pad * 0.5, yy))
+                    txt.set_ha("left")
+                    txt.set_color("#52525b")
+                    txt.set_weight("normal")
             else:
-                txt.set_position((d + pad * 0.5, txt.get_position()[1]))
-                txt.set_ha("left")
-                txt.set_color("#52525b")
-                txt.set_weight("normal")
+                patch.set_x(z0 + v)
+                patch.set_width(-v)
+                patch.set_facecolor("#ef4444")
+                end = z0 + v
+                if -v >= pad * 2:
+                    txt.set_position((end + pad, yy))
+                    txt.set_ha("left")
+                    txt.set_color("white")
+                    txt.set_weight("bold")
+                else:
+                    txt.set_position((end - pad * 0.5, yy))
+                    txt.set_ha("right")
+                    txt.set_color("#52525b")
+                    txt.set_weight("normal")
+            txt.set_text(f"{'+' if v >= 0 else ''}{v:.3f}")
         if draw:
             canvas.draw_idle()
 
@@ -2132,37 +2135,28 @@ def main():
     def poll_ckpt():
         o = current_options()
         if o["mode"] != "grid":
-            tp = tune_path(o["league"], o["ver"])
-            art_mt = 0.0
-            if os.path.exists(tp):
-                try:
-                    try:
-                        mt = os.path.getmtime(tp)
-                    except OSError:
-                        mt = 0.0
-                    art_mt = mt
-                    if mt != gfx["last_amtime"]:
-                        gfx["last_amtime"] = mt
-                        d = json.load(open(tp, encoding="utf-8"))
-                        bw = d.get("weights")
-                        names = d.get("features")
-                        sig = (bw, mt) if isinstance(bw, list) else (None, mt)
+            now_live = time.monotonic()
+            if now_live - gfx.get("last_art_db", 0.0) >= 1.0:
+                gfx["last_art_db"] = now_live
+                d = load_tune(o["league"], o["ver"])
+                if isinstance(d, dict):
+                    bw = d.get("weights")
+                    names = d.get("features")
+                    if isinstance(bw, list) and bw:
+                        sig = (bw,)
                         if sig != gfx["last_asig"]:
                             gfx["last_asig"] = sig
-                            if isinstance(bw, list) and bw:
-                                try:
-                                    redraw_graphs(bw, names)
-                                except Exception:
-                                    pass
-                except (OSError, ValueError):
-                    pass
+                            try:
+                                redraw_graphs(bw, names)
+                            except Exception:
+                                pass
             if runner["obj"] is not None:
                 try:
                     ap = auto_prog_path(o["league"], o["ver"])
                     amt = os.path.getmtime(ap) if os.path.exists(ap) else 0.0
                 except OSError:
                     amt = 0.0
-                if amt > art_mt:
+                if amt > 0.0:
                     try:
                         pd = json.load(open(ap, encoding="utf-8"))
                         cw, ca = pd.get("curW"), pd.get("curAcc")
@@ -2325,13 +2319,6 @@ def main():
             else:
                 v_status.set(f"종료 (코드 {rc})")
             ui_state["just_done"] = True
-            try:
-                if v_mode.get() == "train":
-                    ev = f"{v_ver.get().strip()}-ens"
-                    if ev and os.path.exists(tune_path(v_league.get(), ev)):
-                        v_ver.set(ev)
-            except tk.TclError:
-                pass
             refresh_ver_list()
             request_acc()
             poll_once()
@@ -2352,25 +2339,17 @@ def main():
                 clear_train_view()
                 return
         cp = ckpt_path(o["league"], o["ver"])
-        tp = tune_path(o["league"], o["ver"])
         bw, names, src = None, None, "아티팩트"
         try:
             try:
                 cp_mt = os.path.getmtime(cp)
             except OSError:
                 cp_mt = 0.0
-            try:
-                tp_mt = os.path.getmtime(tp)
-            except OSError:
-                tp_mt = 0.0
-            if os.path.exists(tp):
-                try:
-                    d = json.load(open(tp, encoding="utf-8"))
-                    names = d.get("features")
-                    bw = d.get("weights")
-                except (OSError, ValueError):
-                    pass
-            if o["mode"] == "grid" and cp_mt > 0.0 and cp_mt >= tp_mt:
+            d0 = load_tune(o["league"], o["ver"])
+            if isinstance(d0, dict):
+                names = d0.get("features")
+                bw = d0.get("weights")
+            if o["mode"] == "grid" and cp_mt > 0.0:
                 try:
                     cb = json.load(open(cp, encoding="utf-8")).get("bestW")
                 except (OSError, ValueError):
@@ -2488,7 +2467,7 @@ def main():
             return
         base = os.path.join(ROOT, "ml", "permatch", f"{lg}_{ver}")
         gone = []
-        for ext in (".json", ".grid.json", ".auto.json", ".live.json", ".whist.json", ".xgb.json", ".cumu.json", ".wrong.json"):
+        for ext in (".json", ".grid.json", ".auto.json", ".live.json", ".whist.json", ".xgb.json", ".cumu.json", ".wrong.json", ".lstm.pt"):
             try:
                 os.remove(base + ext)
                 gone.append("로컬" + ext)
