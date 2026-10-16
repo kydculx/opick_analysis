@@ -1,3 +1,7 @@
+import { createHash } from "node:crypto";
+import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
 export type Wdl = { win?: number | null; draw?: number | null; loss?: number | null } | null;
@@ -248,13 +252,57 @@ export async function getSeasons(league: string): Promise<{ data: string[]; erro
   }
 }
 
-const MATCH_CACHE_TTL = 5 * 60 * 1000;
-const MATCH_CACHE_MAX = 10;
+const MATCH_CACHE_TTL = 15 * 60 * 1000;
+const MATCH_CACHE_MAX = 48;
+const MATCH_DISK_TTL = 30 * 60 * 1000;
+const MATCH_DISK_DIR = join(tmpdir(), "opick_match_cache");
 const matchCache = new Map<string, { ts: number; rows: SoccerMatch[] }>();
 const matchInflight = new Map<string, Promise<SoccerMatch[]>>();
 
-function matchCacheKey(league: string, seasons: string[]) {
-  return `${league}|${[...seasons].sort().join(",")}`;
+function seasonKey(league: string, s: string) {
+  return `${league}|${s}`;
+}
+
+function matchDiskPath(league: string, seasons: string[]) {
+  const h = createHash("sha1").update(`${league}|${[...seasons].sort().join(",")}`).digest("hex").slice(0, 12);
+  return join(MATCH_DISK_DIR, `${league}_${h}.json`);
+}
+
+function readMatchDisk(league: string, seasons: string[]): SoccerMatch[] | null {
+  try {
+    const p = matchDiskPath(league, seasons);
+    if (Date.now() - statSync(p).mtimeMs > MATCH_DISK_TTL) return null;
+    const j = JSON.parse(readFileSync(p, "utf-8")) as { rows?: unknown };
+    return Array.isArray(j?.rows) ? (j.rows as SoccerMatch[]) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeMatchDisk(league: string, seasons: string[], rows: SoccerMatch[]) {
+  try {
+    mkdirSync(MATCH_DISK_DIR, { recursive: true });
+    pruneMatchDisk();
+    const p = matchDiskPath(league, seasons);
+    const tmp = `${p}.${process.pid}.tmp`;
+    writeFileSync(tmp, JSON.stringify({ league, seasons, ts: Date.now(), rows }));
+    renameSync(tmp, p);
+  } catch {
+  }
+}
+
+function pruneMatchDisk() {
+  try {
+    const now = Date.now();
+    for (const f of readdirSync(MATCH_DISK_DIR)) {
+      const p = join(MATCH_DISK_DIR, f);
+      try {
+        if (f.endsWith(".tmp") || now - statSync(p).mtimeMs > 24 * 60 * 60 * 1000) rmSync(p, { force: true });
+      } catch {
+      }
+    }
+  } catch {
+  }
 }
 
 function rememberMatches(key: string, rows: SoccerMatch[]) {
@@ -266,8 +314,8 @@ function rememberMatches(key: string, rows: SoccerMatch[]) {
   }
 }
 
-async function fetchMatchesRaw(league: string, seasons: string[]): Promise<SoccerMatch[]> {
-  const key = matchCacheKey(league, seasons);
+async function fetchSeasonRows(league: string, s: string): Promise<SoccerMatch[]> {
+  const key = seasonKey(league, s);
   const hit = matchCache.get(key);
   if (hit && Date.now() - hit.ts < MATCH_CACHE_TTL) {
     matchCache.delete(key);
@@ -276,46 +324,53 @@ async function fetchMatchesRaw(league: string, seasons: string[]): Promise<Socce
   }
   const ongoing = matchInflight.get(key);
   if (ongoing) return ongoing;
+  const disk = readMatchDisk(league, [s]);
+  if (disk) {
+    rememberMatches(key, disk);
+    return disk;
+  }
   const p = (async () => {
     const supabase = createServerSupabaseClient();
     const pageSize = 1000;
-    const fetchOne = async (s: string) => {
-      const out: SoccerMatch[] = [];
-      let offset = 0;
-      for (;;) {
-        const { data, error } = await supabase
-          .from("soccer_matches")
-          .select(MATCH_COLS)
-          .eq("league_code", league)
-          .eq("season", s)
-          .order("season", { ascending: false })
-          .order("round", { ascending: false, nullsFirst: false })
-          .order("match_date", { ascending: false })
-          .order("match_time", { ascending: false })
-          .range(offset, offset + pageSize - 1);
-        if (error) throw new Error(error.message);
-        out.push(...((data ?? []) as SoccerMatch[]));
-        if (!data || data.length < pageSize) break;
-        offset += pageSize;
-        if (offset >= 20000) break;
-      }
-      return out;
-    };
-    const perSeason: SoccerMatch[][] = [];
-    for (let i = 0; i < seasons.length; i += 3) {
-      const chunk = await Promise.all(seasons.slice(i, i + 3).map(fetchOne));
-      perSeason.push(...chunk);
+    const out: SoccerMatch[] = [];
+    let offset = 0;
+    for (;;) {
+      const { data, error } = await supabase
+        .from("soccer_matches")
+        .select(MATCH_COLS)
+        .eq("league_code", league)
+        .eq("season", s)
+        .order("season", { ascending: false })
+        .order("round", { ascending: false, nullsFirst: false })
+        .order("match_date", { ascending: false })
+        .order("match_time", { ascending: false })
+        .range(offset, offset + pageSize - 1);
+      if (error) throw new Error(error.message);
+      out.push(...((data ?? []) as SoccerMatch[]));
+      if (!data || data.length < pageSize) break;
+      offset += pageSize;
+      if (offset >= 20000) break;
     }
-    return perSeason.flat();
+    return out;
   })();
   matchInflight.set(key, p);
   try {
     const rows = await p;
     rememberMatches(key, rows);
+    writeMatchDisk(league, [s], rows);
     return rows;
   } finally {
     matchInflight.delete(key);
   }
+}
+
+async function fetchMatchesRaw(league: string, seasons: string[]): Promise<SoccerMatch[]> {
+  const uniq = [...new Set(seasons)];
+  const perSeason: SoccerMatch[][] = [];
+  for (let i = 0; i < uniq.length; i += 3) {
+    perSeason.push(...(await Promise.all(uniq.slice(i, i + 3).map((s) => fetchSeasonRows(league, s)))));
+  }
+  return perSeason.flat();
 }
 
 export async function getMatchesBySeasons(
