@@ -1,13 +1,12 @@
 "use client";
 
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import type { SoccerMatch, League } from "@/lib/queries";
-import { ALL_FEATURES, applyDrawBoost, applyTemp, blendProbs, cappedDot, dcProba, drawFeatures, legacyParts, logregProba, patternProbs, rowFeatures, selectFeatures, sigmoid } from "@/lib/permatch-math";
+import { applyDrawBoost, applyTemp, blendProbs, cappedDot, dcProba, drawFeatures, logregProba, patternProbs, rowFeatures, selectFeatures, sigmoid } from "@/lib/permatch-math";
 import { xgbProba, type XgbSlim } from "@/lib/xgb";
 import type { PermatchArtifact } from "@/lib/predict";
 import { SoccerMatchesTable, COLUMNS, CORE_COLUMNS, FIELD_GROUPS, SINGLE_COLUMNS, type ColumnId } from "@/components/data/SoccerMatchesTable";
 import { EmptyState } from "@/components/ui/Badge";
-import { Button } from "@/components/ui/Button";
 
 export type SavedModel = {
   ver: string;
@@ -29,6 +28,24 @@ function parseScoreLocal(v: string | null | undefined): number | null {
   if (v == null || v === "") return null;
   const n = Number(v);
   return Number.isNaN(n) ? null : n;
+}
+
+function sortMatchRows(a: SoccerMatch, b: SoccerMatch): number {
+  if (a.season !== b.season) return a.season < b.season ? 1 : -1;
+  const ar = a.round;
+  const br = b.round;
+  if (ar !== br) {
+    if (ar == null) return 1;
+    if (br == null) return -1;
+    return br - ar;
+  }
+  const ad = a.match_date ?? "";
+  const bd = b.match_date ?? "";
+  if (ad !== bd) return ad < bd ? 1 : -1;
+  const at = a.match_time ?? "";
+  const bt = b.match_time ?? "";
+  if (at !== bt) return at < bt ? 1 : -1;
+  return 0;
 }
 
 const BET_STAKE = 1000;
@@ -86,20 +103,6 @@ function predictLocal(m: SoccerMatch, art: PermatchArtifact, ver: string) {
       if (p.some((v) => !Number.isFinite(v))) return null;
       return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertT };
     }
-    if (art.model_type === "ensemble" && art.base && art.xgb) {
-      const b = legacyParts(m, art.base);
-      if (!b) return null;
-      const qx = xgbProba(art.xgb, rowFeatures(m));
-      const alpha = art.blend_w ?? 1;
-      const dd = alpha * b.dd + (1 - alpha) * qx[1];
-      const lin = [b.ph * (1 - dd), dd, (1 - b.ph) * (1 - dd)];
-      const bb = art.base;
-      const total = drawFeatures(m)[2];
-      const p0 = applyTemp(blendProbs(lin, b.x, bb.patterns, bb.pattern_tau ?? 0, bb.pattern_alpha ?? 0.5, bb.weights ?? null, bb.pattern_taus ?? null), bb.T);
-      const p = applyDrawBoost(p0, total, bb.draw_boost ?? 0, bb.draw_close_margin ?? 0.12, bb.draw_total_max ?? 2.55);
-      if (p.some((v) => !Number.isFinite(v))) return null;
-      return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertT };
-    }
     const e = art.emphasis ?? new Array(art.features?.length ?? art.mu.length).fill(1);
     const rf = selectFeatures(rowFeatures(m), art.features);
     const x = rf.map((v, i) => Number.isNaN(v) ? 0 : (v - art.mu[i]) / art.sd[i]).map((v, i) => v * (e[i] ?? 1));
@@ -135,29 +138,21 @@ export function DashboardExplorer() {
   const [leagues, setLeagues] = useState<League[]>([]);
   const [league, setLeague] = useState("");
   const [seasons, setSeasons] = useState<string[]>([]);
-  const [checked, setChecked] = useState<string[]>([]);
-  const [trainCount, setTrainCount] = useState("6");
-  const [featSel, setFeatSel] = useState<string[]>([...ALL_FEATURES]);
-  const [trialsText, setTrialsText] = useState("10000");
-  const [jobsText, setJobsText] = useState("4");
-  const [recencyWText, setRecencyWText] = useState("0");
   const [drawBoostText, setDrawBoostText] = useState("");
   const [drawMarginText, setDrawMarginText] = useState("");
   const [drawTotalText, setDrawTotalText] = useState("");
-  const [trainProg, setTrainProg] = useState<{ done: number; total: number; line?: string } | null>(null);
   const [matches, setMatches] = useState<SoccerMatch[]>([]);
   const [hiddenCols, setHiddenCols] = useState<ColumnId[]>([]);
   const [loadingLeagues, setLoadingLeagues] = useState(true);
   const [loadingSeasons, setLoadingSeasons] = useState(false);
   const [loadingMatches, setLoadingMatches] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [trainState, setTrainState] = useState<"idle" | "running" | "done" | "error">("idle");
   const [rawMatches, setRawMatches] = useState<SoccerMatch[]>([]);
+  const [loadedSeasons, setLoadedSeasons] = useState<string[]>([]);
   const [predMap, setPredMap] = useState<Record<string, PredMapEntry>>({});
-  const rawCacheRef = useRef<Record<string, SoccerMatch[]>>({});
+  const rawCacheRef = useRef<Record<string, { rows: SoccerMatch[]; loaded: Set<string> }>>({});
   const tweakedRef = useRef<number[] | null>(null);
-  const predCacheRef = useRef<Record<string, Record<string, PredMapEntry>>>({});
-  const accCacheRef = useRef<Record<string, AccuracyMap>>({});
+  const predCacheRef = useRef<Record<string, { map: Record<string, PredMapEntry>; loaded: Set<string> }>>({});
   const baseMapRef = useRef<AccuracyMap | null>(null);
   const lastPreviewMapRef = useRef<AccuracyMap | null>(null);
   const [models, setModels] = useState<SavedModel[]>([]);
@@ -199,9 +194,6 @@ export function DashboardExplorer() {
         draw_w?: unknown; recency_w?: unknown; wmin?: unknown; wmax?: unknown;
       } | null;
       pattern_stats: Record<string, { rank: number; freq: number; acc: number }[]> | null;
-      base_ver?: string;
-      blend_w?: number;
-      base?: PermatchArtifact | null;
       xgb?: XgbSlim | null;
       cumulative?: {
         base_ver?: string;
@@ -228,6 +220,7 @@ export function DashboardExplorer() {
   const [gridWmaxText, setGridWmaxText] = useState("3.0");
   const [gridDrawWText, setGridDrawWText] = useState("0");
   const [gridRecWText, setGridRecWText] = useState("0");
+  const [modelApplied, setModelApplied] = useState<Record<string, boolean>>({});
   const [minOddsText, setMinOddsText] = useState("1.5");
   const FEATURE_KO: Record<string, string> = {
     rank: "순위차", power: "전력", hstr: "H2H강도", cond: "컨디션", att: "공격", def: "수비",
@@ -237,17 +230,18 @@ export function DashboardExplorer() {
   const [applyState, setApplyState] = useState<"idle" | "running" | "done" | "error">("idle");
   const [appliedVer, setAppliedVer] = useState("");
   const appliedKeyRef = useRef("");
+  const appliedModelVerRef = useRef("");
   const inflightKeyRef = useRef("");
   const genRef = useRef(0);
   const leagueRef = useRef(league);
   const selVerRef = useRef(selVer);
-  const checkedRef = useRef(checked);
+  const seasonsRef = useRef(seasons);
   const modelDetailRef = useRef(modelDetail);
   const rawMatchesRef = useRef(rawMatches);
   const previewRef = useRef(previewWith);
   leagueRef.current = league;
   selVerRef.current = selVer;
-  checkedRef.current = checked;
+  seasonsRef.current = seasons;
   modelDetailRef.current = modelDetail;
   rawMatchesRef.current = rawMatches;
   previewRef.current = previewWith;
@@ -259,8 +253,8 @@ export function DashboardExplorer() {
     appliedKeyRef.current = "";
     setLeague(lg);
     setSeasons([]);
-    setChecked([]);
-    setTrainState("idle");
+    setLoadedSeasons([]);
+    setAccLoaded(false);
     setApplyState("idle");
     setAppliedVer("");
     setModels([]);
@@ -292,8 +286,8 @@ export function DashboardExplorer() {
     if (!league) return;
     const gen = ++genRef.current;
     setLoadingSeasons(true);
-    setChecked([]);
-    setTrainState("idle");
+    setLoadedSeasons([]);
+    setAccLoaded(false);
     setApplyState("idle");
     setAppliedVer("");
     appliedKeyRef.current = "";
@@ -312,7 +306,6 @@ export function DashboardExplorer() {
         if (gen !== genRef.current || leagueRef.current !== league) return;
         if (j.ok) {
           setSeasons(j.data);
-          setChecked(j.data);
         } else {
           setError(j.error ?? "시즌 조회 실패");
         }
@@ -331,23 +324,30 @@ export function DashboardExplorer() {
   }
 
   function loadPredMap(lg: string, ver: string, seasonList: string[]) {
+    if (seasonList.length === 0) return;
     const ck = cacheKey(lg, ver);
-    const hit = predCacheRef.current[ck];
-    if (hit) {
-      setPredMap(hit);
+    let entry = predCacheRef.current[ck];
+    if (!entry) {
+      entry = { map: {}, loaded: new Set<string>() };
+      predCacheRef.current[ck] = entry;
+    }
+    const missing = seasonList.filter((s) => !entry.loaded.has(s));
+    if (missing.length === 0) {
+      setPredMap((prev) => ({ ...entry.map, ...prev }));
       return;
     }
-    if (seasonList.length === 0) return;
     const gen = genRef.current;
-    setLoadingMatches(true);
-    const qs = new URLSearchParams({ league: lg, seasons: seasonList.join(","), model_ver: ver });
+    const latest = seasonsRef.current[0];
+    if (latest && missing.includes(latest)) setLoadingMatches(true);
+    const qs = new URLSearchParams({ league: lg, seasons: missing.join(","), model_ver: ver });
     fetch(`/api/predictions?${qs.toString()}`)
       .then((r) => r.json())
       .then((j) => {
         if (gen !== genRef.current) return;
         if (j.ok) {
-          predCacheRef.current[ck] = j.data;
-          setPredMap(j.data);
+          Object.assign(entry.map, j.data);
+          for (const s of missing) entry.loaded.add(s);
+          setPredMap((prev) => ({ ...prev, ...j.data }));
         } else {
           setError(j.error ?? "예측 조회 실패");
         }
@@ -361,60 +361,55 @@ export function DashboardExplorer() {
       });
   }
 
-  function loadAccuracy(lg: string, ver: string, seasonList: string[]) {
-    const ck = cacheKey(lg, ver);
-    const hit = accCacheRef.current[ck];
-    if (hit) {
-      setAccuracy(hit);
-      baseMapRef.current = hit;
-      setAccLoaded(true);
-      return;
-    }
-    const gen = genRef.current;
-    setAccLoaded(false);
-    const qs = new URLSearchParams({ league: lg, model_ver: ver, seasons: seasonList.join(",") });
-    fetch(`/api/accuracy?${qs.toString()}`, { cache: "no-store" })
-      .then((r) => r.json())
-      .then((j) => {
-        if (gen !== genRef.current) return;
-        if (j.ok) {
-          accCacheRef.current[ck] = j.data;
-          setAccuracy(j.data);
-          baseMapRef.current = j.data;
-        } else {
-          setError(j.error ?? "적중률 조회 실패");
-        }
-        setAccLoaded(true);
-      })
-      .catch(() => {
-        if (gen !== genRef.current) return;
-        setAccuracy({});
-        setAccLoaded(true);
-      });
-  }
-
   useEffect(() => {
     if (!league || seasons.length === 0) return;
     const gen = genRef.current;
-    const hit = rawCacheRef.current[league];
-    if (hit) {
-      setRawMatches(hit);
+    const cache = (rawCacheRef.current[league] ??= { rows: [], loaded: new Set<string>() });
+    const missing = seasons.filter((s) => !cache.loaded.has(s));
+    if (missing.length === 0) {
+      queueMicrotask(() => {
+        setRawMatches(cache.rows);
+        setLoadedSeasons([...cache.loaded]);
+      });
       return;
     }
     const ctrl = new AbortController();
-    setLoadingMatches(true);
-    const qs = new URLSearchParams({ league, seasons: seasons.join(",") });
-    fetch(`/api/matches?${qs.toString()}`, { signal: ctrl.signal })
-      .then((r) => r.json())
-      .then((j) => {
-        if (gen !== genRef.current) return;
-        if (j.ok) {
-          rawCacheRef.current[league] = j.data;
-          setRawMatches(j.data);
-        } else {
-          setError(j.error ?? "경기 조회 실패");
+    const latest = seasons[0];
+    const first = missing.includes(latest) ? [latest] : [missing[0]];
+    const rest = missing.filter((s) => !first.includes(s));
+    const apply = (rowsIn: SoccerMatch[], loadedIn: string[]) => {
+      const seen = new Set(cache.rows.map((m) => m.id));
+      for (const m of rowsIn) {
+        if (!seen.has(m.id)) {
+          seen.add(m.id);
+          cache.rows.push(m);
         }
-      })
+      }
+      for (const s of loadedIn) cache.loaded.add(s);
+      cache.rows.sort(sortMatchRows);
+      setRawMatches([...cache.rows]);
+      setLoadedSeasons([...cache.loaded]);
+    };
+    const fetchSeasons = async (list: string[]) => {
+      const qs = new URLSearchParams({ league, seasons: list.join(",") });
+      const j = await fetch(`/api/matches?${qs.toString()}`, { signal: ctrl.signal }).then((r) => r.json());
+      if (gen !== genRef.current || leagueRef.current !== league) return;
+      if (!j.ok) {
+        setError(j.error ?? "경기 조회 실패");
+        return;
+      }
+      apply(j.data as SoccerMatch[], list);
+    };
+    (async () => {
+      if (first.includes(latest)) {
+        queueMicrotask(() => setLoadingMatches(true));
+      }
+      await fetchSeasons(first);
+      setLoadingMatches(false);
+      for (let i = 0; i < rest.length; i += 3) {
+        await fetchSeasons(rest.slice(i, i + 3));
+      }
+    })()
       .catch((e) => {
         if (ctrl.signal.aborted || gen !== genRef.current) return;
         setError(e instanceof Error ? e.message : "경기 조회 실패");
@@ -426,71 +421,30 @@ export function DashboardExplorer() {
   }, [league, seasons]);
 
   useEffect(() => {
-    if (!league || !appliedVer || seasons.length === 0) return;
-    loadPredMap(league, appliedVer, seasons);
+    if (!league || !appliedVer || loadedSeasons.length === 0) return;
+    loadPredMap(league, appliedVer, loadedSeasons);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [league, appliedVer, seasons]);
+  }, [league, appliedVer, loadedSeasons]);
 
   useEffect(() => {
-    const set = new Set(checked);
     setMatches(
       rawMatches
-        .filter((m) => set.has(m.season))
         .map((m) => {
           const key = m.source_match_id || String(m.id);
           const p = predMap[key];
           return { ...m, pred: p ? { home: p.home, draw: p.draw, away: p.away, ver: p.ver } : null };
         })
     );
-  }, [rawMatches, checked, predMap]);
+  }, [rawMatches, predMap]);
 
   function toggleColumn(id: ColumnId) {
     setHiddenCols((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
-  }
-
-  async function pollJob(
-    base: string,
-    jobId: string,
-    maxRounds = 150,
-    onProgress?: (p: { done: number; total: number } | null, tail?: string[]) => void,
-    isCancelled?: () => boolean,
-  ): Promise<"done" | "error" | "stopped"> {
-    for (let i = 0; i < maxRounds; i++) {
-      await new Promise((r) => setTimeout(r, 2000));
-      if (isCancelled?.()) return "stopped";
-      try {
-        const st = await fetch(`${base}?jobId=${encodeURIComponent(jobId)}`).then((r) => r.json());
-        if (st.ok && onProgress) onProgress(st.progress ?? null, st.tail ?? undefined);
-        if (st.ok && st.job.status !== "running") {
-          return st.job.status === "done" ? "done" : "error";
-        }
-      } catch {
-        return "error";
-      }
-    }
-    return "error";
-  }
-
-  const trainJobRef = useRef<{ base: string; id: string } | null>(null);
-  const trainStopRef = useRef(false);
-
-  async function stopTrain() {
-    const j = trainJobRef.current;
-    trainStopRef.current = true;
-    if (j) {
-      try {
-        await fetch(`${j.base}?jobId=${encodeURIComponent(j.id)}`, { method: "DELETE" });
-      } catch {
-      }
-      trainJobRef.current = null;
-    }
   }
 
   async function reloadModels() {
     genRef.current += 1;
     const gen = genRef.current;
     predCacheRef.current = {};
-    accCacheRef.current = {};
     appliedKeyRef.current = "";
     setDelSel([]);
     await fetchModels(league, gen);
@@ -509,7 +463,6 @@ export function DashboardExplorer() {
           setTweaked(null);
           previewWith(ws as number[], typeof j.detail?.hfa === "number" ? j.detail.hfa : 0);
         }
-        loadAccuracy(lg, ver, checkedRef.current);
       }
     } catch {
     }
@@ -532,71 +485,11 @@ export function DashboardExplorer() {
     }
   }
 
-  async function handleTrain() {
-    if (trainingOrdered.length === 0 || trainState === "running") return;
-    if (featSel.length === 0) {
-      setError("피처를 1개 이상 선택하세요");
-      return;
-    }
-    setTrainState("running");
-    setTrainProg(null);
-    setAppliedVer("");
-    setPredMap({});
-    appliedKeyRef.current = "";
-    try {
-      const res = await fetch("/api/match-train", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          league,
-          seasons: trainingOrdered,
-          ...(featSel.length !== ALL_FEATURES.length ? { features: featSel } : {}),
-          mode: "full",
-          trials: trialsText,
-          jobs: jobsText,
-          recencyW: recencyWText,
-        }),
-      }).then((r) => r.json());
-      if (!res.ok) {
-        setTrainState("error");
-        return;
-      }
-      trainStopRef.current = false;
-      trainJobRef.current = { base: "/api/match-train", id: res.jobId as string };
-      const done = await pollJob(
-        "/api/match-train",
-        res.jobId as string,
-        1800,
-        (p, tail) => setTrainProg(p ? { ...p, line: tail?.[tail.length - 1] } : null),
-        () => trainStopRef.current,
-      );
-      trainJobRef.current = null;
-      if (done === "stopped") {
-        setTrainState("idle");
-        setTrainProg(null);
-        return;
-      }
-      setTrainState(done);
-      if (done === "done") {
-        await fetchModels(league);
-        setSelVer(res.ver as string);
-        setApplyState("idle");
-      }
-    } catch {
-      setTrainState("error");
-    }
-  }
-
   leagueRef.current = league;
   selVerRef.current = selVer;
-  checkedRef.current = checked;
-
-  function buildApplyKey(lg: string, ver: string, seasonList: string[]) {
-    return `${lg}|${ver}|${[...seasonList].sort().join(",")}`;
-  }
 
   useEffect(() => {
-    if (!league || !selVer || checked.length === 0) {
+    if (!league || !selVer || seasons.length === 0) {
       if (selVer === "" && inflightKeyRef.current && !inflightKeyRef.current.startsWith(`${league}|`)) {
         inflightKeyRef.current = "";
         setApplyState("idle");
@@ -604,17 +497,16 @@ export function DashboardExplorer() {
       return;
     }
     if (models.length > 0 && !models.some((m) => m.ver === selVer)) return;
-    if (seasons.length > 0 && !checked.every((c) => seasons.includes(c))) return;
-    const key = buildApplyKey(league, selVer, checked);
+    const key = `${league}|${selVer}`;
     if (key === appliedKeyRef.current) return;
     appliedKeyRef.current = key;
+    if (appliedModelVerRef.current !== selVer) {
+      appliedModelVerRef.current = selVer;
+      delete predCacheRef.current[cacheKey(league, selVer)];
+    }
     setAppliedVer(selVer);
     setApplyState("done");
-    delete predCacheRef.current[cacheKey(league, selVer)];
-    delete accCacheRef.current[cacheKey(league, selVer)];
-    loadAccuracy(league, selVer, checked);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [league, selVer, checked, models, seasons]);
+  }, [league, selVer, models, seasons]);
 
   useEffect(() => {
     tuningRef.current = false;
@@ -625,6 +517,7 @@ export function DashboardExplorer() {
     setTweaked(null);
     if (!league || !selVer) {
       setModelDetail(null);
+      setModelApplied({});
       return;
     }
     const gen = genRef.current;
@@ -634,12 +527,7 @@ export function DashboardExplorer() {
         if (gen !== genRef.current) return;
         if (j.ok) {
           setModelDetail({ model_type: j.model_type, detail: j.detail });
-          const feats = j.detail?.features;
-          if (Array.isArray(feats) && feats.length > 0) {
-            setFeatSel(feats.filter((f: unknown) => typeof f === "string" && (ALL_FEATURES as string[]).includes(f as string)) as string[]);
-          } else {
-            setFeatSel([...ALL_FEATURES]);
-          }
+          const applied: Record<string, boolean> = {};
           const ws = j.detail?.weights;
           if (Array.isArray(ws)) {
             setWOrder(ws.map((_, i) => i).sort((a, b) => Math.abs((ws as number[])[b]) - Math.abs((ws as number[])[a])));
@@ -650,13 +538,19 @@ export function DashboardExplorer() {
               const n = Number(v);
               return Number.isFinite(n) ? String(n) : fb;
             };
-            if (gp.grid_step !== undefined) setGridStepText(num(gp.grid_step, gridStepText));
-            if (gp.jobs !== undefined) setGridJobsText(num(gp.jobs, gridJobsText));
-            if (gp.draw_w !== undefined) setGridDrawWText(num(gp.draw_w, gridDrawWText));
-            if (gp.recency_w !== undefined) setGridRecWText(num(gp.recency_w, gridRecWText));
-            if (gp.wmin !== undefined) setGridWminText(num(gp.wmin, gridWminText));
-            if (gp.wmax !== undefined) setGridWmaxText(num(gp.wmax, gridWmaxText));
+            if (gp.grid_step !== undefined) { setGridStepText(num(gp.grid_step, gridStepText)); applied.step = true; }
+            if (gp.jobs !== undefined) { setGridJobsText(num(gp.jobs, gridJobsText)); applied.jobs = true; }
+            if (gp.draw_w !== undefined) { setGridDrawWText(num(gp.draw_w, gridDrawWText)); applied.drawW = true; }
+            if (gp.recency_w !== undefined) { setGridRecWText(num(gp.recency_w, gridRecWText)); applied.recW = true; }
+            if (gp.wmin !== undefined) { setGridWminText(num(gp.wmin, gridWminText)); applied.wmin = true; }
+            if (gp.wmax !== undefined) { setGridWmaxText(num(gp.wmax, gridWmaxText)); applied.wmax = true; }
           }
+          if (!applied.step) setGridStepText("0.01");
+          if (!applied.jobs) setGridJobsText("4");
+          if (!applied.drawW) setGridDrawWText("0");
+          if (!applied.recW) setGridRecWText("0");
+          if (!applied.wmin) setGridWminText("-3.0");
+          if (!applied.wmax) setGridWmaxText("3.0");
           const db = j.detail as {
             draw_boost?: unknown; draw_close_margin?: unknown; draw_total_max?: unknown;
           } | null | undefined;
@@ -665,16 +559,21 @@ export function DashboardExplorer() {
               const n = Number(v);
               return Number.isFinite(n) ? String(n) : fb;
             };
-            if (db.draw_boost !== undefined) setDrawBoostText(num(db.draw_boost, drawBoostText));
-            if (db.draw_close_margin !== undefined) setDrawMarginText(num(db.draw_close_margin, drawMarginText));
-            if (db.draw_total_max !== undefined) setDrawTotalText(num(db.draw_total_max, drawTotalText));
+            if (db.draw_boost !== undefined) { setDrawBoostText(num(db.draw_boost, drawBoostText)); applied.boost = true; }
+            if (db.draw_close_margin !== undefined) { setDrawMarginText(num(db.draw_close_margin, drawMarginText)); applied.margin = true; }
+            if (db.draw_total_max !== undefined) { setDrawTotalText(num(db.draw_total_max, drawTotalText)); applied.total = true; }
           }
+          setModelApplied(applied);
         } else {
           setModelDetail(null);
+          setModelApplied({});
         }
       })
       .catch(() => {
-        if (gen === genRef.current) setModelDetail(null);
+        if (gen === genRef.current) {
+          setModelDetail(null);
+          setModelApplied({});
+        }
       });
     return () => {
       tuningRef.current = false;
@@ -696,17 +595,14 @@ export function DashboardExplorer() {
         const cur = modelDetailRef.current?.detail;
         if (JSON.stringify(j.detail.weights) === JSON.stringify(cur?.weights) && j.detail.hfa === cur?.hfa) return;
         delete predCacheRef.current[cacheKey(lg, ver)];
-        delete accCacheRef.current[cacheKey(lg, ver)];
         const ws = j.detail.weights as number[];
         setModelDetail({ model_type: j.model_type, detail: j.detail });
         setWOrder(ws.map((_, i) => i).sort((a, b) => Math.abs(ws[b]) - Math.abs(ws[a])));
         previewRef.current(ws, typeof j.detail.hfa === "number" ? j.detail.hfa : 0);
-        loadAccuracy(lg, ver, checkedRef.current);
       } catch {
       }
     }, 5000);
     return () => clearInterval(id);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
 
@@ -830,11 +726,11 @@ export function DashboardExplorer() {
     }
     const train = new Set(d.train_seasons);
     const scored = rawMatches.filter((m) => {
-      if (!checked.includes(String(m.season)) || train.has(String(m.season))) return false;
+      if (train.has(String(m.season))) return false;
       return parseScoreLocal(m.home_score) != null && parseScoreLocal(m.away_score) != null;
     });
     if (scored.length === 0) {
-      setError("조절용 미학습 시즌을 체크하세요");
+      setError("조절할 미학습 시즌 경기가 없습니다");
       return;
     }
     const nw = d.weights.length;
@@ -1077,7 +973,6 @@ export function DashboardExplorer() {
           setModelDetail((prev) =>
             prev?.detail ? { ...prev, detail: { ...prev.detail, weights: saveW, hfa: saveH } } : prev
           );
-          delete accCacheRef.current[cacheKey(league, selVer)];
           previewWith(saveW, saveH, false);
           if (lastPreviewMapRef.current) baseMapRef.current = lastPreviewMapRef.current;
             }
@@ -1111,11 +1006,11 @@ export function DashboardExplorer() {
     }
     const train = new Set(d.train_seasons);
     const tune = [...new Set(rawMatches.filter((m) => {
-      if (!checked.includes(String(m.season)) || train.has(String(m.season))) return false;
+      if (train.has(String(m.season))) return false;
       return parseScoreLocal(m.home_score) != null && parseScoreLocal(m.away_score) != null;
     }).map((m) => String(m.season)))].sort();
     if (tune.length === 0) {
-      setError("조절용 미학습 시즌을 체크하세요");
+      setError("조절할 미학습 시즌 경기가 없습니다");
       return;
     }
     const five = selVer.includes("-f5");
@@ -1211,9 +1106,7 @@ export function DashboardExplorer() {
               } else if (b > gridBestRef.current) {
                 gridBestRef.current = b;
                 delete predCacheRef.current[cacheKey(league, selVer)];
-                delete accCacheRef.current[cacheKey(league, selVer)];
                 await refreshGridView(true);
-                loadAccuracy(league, selVer, checked);
               }
             }
           }
@@ -1221,9 +1114,7 @@ export function DashboardExplorer() {
             if (st.job.status === "done") {
               await fetchModels(league);
               delete predCacheRef.current[cacheKey(league, selVer)];
-              delete accCacheRef.current[cacheKey(league, selVer)];
               await refreshGridView(true);
-              loadAccuracy(league, selVer, checked);
             }
             break;
           }
@@ -1252,16 +1143,45 @@ export function DashboardExplorer() {
     setModelDetail((prev) =>
       prev?.detail ? { ...prev, detail: { ...prev.detail, weights: tweaked } } : prev
     );
-    delete accCacheRef.current[cacheKey(league, selVer)];
     const lb = lastPreviewMapRef.current;
     if (lb) baseMapRef.current = lb;
     tweakedRef.current = null;
     setTweaked(null);
   }
 
+  const derivedAccuracy = useMemo<AccuracyMap>(() => {
+    const stats: AccuracyMap = {};
+    for (const m of rawMatches) {
+      const p = predMap[m.source_match_id || String(m.id)];
+      if (!p) continue;
+      const s = String(m.season);
+      const st = stats[s] ?? (stats[s] = { n: 0, hit: 0, acc: null, pending: 0 });
+      const h = parseScoreLocal(m.home_score);
+      const a = parseScoreLocal(m.away_score);
+      if (h == null || a == null) {
+        st.pending = (st.pending ?? 0) + 1;
+        continue;
+      }
+      const actual = h > a ? 0 : h === a ? 1 : 2;
+      const probs = [p.home, p.draw, p.away];
+      const pick = probs.indexOf(Math.max(...probs));
+      st.n += 1;
+      if (pick === actual) st.hit += 1;
+    }
+    for (const st of Object.values(stats)) st.acc = st.n > 0 ? st.hit / st.n : null;
+    return stats;
+  }, [rawMatches, predMap]);
+
+  useEffect(() => {
+    if (tuningRef.current || tweakedRef.current) return;
+    queueMicrotask(() => {
+      setAccuracy(derivedAccuracy);
+      baseMapRef.current = derivedAccuracy;
+      setAccLoaded(true);
+    });
+  }, [derivedAccuracy]);
+
   const ascSeasons = [...seasons].sort();
-  const trainN = Math.max(0, Math.min(Number.parseInt(trainCount, 10) || 0, Math.max(0, seasons.length - 1)));
-  const trainingOrdered = ascSeasons.slice(0, trainN);
   const viewSeasons = [...ascSeasons].reverse();
 
   function toggleGroup(cols: ColumnId[]) {
@@ -1496,7 +1416,7 @@ export function DashboardExplorer() {
                           const inScope = (s: string) => !trainSet.has(s);
                         for (const m of rawMatches) {
                           const s = String(m.season);
-                          if (!checked.includes(s) || !inScope(s)) continue;
+                          if (!inScope(s)) continue;
                           const h = parseScoreLocal(m.home_score);
                           const a = parseScoreLocal(m.away_score);
                           if (h == null || a == null) continue;
@@ -1561,133 +1481,6 @@ export function DashboardExplorer() {
               })()
             )}
           </div>
-        </div>
-
-        <hr className="border-zinc-200 dark:border-zinc-800" />
-
-        <div>
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-medium text-zinc-500">학습시즌 ({trainingOrdered.length})</span>
-            <label className="flex items-center gap-1 text-xs text-zinc-500">
-              학습시즌수
-              <input
-                value={trainCount}
-                onChange={(e) => setTrainCount(e.target.value.replace(/[^0-9]/g, ""))}
-                disabled={trainState === "running"}
-                inputMode="numeric"
-                aria-label="학습시즌수"
-                className="w-12 rounded-lg border border-zinc-300 bg-white px-2 py-0.5 text-right font-mono text-xs text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
-              />
-            </label>
-          </div>
-          <details open className="mt-2 rounded-xl border border-zinc-200 dark:border-zinc-800">
-            <summary className="cursor-pointer px-2.5 py-1.5 text-xs font-medium text-zinc-500">
-              피처 선택 ({featSel.length}/{ALL_FEATURES.length})
-            </summary>
-            <div className="flex flex-wrap gap-x-3 gap-y-1.5 px-2.5 pb-1">
-              {ALL_FEATURES.map((f) => (
-                <label key={f} className="flex cursor-pointer items-center gap-1 text-xs hover:opacity-80" title={f}>
-                  <input
-                    type="checkbox"
-                    checked={featSel.includes(f)}
-                    onChange={() =>
-                      setFeatSel((prev) => (prev.includes(f) ? prev.filter((x) => x !== f) : [...prev, f]))
-                    }
-                    disabled={trainState === "running"}
-                    className="h-3.5 w-3.5 accent-blue-600 disabled:opacity-40 dark:accent-blue-400"
-                  />
-                  <span>{FEATURE_KO[f] ?? f}</span>
-                </label>
-              ))}
-            </div>
-            <div className="px-2.5 pb-2">
-              <button
-                onClick={() => setFeatSel([...ALL_FEATURES])}
-                disabled={trainState === "running"}
-                className="text-[11px] text-blue-600 underline underline-offset-2 disabled:opacity-40 dark:text-blue-400"
-              >
-                전체 선택
-              </button>
-            </div>
-          </details>
-          <details open className="mt-2 rounded-xl border border-zinc-200 dark:border-zinc-800">
-            <summary className="cursor-pointer px-2.5 py-1.5 text-xs font-medium text-zinc-500">
-              학습 방식 (전체 {trialsText}회)
-            </summary>
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-2.5 pb-2">
-              <>
-                <label className="flex items-center gap-1 text-xs text-zinc-500">
-                  trials
-                    <input
-                      value={trialsText}
-                      onChange={(e) => setTrialsText(e.target.value.replace(/[^0-9]/g, ""))}
-                      disabled={trainState === "running"}
-                      inputMode="numeric"
-                      aria-label="trials"
-                      className="w-16 rounded-lg border border-zinc-300 bg-white px-2 py-0.5 text-right font-mono text-xs text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
-                    />
-                  </label>
-                  <label className="flex items-center gap-1 text-xs text-zinc-500">
-                    jobs
-                    <input
-                      value={jobsText}
-                      onChange={(e) => setJobsText(e.target.value.replace(/[^0-9]/g, ""))}
-                      disabled={trainState === "running"}
-                      inputMode="numeric"
-                      aria-label="jobs"
-                      className="w-10 rounded-lg border border-zinc-300 bg-white px-2 py-0.5 text-right font-mono text-xs text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
-                    />
-                  </label>
-                  <label className="flex items-center gap-1 text-xs text-zinc-500">
-                    최근가중
-                    <input
-                      value={recencyWText}
-                      onChange={(e) => setRecencyWText(e.target.value.replace(/[^0-9.]/g, ""))}
-                      disabled={trainState === "running"}
-                      inputMode="decimal"
-                      aria-label="최근가중"
-                      placeholder="0"
-                      className="w-12 rounded-lg border border-zinc-300 bg-white px-2 py-0.5 text-right font-mono text-xs text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
-                    />
-                  </label>
-              </>
-            </div>
-          </details>
-          <Button
-            size="sm"
-            disabled={
-              trainingOrdered.length === 0 || trainState === "running" || trainState === "done"
-            }
-            onClick={handleTrain}
-            className={
-              trainingOrdered.length > 0 && (trainState === "idle" || trainState === "error")
-                ? "mt-3 w-full bg-blue-600 text-white hover:brightness-110 dark:bg-blue-400 dark:text-black dark:hover:brightness-110"
-                : "mt-3 w-full"
-            }
-          >
-            {trainState === "running"
-              ? trainProg && trainProg.total > 0
-                ? `학습 중... ${trainProg.done.toLocaleString()}/${trainProg.total.toLocaleString()} (${((trainProg.done / trainProg.total) * 100).toFixed(0)}%)`
-                : "학습 중..."
-              : trainState === "done"
-                ? "학습 완료"
-                : trainState === "error"
-                  ? "실패 · 다시 시도"
-                  : `학습하기${trainingOrdered.length > 0 ? ` (${trainingOrdered.length})` : ""}`}
-          </Button>
-          {trainState === "running" && (
-            <button
-              onClick={stopTrain}
-              className="mt-1.5 w-full rounded-lg bg-red-500 px-2 py-1 text-xs text-white hover:brightness-110 dark:bg-red-400 dark:text-black"
-            >
-              중지 (프로세스 종료)
-            </button>
-          )}
-          {trainState === "running" && trainProg?.line && (
-            <p className="mt-1 truncate px-0.5 font-mono text-[10px] text-zinc-400" title={trainProg.line}>
-              {trainProg.line.length > 90 ? trainProg.line.slice(-90) : trainProg.line}
-            </p>
-          )}
         </div>
 
         <hr className="border-zinc-200 dark:border-zinc-800" />
@@ -1773,7 +1566,6 @@ export function DashboardExplorer() {
                         failed++;
                       }
                       delete predCacheRef.current[cacheKey(league, ver)];
-                      delete accCacheRef.current[cacheKey(league, ver)];
                     }
                     if (delSel.includes(selVer)) {
                       setSelVer("");
@@ -1820,10 +1612,15 @@ export function DashboardExplorer() {
                       <span className="w-14 shrink-0 truncate text-zinc-600 dark:text-zinc-400" title={r.name}>
                         {FEATURE_KO[r.name] ?? r.name}
                       </span>
-                      <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
+                      <div className="relative h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-100 dark:bg-zinc-800">
+                        <div className="absolute inset-y-0 left-1/2 w-px -translate-x-1/2 bg-zinc-300 dark:bg-zinc-600" />
                         <div
-                          className={`h-full rounded-full ${r.w >= 0 ? "bg-blue-600 dark:bg-blue-400" : "bg-red-500 dark:bg-red-400"}`}
-                          style={{ width: `${(Math.abs(r.w) / max) * 100}%` }}
+                          className={`absolute inset-y-0 ${r.w >= 0 ? "rounded-r-full bg-blue-600 dark:bg-blue-400" : "rounded-l-full bg-red-500 dark:bg-red-400"}`}
+                          style={
+                            r.w >= 0
+                              ? { left: "50%", width: `${(Math.abs(r.w) / max) * 50}%` }
+                              : { right: "50%", width: `${(Math.abs(r.w) / max) * 50}%` }
+                          }
                         />
                       </div>
                       <button
@@ -1861,29 +1658,33 @@ export function DashboardExplorer() {
                 )}
                 <div className="mb-1.5 grid grid-cols-2 gap-1">
                   {[
-                    { label: "축간격", value: gridStepText, set: setGridStepText, ph: "0.01" },
-                    { label: "jobs", value: gridJobsText, set: setGridJobsText, ph: "4" },
-                    { label: "무가중", value: gridDrawWText, set: setGridDrawWText, ph: "0" },
-                    { label: "최근가중", value: gridRecWText, set: setGridRecWText, ph: "0" },
-                    { label: "wmin", value: gridWminText, set: setGridWminText, ph: "-3.0" },
-                    { label: "wmax", value: gridWmaxText, set: setGridWmaxText, ph: "3.0" },
-                    { label: "무부스트", value: drawBoostText, set: setDrawBoostText, ph: "-" },
-                    { label: "접전", value: drawMarginText, set: setDrawMarginText, ph: "-" },
-                    { label: "득점", value: drawTotalText, set: setDrawTotalText, ph: "-" },
-                  ].map((f) => (
-                    <label key={f.label} className="flex items-center gap-1 text-[11px] text-zinc-500">
-                      <span className="shrink-0">{f.label}</span>
-                      <input
-                        value={f.value}
-                        onChange={(e) => f.set(e.target.value)}
-                        disabled={gridding}
-                        inputMode="decimal"
-                        placeholder={f.ph}
-                        aria-label={f.label}
-                        className="w-full min-w-0 rounded-lg border border-zinc-300 bg-white px-1.5 py-0.5 text-right font-mono text-[11px] text-zinc-700 disabled:opacity-40 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"
-                      />
-                    </label>
-                  ))}
+                    { label: "축간격", fk: "step", value: gridStepText, set: setGridStepText, ph: "0.01" },
+                    { label: "jobs", fk: "jobs", value: gridJobsText, set: setGridJobsText, ph: "4" },
+                    { label: "무가중", fk: "drawW", value: gridDrawWText, set: setGridDrawWText, ph: "0" },
+                    { label: "최근가중", fk: "recW", value: gridRecWText, set: setGridRecWText, ph: "0" },
+                    { label: "wmin", fk: "wmin", value: gridWminText, set: setGridWminText, ph: "-3.0" },
+                    { label: "wmax", fk: "wmax", value: gridWmaxText, set: setGridWmaxText, ph: "3.0" },
+                    { label: "무부스트", fk: "boost", value: drawBoostText, set: setDrawBoostText, ph: "-" },
+                    { label: "접전", fk: "margin", value: drawMarginText, set: setDrawMarginText, ph: "-" },
+                    { label: "득점", fk: "total", value: drawTotalText, set: setDrawTotalText, ph: "-" },
+                  ].map((f) => {
+                    const locked = !modelApplied[f.fk];
+                    return (
+                      <label key={f.label} className="flex items-center gap-1 text-[11px] text-zinc-500">
+                        <span className="shrink-0">{f.label}</span>
+                        <input
+                          value={f.value}
+                          onChange={(e) => f.set(e.target.value)}
+                          disabled={gridding}
+                          readOnly={locked}
+                          inputMode="decimal"
+                          placeholder={f.ph}
+                          aria-label={f.label}
+                          className={`w-full min-w-0 rounded-lg border border-zinc-300 px-1.5 py-0.5 text-right font-mono text-[11px] disabled:opacity-40 dark:border-zinc-700 ${locked ? "bg-zinc-100 text-zinc-500 dark:bg-zinc-900 dark:text-zinc-500" : "bg-white text-zinc-700 dark:bg-zinc-950 dark:text-zinc-300"}`}
+                        />
+                      </label>
+                    );
+                  })}
                 </div>
                 <div className="mt-1.5 flex gap-1.5">
                   <button
@@ -1954,16 +1755,6 @@ export function DashboardExplorer() {
           <div key={league} className="absolute inset-0 z-50 flex items-center justify-center bg-black/40">
             <div className="w-64 rounded-2xl bg-white p-5 shadow-xl dark:bg-zinc-900">
               <div className="mb-3 text-center text-sm font-medium">로딩중...</div>
-              <div className="overflow-hidden rounded-full bg-blue-600/15 dark:bg-blue-400/15">
-                <div className="loading-bar h-1.5 rounded-full bg-blue-600" />
-              </div>
-            </div>
-          </div>
-        )}
-        {trainState === "running" && (
-          <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40">
-            <div className="w-64 rounded-2xl bg-white p-5 shadow-xl dark:bg-zinc-900">
-              <div className="mb-3 text-center text-sm font-medium">학습중...</div>
               <div className="overflow-hidden rounded-full bg-blue-600/15 dark:bg-blue-400/15">
                 <div className="loading-bar h-1.5 rounded-full bg-blue-600" />
               </div>

@@ -603,10 +603,16 @@ export function SoccerMatchesTable({
     [rows]
   );
   const leagueKey = useMemo(() => [...new Set(rows.map((r) => r.league_code))].sort().join(","), [rows]);
+  const latestSeason = useMemo(() => {
+    const uniq = [...new Set(rows.map((r) => r.season))].sort().reverse();
+    return uniq.length > 0 ? uniq[0] : null;
+  }, [rows]);
   useEffect(() => {
-    setColFilters({});
-    setOpenFilter(null);
-  }, [leagueKey]);
+    queueMicrotask(() => {
+      setColFilters(latestSeason ? { season: [latestSeason] } : {});
+      setOpenFilter(null);
+    });
+  }, [leagueKey, latestSeason]);
 
   if (rows.length === 0) return null;
   const cols = COLUMNS.filter((c) => CORE_COLUMNS.includes(c.id) || !hidden.includes(c.id));
