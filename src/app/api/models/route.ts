@@ -1,24 +1,34 @@
 import { NextResponse } from "next/server";
-import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createServerSupabaseClient } from "@/lib/supabase/server";
 
-function diskVersions(league: string): { ver: string; model_type: string }[] {
-  const dir = `${process.cwd()}/ml/permatch`;
-  if (!existsSync(dir)) return [];
-  const prefix = `${league}_`;
-  const out: { ver: string; model_type: string }[] = [];
-  for (const f of readdirSync(dir)) {
-    if (!f.startsWith(prefix) || !f.endsWith(".json")) continue;
-    if (f.endsWith(".grid.json") || f.endsWith(".live.json") || f.endsWith(".auto.json") || f.endsWith(".whist.json") || f.endsWith(".xgb.json") || f.endsWith(".cumu.json") || f.endsWith(".wrong.json") || f.endsWith(".lstm.pt")) continue;
+const PROG_DIR = join(tmpdir(), "opick_prog");
+const LOCAL_DIR = join(process.cwd(), "ml", "permatch");
+
+function cleanupFiles(league: string, ver: string): string[] {
+  const prefixes = [`${league}_${ver}.`, `${league}_${ver}-f5.`];
+  const deleted: string[] = [];
+  for (const dir of [PROG_DIR, LOCAL_DIR]) {
+    if (!existsSync(dir)) continue;
+    let files: string[];
     try {
-      const a = JSON.parse(readFileSync(`${dir}/${f}`, "utf-8"));
-      const mt = typeof a?.model_type === "string" ? a.model_type : "permatch";
-      out.push({ ver: f.slice(prefix.length, -5), model_type: mt });
+      files = readdirSync(dir);
     } catch {
-      out.push({ ver: f.slice(prefix.length, -5), model_type: "permatch" });
+      continue;
+    }
+    for (const f of files) {
+      if (!prefixes.some((p) => f.startsWith(p))) continue;
+      const p = join(dir, f);
+      try {
+        rmSync(p, { force: true });
+        if (!existsSync(p)) deleted.push(p);
+      } catch {
+      }
     }
   }
-  return out;
+  return deleted;
 }
 
 export const dynamic = "force-dynamic";
@@ -35,76 +45,20 @@ export async function GET(req: Request) {
       return NextResponse.json({ ok: false, error: "league와 ver가 필요" }, { status: 400 });
     }
     try {
-      const p = `${process.cwd()}/ml/permatch/${league}_${ver}.json`;
-      let a: Record<string, unknown> | null = null;
-      try {
-        const supabase = createServerSupabaseClient();
-        const { data } = await supabase
-          .from("models")
-          .select("artifact")
-          .eq("league_code", league)
-          .eq("ver", ver)
-          .limit(1);
-        const raw = (data?.[0] as { artifact?: unknown } | undefined)?.artifact;
-        if (raw && typeof raw === "object") a = raw as Record<string, unknown>;
-      } catch {
-        a = null;
+      const supabase = createServerSupabaseClient();
+      const { data, error } = await supabase
+        .from("models")
+        .select("artifact")
+        .eq("league_code", league)
+        .eq("ver", ver)
+        .limit(1);
+      if (error) {
+        return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
       }
-      if (!a && existsSync(p)) {
-        try {
-          a = JSON.parse(readFileSync(p, "utf-8"));
-        } catch {
-          a = null;
-        }
-      }
+      const raw = (data?.[0] as { artifact?: unknown } | undefined)?.artifact;
+      const a = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
       if (!a) {
         return NextResponse.json({ ok: true, league, ver, model_type: "unknown", detail: null });
-      }
-      if (a?.model_type === "ensemble") {
-        const { loadArtifactAsync } = await import("@/lib/predict");
-        const art = await loadArtifactAsync(league, ver);
-        if (!art || art.model_type !== "ensemble" || !art.base || !art.xgb) {
-          return NextResponse.json({ ok: true, league, ver, model_type: "unknown", detail: null });
-        }
-        const b = art.base;
-        return NextResponse.json({
-          ok: true,
-          league,
-          ver,
-          model_type: "ensemble",
-          detail: {
-            model_type: "ensemble",
-            features: Array.isArray(b.features) ? b.features : [],
-            weights: null,
-            base_ver: art.base_ver ?? null,
-            blend_w: art.blend_w ?? 1,
-            base: {
-              weights: b.weights ?? null,
-              hfa: b.hfa ?? null,
-              T: b.T ?? null,
-              draw_prior: b.draw_prior ?? null,
-              mu: Array.isArray(b.mu) ? b.mu : null,
-              sd: Array.isArray(b.sd) ? b.sd : null,
-              emphasis: Array.isArray(b.emphasis) ? b.emphasis : null,
-              draw_weights: Array.isArray(b.draw_weights) ? b.draw_weights : null,
-              draw_bias: b.draw_bias ?? 0,
-              draw_mu: Array.isArray(b.draw_mu) ? b.draw_mu : null,
-              draw_sd: Array.isArray(b.draw_sd) ? b.draw_sd : null,
-              patterns: b.patterns ?? null,
-              pattern_tau: b.pattern_tau ?? null,
-              pattern_taus: b.pattern_taus ?? null,
-              pattern_alpha: b.pattern_alpha ?? 0.5,
-              draw_boost: b.draw_boost ?? 0,
-              draw_close_margin: b.draw_close_margin ?? 0.12,
-              draw_total_max: b.draw_total_max ?? 2.55,
-              grid_params: b.grid_params ?? null,
-              contrib_cap: b.contrib_cap ?? null,
-            },
-            xgb: art.xgb,
-            train_seasons: Array.isArray(a.train_seasons) ? a.train_seasons : [],
-            valid: a.valid ?? null,
-          },
-        });
       }
       const feats: string[] = Array.isArray(a.features) ? a.features : [];
       const mt = typeof a?.model_type === "string" ? a.model_type : "permatch";
@@ -141,7 +95,7 @@ export async function GET(req: Request) {
           ok: true, league, ver, model_type: mt,
           detail: {
             model_type: mt, features: feats,
-            xgb_file: a.xgb_file ?? null,
+            embedded: a.xgb != null,
             train_seasons: a.train_seasons ?? [], valid: a.valid ?? null,
             metrics: a.metrics ?? null,
           },
@@ -152,8 +106,18 @@ export async function GET(req: Request) {
           ok: true, league, ver, model_type: mt,
           detail: {
             model_type: mt,
-            lstm_file: a.lstm_file ?? null, seq_len: a.seq_len ?? null,
+            seq_len: a.seq_len ?? null,
             serving: "python-only",
+            train_seasons: a.train_seasons ?? [], valid: a.valid ?? null,
+            metrics: a.metrics ?? null,
+          },
+        });
+      }
+      if (mt !== "permatch") {
+        return NextResponse.json({
+          ok: true, league, ver, model_type: mt,
+          detail: {
+            model_type: mt, features: feats,
             train_seasons: a.train_seasons ?? [], valid: a.valid ?? null,
             metrics: a.metrics ?? null,
           },
@@ -210,20 +174,10 @@ export async function GET(req: Request) {
       .eq("league_code", league)
       .order("created_at", { ascending: false })
       .limit(50);
-    const registered = error ? [] : (data ?? []);
-    const known = new Set(registered.map((r) => r.ver as string));
-    const onDisk = diskVersions(league)
-      .filter((d) => !known.has(d.ver))
-      .map((d) => ({ ...d, train_seasons: [], metrics: null, created_at: "" }));
-    for (const d of onDisk) known.add(d.ver);
-    const all = [...registered, ...onDisk];
-    all.sort(
-      (a, b) =>
-        String((b as { created_at?: string }).created_at ?? "").localeCompare(
-          String((a as { created_at?: string }).created_at ?? "")
-        ) || String((b as { ver?: string }).ver ?? "").localeCompare(String((a as { ver?: string }).ver ?? ""))
-    );
-    return NextResponse.json({ ok: true, data: all });
+    if (error) {
+      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
+    }
+    return NextResponse.json({ ok: true, data: data ?? [] });
   } catch (e) {
     return NextResponse.json(
       { ok: false, error: e instanceof Error ? e.message : "Unknown error" },
@@ -253,17 +207,34 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "hfa 형식 오류" }, { status: 400 });
   }
   try {
-    const p = `${process.cwd()}/ml/permatch/${league}_${ver}.json`;
-    if (!existsSync(p)) {
-      return NextResponse.json({ ok: false, error: "모델 파일 없음" }, { status: 404 });
+    const supabase = createServerSupabaseClient();
+    const { data, error } = await supabase
+      .from("models")
+      .select("artifact")
+      .eq("league_code", league)
+      .eq("ver", ver)
+      .limit(1);
+    if (error) {
+      return NextResponse.json({ ok: false, error: error.message }, { status: 500 });
     }
-    const a = JSON.parse(readFileSync(p, "utf-8"));
+    const raw = (data?.[0] as { artifact?: unknown } | undefined)?.artifact;
+    const a = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+    if (!a) {
+      return NextResponse.json({ ok: false, error: "모델 없음 (DB)" }, { status: 404 });
+    }
     if (!Array.isArray(a.weights) || a.weights.length !== weights.length) {
       return NextResponse.json({ ok: false, error: "가중치 개수 불일치" }, { status: 400 });
     }
     a.weights = weights;
     if (hfa !== undefined) a.hfa = hfa;
-    writeFileSync(p, JSON.stringify(a));
+    const { error: upErr } = await supabase
+      .from("models")
+      .update({ artifact: a })
+      .eq("league_code", league)
+      .eq("ver", ver);
+    if (upErr) {
+      return NextResponse.json({ ok: false, error: upErr.message }, { status: 500 });
+    }
     return NextResponse.json({ ok: true, league, ver });
   } catch (e) {
     return NextResponse.json(
@@ -281,41 +252,16 @@ export async function DELETE(req: Request) {
     return NextResponse.json({ ok: false, error: "league와 ver가 필요" }, { status: 400 });
   }
   try {
-    const dir = `${process.cwd()}/ml/permatch`;
-    const base = `${dir}/${league}_${ver}`;
-    const targets = new Set([
-      `${base}.json`,
-      `${base}.grid.json`,
-      `${base}.whist.json`,
-      `${base}.live.json`,
-      `${base}.auto.json`,
-      `${base}.xgb.json`,
-      `${base}.cumu.json`,
-      `${base}.wrong.json`,
-      `${base}.lstm.pt`,
-    ]);
-    if (ver.endsWith("-ens")) {
-      targets.add(`${base}.xgb.json`);
-    } else {
-      targets.add(`${base}-ens.json`);
-      targets.add(`${base}-ens.xgb.json`);
-    }
-    const deleted: string[] = [];
-    for (const p of targets) {
-      try {
-        if (!existsSync(p)) continue;
-        rmSync(p, { force: true });
-        if (!existsSync(p)) deleted.push(p.slice(dir.length + 1));
-      } catch {
-      }
-    }
+    const deleted = cleanupFiles(league, ver);
     try {
       const supabase = createServerSupabaseClient();
-      await supabase.from("models").delete().eq("league_code", league).eq("ver", ver);
-      if (!ver.endsWith("-ens")) {
-        await supabase.from("models").delete().eq("league_code", league).eq("ver", `${ver}-ens`);
-      }
-    } catch {
+      const { error } = await supabase.from("models").delete().eq("league_code", league).eq("ver", ver);
+      if (error) throw new Error(error.message);
+    } catch (e) {
+      return NextResponse.json(
+        { ok: false, error: e instanceof Error ? e.message : "DB 삭제 실패" },
+        { status: 500 }
+      );
     }
     return NextResponse.json({ ok: true, ver, deleted });
   } catch (e) {

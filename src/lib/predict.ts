@@ -1,6 +1,5 @@
-import { existsSync, readFileSync } from "node:fs";
 import type { SoccerMatch } from "@/lib/queries";
-import { applyDrawBoost, applyTemp, blendProbs, cappedDot, dcProba, drawFeatures, legacyParts, logregProba, rowFeatures, selectFeatures, sigmoid } from "./permatch-math";
+import { applyDrawBoost, applyTemp, blendProbs, dcProba, drawFeatures, legacyParts, logregProba, rowFeatures, selectFeatures } from "./permatch-math";
 import { slimBooster, xgbProba, type XgbSlim } from "./xgb";
 
 export type PermatchArtifact = {
@@ -29,9 +28,6 @@ export type PermatchArtifact = {
     draw_w?: unknown; recency_w?: unknown; wmin?: unknown; wmax?: unknown;
   } | null;
   contrib_cap?: number | null;
-  base_ver?: string;
-  blend_w?: number;
-  base?: PermatchArtifact | null;
   xgb?: XgbSlim | null;
   train_seasons?: string[];
   teams?: string[];
@@ -44,7 +40,6 @@ export type PermatchArtifact = {
   coef?: number[][];
   intercept?: number[];
   classes?: number[];
-  lstm_file?: string;
   seq_len?: number;
   cumulative?: {
     base_ver?: string;
@@ -76,6 +71,19 @@ function coerceArtifact(a: unknown): PermatchArtifact | null {
       if ((o.coef as unknown[]).length !== (o.intercept as unknown[]).length) return null;
       return o as unknown as PermatchArtifact;
     }
+    if (o?.model_type === "xgb") {
+      const slim = slimBooster(o.xgb);
+      if (!slim) return null;
+      return {
+        model_type: "xgb",
+        xgb: slim,
+        features: Array.isArray(o.features) ? (o.features as string[]) : undefined,
+        train_seasons: Array.isArray(o.train_seasons) ? (o.train_seasons as string[]) : [],
+        T: 1,
+        mu: [],
+        sd: [],
+      } as unknown as PermatchArtifact;
+    }
     if (o?.model_type === "lstm") {
       return o as unknown as PermatchArtifact;
     }
@@ -99,140 +107,13 @@ export async function loadArtifactAsync(league: string, ver: string): Promise<Pe
       .eq("league_code", league)
       .eq("ver", ver)
       .limit(1);
-    if (!error && data && data.length > 0) {
-      const raw = (data[0] as { artifact?: unknown }).artifact;
-      if (raw && typeof raw === "object") {
-        const o = raw as Record<string, unknown>;
-        if (o?.model_type === "ensemble") {
-          const ens = await readEnsembleAsync(league, o);
-          if (ens) return ens;
-        } else {
-          const c = coerceArtifact(raw);
-          if (c) return c;
-        }
-      }
-    }
-  } catch {
-    // fall through to local
-  }
-  return loadArtifact(league, ver);
-}
-
-async function readEnsembleAsync(league: string, a: Record<string, unknown>): Promise<PermatchArtifact | null> {
-  try {
-    const baseVer = typeof a.base_ver === "string" ? a.base_ver : "";
-    if (!baseVer) return null;
-    const baseRaw = await loadArtifactAsync(league, baseVer);
-    if (!baseRaw || !Array.isArray(baseRaw.weights)) return null;
-    const xgbFile = typeof a.xgb_file === "string" ? a.xgb_file : "";
-    if (!xgbFile) return null;
-    const xp = `${process.cwd()}/ml/permatch/${xgbFile}`;
-    if (!existsSync(xp)) return null;
-    const slim = slimBooster(JSON.parse(readFileSync(xp, "utf-8")));
-    if (!slim) return null;
-    const w = typeof a.blend_w === "number" && Number.isFinite(a.blend_w) ? a.blend_w : 1;
-    const feats = Array.isArray(a.features) ? (a.features as string[]) : baseRaw.features;
-    return {
-      model_type: "ensemble",
-      base_ver: baseVer,
-      blend_w: Math.max(0, Math.min(1, w)),
-      features: feats,
-      train_seasons: [],
-      base: baseRaw,
-      xgb: slim,
-    } as unknown as PermatchArtifact;
+    if (error || !data || data.length === 0) return null;
+    const raw = (data[0] as { artifact?: unknown }).artifact;
+    if (!raw || typeof raw !== "object") return null;
+    return coerceArtifact(raw);
   } catch {
     return null;
   }
-}
-export function loadArtifact(league: string, ver: string): PermatchArtifact | null {
-  try {
-    const p = `${process.cwd()}/ml/permatch/${league}_${ver}.json`;
-    if (!existsSync(p)) return null;
-    const a = JSON.parse(readFileSync(p, "utf-8"));
-    if (a?.model_type === "ensemble") {
-      return readEnsemble(league, a as Record<string, unknown>);
-    }
-    if (a?.model_type === "poisson" || a?.model_type === "dixon") {
-      if (!Array.isArray(a.teams) || !Array.isArray(a.att) || !Array.isArray(a.def)) return null;
-      if (a.teams.length !== a.att.length || a.teams.length !== a.def.length) return null;
-      if (typeof a.home !== "number" || typeof a.rho !== "number") return null;
-      return a as PermatchArtifact;
-    }
-    if (a?.model_type === "logreg") {
-      if (!Array.isArray(a.scaler_mean) || !Array.isArray(a.scaler_scale)) return null;
-      if (!Array.isArray(a.coef) || !Array.isArray(a.intercept)) return null;
-      if (a.coef.length !== a.intercept.length) return null;
-      return a as PermatchArtifact;
-    }
-    if (a?.model_type === "xgb") {
-      try {
-        const xgbFile = typeof a.xgb_file === "string" ? a.xgb_file : "";
-        if (!xgbFile) return null;
-        const xp = `${process.cwd()}/ml/permatch/${xgbFile}`;
-        if (!existsSync(xp)) return null;
-        const slim = slimBooster(JSON.parse(readFileSync(xp, "utf-8")));
-        if (!slim) return null;
-        const feats = Array.isArray(a.features) ? (a.features as string[]) : undefined;
-        return {
-          model_type: "xgb",
-          features: feats,
-          train_seasons: Array.isArray(a.train_seasons) ? (a.train_seasons as string[]) : [],
-          T: 1,
-          mu: [],
-          sd: [],
-          xgb: slim,
-        } as PermatchArtifact;
-      } catch {
-        return null;
-      }
-    }
-    if (a?.model_type === "lstm") {
-      return a as PermatchArtifact;
-    }
-    if (!Array.isArray(a.mu) || !Array.isArray(a.sd)) return null;
-    const n = (a.weights as unknown[]).length;
-    if (n === 0 || a.mu.length !== n || a.sd.length !== n) return null;
-    if (Array.isArray(a.features) && a.features.length !== n) return null;
-    return a as PermatchArtifact;
-  } catch {
-    return null;
-  }
-}
-
-function readEnsemble(league: string, a: Record<string, unknown>): PermatchArtifact | null {
-  try {
-    const baseVer = typeof a.base_ver === "string" ? a.base_ver : "";
-    const xgbFile = typeof a.xgb_file === "string" ? a.xgb_file : "";
-    if (!baseVer || !xgbFile) return null;
-    const bp = `${process.cwd()}/ml/permatch/${league}_${baseVer}.json`;
-    const xp = `${process.cwd()}/ml/permatch/${xgbFile}`;
-    if (!existsSync(bp) || !existsSync(xp)) return null;
-    const base = JSON.parse(readFileSync(bp, "utf-8")) as PermatchArtifact;
-    if (!Array.isArray(base.weights)) return null;
-    const slim = slimBooster(JSON.parse(readFileSync(xp, "utf-8")));
-    if (!slim) return null;
-    const w = typeof a.blend_w === "number" && Number.isFinite(a.blend_w) ? a.blend_w : 1;
-    const feats = Array.isArray(a.features) ? (a.features as string[]) : base.features;
-    return {
-      model_type: "ensemble",
-      base_ver: baseVer,
-      blend_w: Math.max(0, Math.min(1, w)),
-      features: feats,
-      train_seasons: [],
-      T: base.T,
-      mu: base.mu,
-      sd: base.sd,
-      base,
-      xgb: slim,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function std(x: number[], mu: number[], sd: number[]): number[] {
-  return x.map((v, i) => (v - mu[i]) / sd[i]);
 }
 
 export function predictForRow(m: SoccerMatch, art: PermatchArtifact, ver: string): PredEntry | null {
@@ -260,42 +141,17 @@ export function predictForRow(m: SoccerMatch, art: PermatchArtifact, ver: string
       if (p.some((v) => !Number.isFinite(v))) return null;
       return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertThreshold(art) };
     }
-    let lin: number[];
-    let x: number[];
-    let pats = art.patterns;
-    let tau = art.pattern_tau ?? 0;
-    let taus = art.pattern_taus ?? null;
-    let palpha = art.pattern_alpha ?? 0.5;
-    let pw: number[] | null = art.weights ?? null;
-    let boost = art.draw_boost ?? 0;
-    let boostMargin = art.draw_close_margin ?? 0.12;
-    let boostTotal = art.draw_total_max ?? 2.55;
-    let T = art.T;
-    if (art.model_type === "ensemble" && art.base && art.xgb) {
-      const b = legacyParts(m, art.base);
-      if (!b) return null;
-      const qx = xgbProba(art.xgb, rowFeatures(m));
-      const alpha = art.blend_w ?? 1;
-      const dd = alpha * b.dd + (1 - alpha) * qx[1];
-      lin = [b.ph * (1 - dd), dd, (1 - b.ph) * (1 - dd)];
-      x = b.x;
-      pats = art.base.patterns;
-      tau = art.base.pattern_tau ?? 0;
-      taus = art.base.pattern_taus ?? null;
-      palpha = art.base.pattern_alpha ?? 0.5;
-      pw = art.base.weights ?? null;
-      boost = art.base.draw_boost ?? 0;
-      boostMargin = art.base.draw_close_margin ?? 0.12;
-      boostTotal = art.base.draw_total_max ?? 2.55;
-      T = art.base.T;
-    } else {
-      const b = legacyParts(m, art);
-      if (!b) return null;
-      lin = [b.ph * (1 - b.dd), b.dd, (1 - b.ph) * (1 - b.dd)];
-      x = b.x;
-    }
+    const b = legacyParts(m, art);
+    if (!b) return null;
+    const lin = [b.ph * (1 - b.dd), b.dd, (1 - b.ph) * (1 - b.dd)];
     const total = drawFeatures(m)[2];
-    const p = applyDrawBoost(applyTemp(blendProbs(lin, x, pats, tau, palpha, pw, taus), T), total, boost, boostMargin, boostTotal);
+    const p = applyDrawBoost(
+      applyTemp(blendProbs(lin, b.x, art.patterns, art.pattern_tau ?? 0, art.pattern_alpha ?? 0.5, art.weights ?? null, art.pattern_taus ?? null), art.T),
+      total,
+      art.draw_boost ?? 0,
+      art.draw_close_margin ?? 0.12,
+      art.draw_total_max ?? 2.55,
+    );
     if (p.some((v) => !Number.isFinite(v))) return null;
     return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertThreshold(art) };
   } catch {
