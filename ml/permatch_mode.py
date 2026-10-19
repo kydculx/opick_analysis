@@ -1006,7 +1006,8 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
               max_minutes: float = 0.0, noise: float = 0.1, hfa_noise: float = 0.05,
               wmin: float = -10.0, wmax: float = 10.0, log_every: int = 200,
               seed: int = 7, fresh: bool = False, use_cache: bool = True,
-              grid_step: float = 0.0, draw_w: float = 0.0, recency_w: float = 0.0):
+              grid_step: float = 0.0, draw_w: float = 0.0, recency_w: float = 0.0,
+              jobs: int = 0):
     import numpy as _np
     p = model_ref(league, ver)
     art = load_artifact_any(league, ver)
@@ -1283,7 +1284,9 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
                 _TT = None
         if _HAVE_NUMBA:
             try:
-                _numba.set_num_threads(max(1, int(os.cpu_count() or 4)))
+                _njobs = int(jobs) if int(jobs) > 1 else int(os.cpu_count() or 4)
+                _numba.set_num_threads(max(1, _njobs))
+                log(f"numba 스레드 {_numba.get_num_threads()} (jobs={jobs if int(jobs) > 1 else 'auto'})")
             except (ValueError, RuntimeError):
                 pass
         while not time_up:
@@ -2550,7 +2553,7 @@ def main():
     ap.add_argument("--range-pad", type=float, default=0.5, help="auto-range 여유폭")
     ap.add_argument("--log-every", type=int, default=200, help="auto 랜덤 진행 로그 간격")
     ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--jobs", type=int, default=1)
+    ap.add_argument("--jobs", type=int, default=1, help="새학습 워커(프로세스) 수 · 랜덤탐색 numba 스레드 수 (1=자동)")
     ap.add_argument("--patience", type=int, default=0)
     ap.add_argument("--no-halving", action="store_true", help="restart halving 끄기 (전 restart 끝까지 탐색)")
     ap.add_argument("--no-cache", action="store_true")
@@ -2659,9 +2662,9 @@ def main():
                   noise=args.noise, hfa_noise=args.hfa_noise,
                   wmin=args.wmin, wmax=args.wmax, log_every=args.log_every,
                   seed=args.seed, fresh=args.new, use_cache=not args.no_cache,
-                  grid_step=args.auto_step, draw_w=args.draw_w, recency_w=args.recency_w)
+                  grid_step=args.auto_step, draw_w=args.draw_w, recency_w=args.recency_w,
+                  jobs=args.jobs)
         return
-
 
     assert args.train, "--train 필요"
     train_s = {s.strip() for s in args.train.split(",") if s.strip()}

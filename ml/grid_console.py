@@ -372,6 +372,11 @@ def build_command(o):
                 cmd += ["--noise", str(float(o["noise"]))]
             except (ValueError, TypeError):
                 pass
+        if str(o.get("jobs") or "").strip():
+            try:
+                cmd += ["--jobs", str(max(1, int(float(o["jobs"]))))]
+            except (ValueError, TypeError):
+                pass
     else:
         cmd += ["--train", o["train"], "--valid", o["valid"] or "auto",
                 "--trials", o.get("trials") or "10000",
@@ -578,7 +583,7 @@ def main():
 
     HINTS = {
         "train": "새학습: 학습수만 입력하면 자동배치(학습=오래된순 N개, 검증=나머지·최신 제외)",
-        "auto": "랜덤탐색(SA): 미학습 전체 · 국소 변이+적응 스텝 · 중지로 종료",
+        "auto": "랜덤탐색(SA): 미학습 전체 · 국소 변이+적응 스텝 · jobs=병렬 스레드 · 중지로 종료",
     }
 
     detail = ttk.Frame(app, padding=8)
@@ -1040,7 +1045,7 @@ def main():
     for lbl, var, w in [("축간격", v_gridstep, 5), ("wmin", v_wmin, 5), ("wmax", v_wmax, 5)]:
         ttk.Label(fr_auto1, text=lbl).pack(side="left", padx=(0 if lbl == "축간격" else 8, 2))
         _reg(ttk.Entry(fr_auto1, textvariable=var, width=w)).pack(side="left")
-    for lbl, var, w in [("순차", v_seqsw, 4), ("σ", v_noise, 5), ("제한분", v_automin, 5)]:
+    for lbl, var, w in [("순차", v_seqsw, 4), ("σ", v_noise, 5), ("제한분", v_automin, 5), ("jobs", v_jobs, 5)]:
         ttk.Label(fr_auto1, text=lbl).pack(side="left", padx=(8, 2))
         _reg(ttk.Entry(fr_auto1, textvariable=var, width=w)).pack(side="left")
     ttk.Separator(f_auto, orient="horizontal").pack(fill="x", pady=2)
