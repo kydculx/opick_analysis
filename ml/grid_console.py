@@ -9,6 +9,7 @@ import os
 import hashlib
 import queue
 import re
+import signal
 import subprocess
 import sys
 import threading
@@ -197,7 +198,6 @@ def now_tag():
 
 MODES = [
     ("train", "새학습"),
-    ("grid", "전수탐색"),
     ("auto", "랜덤탐색"),
 ]
 MO2CODE = {mo: code for code, mo in MODES}
@@ -235,12 +235,6 @@ def load_dotenv(path):
     return env
 
 
-def ckpt_path(league, ver):
-    return _eph(f"{league}_{ver}.grid.json")
-
-
-def whist_path(league, ver):
-    return _eph(f"{league}_{ver}.whist.json")
 
 
 def auto_prog_path(league, ver):
@@ -303,6 +297,7 @@ class Runner:
             cmd, cwd=ROOT, env=env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,
+            start_new_session=True,
         )
         threading.Thread(target=self._pump, daemon=True).start()
         threading.Thread(target=self._wait, daemon=True).start()
@@ -332,18 +327,33 @@ class Runner:
     def stop(self):
         self._stop.set()
         if self.proc and self.proc.poll() is None:
+            pid = self.proc.pid
             try:
-                self.proc.terminate()
-            except ProcessLookupError:
-                pass
+                os.killpg(os.getpgid(pid), signal.SIGTERM)
+            except (ProcessLookupError, PermissionError):
+                try:
+                    self.proc.terminate()
+                except ProcessLookupError:
+                    pass
+
+            def _hard():
+                if self.proc and self.proc.poll() is None:
+                    try:
+                        os.killpg(os.getpgid(pid), signal.SIGKILL)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+
+            timer = threading.Timer(2.5, _hard)
+            timer.daemon = True
+            timer.start()
 
 
 def build_command(o):
     py = os.path.join(ROOT, "ml", ".venv", "bin", "python")
     if not os.path.exists(py):
         py = sys.executable
-    cmd = [py, "ml/permatch_mode.py", "--league", o["league"], "--ver", o["ver"]]
     mode = o["mode"]
+    cmd = [py, "ml/permatch_mode.py", "--league", o["league"], "--ver", o["ver"], "--ui"]
     if mode == "auto":
         cmd += ["--mode", "auto"]
         if o.get("tune"):
@@ -351,49 +361,35 @@ def build_command(o):
         if o.get("max_minutes"):
             cmd += ["--max-minutes", o["max_minutes"]]
         cmd += ["--auto-step", o.get("grid_step") or "0"]
-        cmd += ["--wmin", o.get("wmin") or "-3.0", "--wmax", o.get("wmax") or "3.0"]
-        if o.get("draw_w"):
-            cmd += ["--draw-w", o["draw_w"]]
-        if o.get("recency_w"):
+        cmd += ["--wmin", o.get("wmin") or "-10.0", "--wmax", o.get("wmax") or "10.0"]
+        if str(o.get("seq_sweeps") or "").strip():
             try:
-                if float(str(o["recency_w"]).strip() or "0") != 0.0:
-                    cmd += ["--recency-w", str(o["recency_w"]).strip()]
-            except (ValueError, AttributeError):
+                cmd += ["--seq-sweeps", str(int(float(o["seq_sweeps"])))]
+            except (ValueError, TypeError):
                 pass
-    elif mode == "grid":
-        cmd += ["--mode", "grid"]
-        if o.get("tune"):
-            cmd += ["--tune", o["tune"]]
-        cmd += ["--grid-step", o.get("grid_step") or "0.5"]
-        if o.get("max_combos"):
-            cmd += ["--max-combos", o["max_combos"]]
-        if o.get("max_minutes"):
-            cmd += ["--max-minutes", o["max_minutes"]]
-        cmd += ["--ckpt-every", o.get("ckpt_every") or "5000"]
-        cmd += ["--batch", o.get("batch") or "4096"]
-        cmd += ["--log-secs", o.get("log_secs") or "1.0"]
-        cmd += ["--wmin", o.get("wmin") or "-3.0", "--wmax", o.get("wmax") or "3.0"]
-        cmd += ["--jobs", o.get("jobs") or "1"]
-        if o.get("draw_w"):
-            cmd += ["--draw-w", o["draw_w"]]
-        if o.get("recency_w"):
+        if str(o.get("noise") or "").strip():
             try:
-                if float(str(o["recency_w"]).strip() or "0") != 0.0:
-                    cmd += ["--recency-w", str(o["recency_w"]).strip()]
-            except (ValueError, AttributeError):
+                cmd += ["--noise", str(float(o["noise"]))]
+            except (ValueError, TypeError):
                 pass
     else:
         cmd += ["--train", o["train"], "--valid", o["valid"] or "auto",
                 "--trials", o.get("trials") or "10000",
                 "--jobs", o.get("jobs") or "1"]
-        if o.get("draw_w"):
-            cmd += ["--draw-w", o["draw_w"]]
-        if o.get("recency_w"):
+        if str(o.get("trial_step") or "").strip():
             try:
-                if float(str(o["recency_w"]).strip() or "0") != 0.0:
-                    cmd += ["--recency-w", str(o["recency_w"]).strip()]
-            except (ValueError, AttributeError):
+                _ts = float(o["trial_step"])
+                if _ts > 0:
+                    cmd += ["--trial-step", str(_ts)]
+            except (ValueError, TypeError):
                 pass
+        if str(o.get("patience") or "").strip() not in ("", "0"):
+            try:
+                cmd += ["--patience", str(int(float(o["patience"])))]
+            except (ValueError, TypeError):
+                pass
+        if o.get("arange"):
+            cmd.append("--auto-range")
         for _flag, _key in (("--draw-boost", "draw_boost"), ("--draw-margin", "draw_margin"),
                             ("--draw-total", "draw_total")):
             try:
@@ -437,8 +433,8 @@ def main():
 
     v_league = tk.StringVar(value="k_league_1")
     v_league_ko = tk.StringVar(value=CODE2KO["k_league_1"])
-    v_mode = tk.StringVar(value="grid")
-    v_mode_ko = tk.StringVar(value=CODE2MO["grid"])
+    v_mode = tk.StringVar(value="train")
+    v_mode_ko = tk.StringVar(value=CODE2MO["train"])
     v_tune = tk.StringVar()
     feat_vars = {n: tk.BooleanVar(value=True) for n in FEAT13}
     v_ver = tk.StringVar()
@@ -447,21 +443,19 @@ def main():
     v_traincount = tk.StringVar(value="6")
     v_nocache = tk.BooleanVar(value=False)
     v_trials = tk.StringVar(value="10000")
-    v_jobs = tk.StringVar(value="4")
-    v_draww = tk.StringVar(value="0")
-    v_recw = tk.StringVar(value="0")
+    v_jobs = tk.StringVar(value="9")
+    v_tstep = tk.StringVar(value="0.01")
+    v_patience = tk.StringVar(value="0")
+    v_arange = tk.BooleanVar(value=False)
+    v_seqsw = tk.StringVar(value="1")
+    v_noise = tk.StringVar(value="0.1")
+    v_automin = tk.StringVar(value="")
     v_drawboost = tk.StringVar(value="")
     v_drawmargin = tk.StringVar(value="")
     v_drawtotal = tk.StringVar(value="")
-    v_drawboost_line = tk.StringVar(value="")
     v_gridstep = tk.StringVar(value="0.5")
-    v_maxcombos = tk.StringVar(value="")
-    v_maxmin = tk.StringVar(value="")
-    v_ckpt = tk.StringVar(value="5000")
-    v_batch = tk.StringVar(value="4096")
-    v_logsecs = tk.StringVar(value="1.0")
-    v_wmin = tk.StringVar(value="-3.0")
-    v_wmax = tk.StringVar(value="3.0")
+    v_wmin = tk.StringVar(value="-10.0")
+    v_wmax = tk.StringVar(value="10.0")
     v_status = tk.StringVar(value="대기 중")
     v_acc = tk.StringVar(value="−")
     v_train_line = tk.StringVar(value="")
@@ -470,8 +464,6 @@ def main():
 
     def selected_feats():
         return [n for n in FEAT13 if feat_vars[n].get()]
-
-    _dw_widgets: list = []
 
     def apply_preset(*_):
         if runner["obj"] is not None:
@@ -487,13 +479,13 @@ def main():
         v_train.set(",".join(tr))
         v_valid.set(",".join(va))
         sel = selected_feats()
-        if v_mode.get() in ("grid", "auto"):
+        if v_mode.get() in ("auto",):
             cur = v_ver.get().strip()
             if not (cur and tune_exists(lg, cur)):
                 cands = list_versions(lg)
                 v_ver.set(cands[-1] if cands else "")
         else:
-            v_ver.set(make_ver(",".join(tr), sel, v_draww.get(), now_tag(), v_recw.get()))
+            v_ver.set(make_ver(",".join(tr), sel, ts=now_tag()))
         try:
             btn_feat.configure(text=f"피처({len(sel)})")
         except (AttributeError, RuntimeError, tk.TclError):
@@ -507,12 +499,13 @@ def main():
             "tune": v_tune.get().strip(), "features": ",".join(sel) if len(sel) != len(FEAT13) else "",
             "new": v_mode.get() == "train",
             "no_cache": v_nocache.get(), "trials": v_trials.get().strip(),
-            "jobs": v_jobs.get().strip(), "draw_w": v_draww.get().strip(), "recency_w": v_recw.get().strip(),
+            "jobs": v_jobs.get().strip(), "trial_step": v_tstep.get().strip(),
+            "patience": v_patience.get().strip(),
+            "arange": bool(v_arange.get()), "seq_sweeps": v_seqsw.get().strip(),
+            "noise": v_noise.get().strip(), "max_minutes": v_automin.get().strip(),
             "draw_boost": v_drawboost.get().strip(), "draw_margin": v_drawmargin.get().strip(),
             "draw_total": v_drawtotal.get().strip(), "grid_step": v_gridstep.get().strip(),
-            "max_combos": v_maxcombos.get().strip(), "max_minutes": v_maxmin.get().strip(),
-            "ckpt_every": v_ckpt.get().strip(), "batch": "4096",
-            "log_secs": v_logsecs.get().strip(), "wmin": v_wmin.get().strip(),
+            "wmin": v_wmin.get().strip(),
             "wmax": v_wmax.get().strip(),
         }
 
@@ -584,9 +577,8 @@ def main():
     ttk.Label(app, textvariable=v_status, padding=(8, 2)).pack(fill="x")
 
     HINTS = {
-        "grid": "전수탐색: 미학습 전체 기준 · 축간격/범위로 전 조합 탐색 · 종료 후 아래 슬라이더·진행 클릭으로 시점 이동",
         "train": "새학습: 학습수만 입력하면 자동배치(학습=오래된순 N개, 검증=나머지·최신 제외)",
-        "auto": "랜덤탐색: 미학습 전체 · 축간격 격자 위 랜덤 점프 · 중지로 종료",
+        "auto": "랜덤탐색(SA): 미학습 전체 · 국소 변이+적응 스텝 · 중지로 종료",
     }
 
     detail = ttk.Frame(app, padding=8)
@@ -605,7 +597,6 @@ def main():
     btn_del_ver = _reg(ttk.Button(fr_ver, text="삭제", width=5,
                     command=lambda: on_delete_ver()))
     btn_del_ver.pack(side="left", padx=(6, 0))
-    ttk.Label(fr_ver, textvariable=v_drawboost_line, foreground="gray").pack(side="left", padx=(6, 0))
     ttk.Label(fr_common1, text="학습수").pack(side="left", padx=(8, 2))
     ent_traincount = ttk.Entry(fr_common1, textvariable=v_traincount, width=4)
     _reg(ent_traincount).pack(side="left")
@@ -632,7 +623,7 @@ def main():
         tr = v_train.get().strip()
         if not tr:
             return
-        ver = make_ver(tr, selected_feats(), v_draww.get(), now_tag(), v_recw.get())
+        ver = make_ver(tr, selected_feats(), ts=now_tag())
         if ver != v_ver.get().strip():
             train_ver_sync["on"] = True
             try:
@@ -662,7 +653,6 @@ def main():
         request_acc()
         if v_mode.get() == "train" and runner["obj"] is None:
             return
-        _refresh_whist(v_league.get(), v_ver.get().strip())
         ver = v_ver.get().strip()
         if not ver:
             return
@@ -687,23 +677,11 @@ def main():
             pass
         finally:
             ver_sync["on"] = False
-        if v_mode.get() in ("grid", "auto"):
+        if v_mode.get() in ("auto",):
             fill_search_params(v_league.get(), ver)
         refresh_wedit()
 
     def fill_search_params(league, ver):
-        m = re.search(r"-d(\d+(?:_\d+)?)(?=-|$)", ver)
-        if m:
-            try:
-                v_draww.set("%g" % float(m.group(1).replace("_", ".")))
-            except (ValueError, AttributeError, tk.TclError):
-                pass
-        mr = re.search(r"-r(\d+(?:_\d+)?)(?=-|$)", ver)
-        if mr:
-            try:
-                v_recw.set("%g" % float(mr.group(1).replace("_", ".")))
-            except (ValueError, AttributeError, tk.TclError):
-                pass
         try:
             art = load_tune_strict(league, ver)
         except (OSError, ValueError):
@@ -721,69 +699,6 @@ def main():
                     v_valid.set(",".join(vas))
                 finally:
                     fill_quiet["on"] = False
-            gp = art.get("grid_params")
-            if isinstance(gp, dict):
-                def _gnum(key, var):
-                    try:
-                        v = gp.get(key)
-                        if v is None:
-                            return
-                        var.set("%g" % float(v))
-                    except (ValueError, AttributeError, TypeError, tk.TclError):
-                        pass
-                _gnum("grid_step", v_gridstep)
-                _gnum("jobs", v_jobs)
-                _gnum("batch", v_batch)
-                _gnum("draw_w", v_draww)
-                _gnum("recency_w", v_recw)
-                _gnum("wmin", v_wmin)
-                _gnum("wmax", v_wmax)
-                try:
-                    _db = art.get("draw_boost")
-                    if _db is not None:
-                        v_drawboost.set("%g" % float(_db))
-                except (ValueError, AttributeError, TypeError, tk.TclError):
-                    pass
-                try:
-                    _dm = art.get("draw_close_margin")
-                    if _dm is not None:
-                        v_drawmargin.set("%g" % float(_dm))
-                except (ValueError, AttributeError, TypeError, tk.TclError):
-                    pass
-                try:
-                    _dt = art.get("draw_total_max")
-                    if _dt is not None:
-                        v_drawtotal.set("%g" % float(_dt))
-                except (ValueError, AttributeError, TypeError, tk.TclError):
-                    pass
-                try:
-                    _b = art.get("draw_boost")
-                    _m = art.get("draw_close_margin")
-                    _t = art.get("draw_total_max")
-                    if _b is None and _m is None and _t is None:
-                        v_drawboost_line.set("")
-                    else:
-                        _f = lambda v: "%g" % float(v) if v is not None else "-"
-                        v_drawboost_line.set(f"무부스트 {_f(_b)}/{_f(_m)}/{_f(_t)}")
-                except (ValueError, AttributeError, TypeError, tk.TclError):
-                    pass
-        try:
-            vals = json.load(open(ckpt_path(league, ver), encoding="utf-8")).get("vals")
-        except (OSError, ValueError):
-            return
-        if not isinstance(vals, list) or len(vals) < 2:
-            return
-        try:
-            lo, hi = min(vals), max(vals)
-            step = vals[1] - vals[0]
-            if not (step > 0 and hi > lo):
-                return
-            v_gridstep.set("%g" % step)
-            v_wmin.set("%g" % lo)
-            v_wmax.set("%g" % hi)
-        except (ValueError, TypeError, AttributeError, tk.TclError):
-            pass
-
     acc_job = {"after_id": None, "token": 0}
     _eval_lock = threading.Lock()
 
@@ -847,7 +762,7 @@ def main():
                 break
         return rows
 
-    def _acc_text_for(art, league, ver, allow_ckpt=True):
+    def _acc_text_for(art, league, ver):
         txt = "−"
         if isinstance(art, dict):
             mt = art.get("model_type") or "permatch"
@@ -855,9 +770,6 @@ def main():
                 mm = art.get("metrics") or {}
                 if isinstance(mm.get("acc"), (int, float)):
                     return f"검증 {mm['acc'] * 100:.1f}% (n={int(mm.get('n', 0))})" if mm.get("n") else f"검증 {mm['acc'] * 100:.1f}%"
-            cw = (art.get("cumulative") or {}).get("walk") or {}
-            if isinstance(cw.get("acc"), (int, float)) and not art.get("valid"):
-                return f"누적 {cw['acc'] * 100:.1f}% (n={int(cw.get('n', 0))})"
             vs = art.get("valid")
             valid_s = {str(s) for s in (vs if isinstance(vs, list) else ([vs] if vs else [])) if s and s != "auto"}
             feats = art.get("features")
@@ -892,15 +804,6 @@ def main():
                             txt += f" · 진행중 {newest} {_aa * 100:.1f}% ({int(round(_aa * _nn))}/{_nn})"
             except Exception:
                 pass
-            if txt == "−" and allow_ckpt:
-                try:
-                    cp = ckpt_path(league, ver)
-                    if os.path.exists(cp):
-                        b = json.load(open(cp, encoding="utf-8")).get("best")
-                        if isinstance(b, (int, float)):
-                            txt = f"조절 {b * 100:.1f}%"
-                except (OSError, ValueError):
-                    pass
         return txt
 
     def _acc_run(league, ver, tok):
@@ -1054,7 +957,7 @@ def main():
             if isinstance(art, dict):
                 art = dict(art)
                 art["weights"] = list(weights)
-                t = _acc_text_for(art, league, ver, allow_ckpt=False)
+                t = _acc_text_for(art, league, ver)
                 if t != "−":
                     txt = f"편집 미리보기 {t}"
                     m = re.search(r"([\d.]+)%", t)
@@ -1119,13 +1022,11 @@ def main():
     ttk.Label(fr_train_opt, text="jobs").pack(side="left", padx=(8, 2))
     ent_jobs = ttk.Entry(fr_train_opt, textvariable=v_jobs, width=5)
     _reg(ent_jobs).pack(side="left")
-    ttk.Label(fr_train_opt, text="무가중").pack(side="left", padx=(8, 2))
-    ent_draww = ttk.Entry(fr_train_opt, textvariable=v_draww, width=4)
-    _reg(ent_draww).pack(side="left")
-    _dw_widgets.append(ent_draww)
-    ttk.Label(fr_train_opt, text="최근가중").pack(side="left", padx=(8, 2))
-    ent_recw = ttk.Entry(fr_train_opt, textvariable=v_recw, width=4)
-    _reg(ent_recw).pack(side="left")
+    ttk.Label(fr_train_opt, text="축간격").pack(side="left", padx=(8, 2))
+    _reg(ttk.Entry(fr_train_opt, textvariable=v_tstep, width=5)).pack(side="left")
+    ttk.Label(fr_train_opt, text="조기종료").pack(side="left", padx=(8, 2))
+    _reg(ttk.Entry(fr_train_opt, textvariable=v_patience, width=5)).pack(side="left")
+    _reg(ttk.Checkbutton(fr_train_opt, text="범위자동", variable=v_arange)).pack(side="left", padx=(8, 0))
     ttk.Separator(f_train, orient="horizontal").pack(fill="x", pady=2)
     fr_train2 = ttk.Frame(f_train)
     fr_train2.pack(fill="x", pady=2)
@@ -1139,13 +1040,9 @@ def main():
     for lbl, var, w in [("축간격", v_gridstep, 5), ("wmin", v_wmin, 5), ("wmax", v_wmax, 5)]:
         ttk.Label(fr_auto1, text=lbl).pack(side="left", padx=(0 if lbl == "축간격" else 8, 2))
         _reg(ttk.Entry(fr_auto1, textvariable=var, width=w)).pack(side="left")
-    ttk.Label(fr_auto1, text="무가중").pack(side="left", padx=(8, 2))
-    _dw_auto = ttk.Entry(fr_auto1, textvariable=v_draww, width=4)
-    _reg(_dw_auto).pack(side="left")
-    _dw_widgets.append(_dw_auto)
-    ttk.Label(fr_auto1, text="최근가중").pack(side="left", padx=(8, 2))
-    _recw_auto = ttk.Entry(fr_auto1, textvariable=v_recw, width=4)
-    _reg(_recw_auto).pack(side="left")
+    for lbl, var, w in [("순차", v_seqsw, 4), ("σ", v_noise, 5), ("제한분", v_automin, 5)]:
+        ttk.Label(fr_auto1, text=lbl).pack(side="left", padx=(8, 2))
+        _reg(ttk.Entry(fr_auto1, textvariable=var, width=w)).pack(side="left")
     ttk.Separator(f_auto, orient="horizontal").pack(fill="x", pady=2)
     fr_auto2 = ttk.Frame(f_auto)
     fr_auto2.pack(fill="x", pady=2)
@@ -1153,26 +1050,6 @@ def main():
         ttk.Label(fr_auto2, text=_lbl).pack(side="left", padx=(8, 2))
         _reg(ttk.Entry(fr_auto2, textvariable=_var, width=5)).pack(side="left")
 
-    f_grid = ttk.Frame(detail)
-    fr_grid2 = ttk.Frame(f_grid)
-    fr_grid2.pack(fill="x", pady=2)
-    for lbl, var, w in [("jobs", v_jobs, 5), ("축간격", v_gridstep, 5),
-                        ("wmin", v_wmin, 5), ("wmax", v_wmax, 5)]:
-        ttk.Label(fr_grid2, text=lbl).pack(side="left", padx=(0 if lbl == "jobs" else 8, 2))
-        _reg(ttk.Entry(fr_grid2, textvariable=var, width=w)).pack(side="left")
-    ttk.Label(fr_grid2, text="무가중").pack(side="left", padx=(8, 2))
-    _dw_grid = ttk.Entry(fr_grid2, textvariable=v_draww, width=4)
-    _reg(_dw_grid).pack(side="left")
-    _dw_widgets.append(_dw_grid)
-    ttk.Label(fr_grid2, text="최근가중").pack(side="left", padx=(8, 2))
-    _recw_grid = ttk.Entry(fr_grid2, textvariable=v_recw, width=4)
-    _reg(_recw_grid).pack(side="left")
-    ttk.Separator(f_grid, orient="horizontal").pack(fill="x", pady=2)
-    fr_grid3 = ttk.Frame(f_grid)
-    fr_grid3.pack(fill="x", pady=2)
-    for _lbl, _var in (("무부스트", v_drawboost), ("접전폭", v_drawmargin), ("총득점", v_drawtotal)):
-        ttk.Label(fr_grid3, text=_lbl).pack(side="left", padx=(8, 2))
-        _reg(ttk.Entry(fr_grid3, textvariable=_var, width=5)).pack(side="left")
     def _apply_drawboost(*_):
         lg, ver = v_league.get(), v_ver.get().strip()
         if not ver:
@@ -1206,9 +1083,9 @@ def main():
             return
         v_status.set(f"무부스트 적용 {b:g}/{m:g}/{t:g} → {ver}")
         refresh_wedit()
-    _reg(ttk.Button(fr_grid3, text="부스트적용", width=8, command=_apply_drawboost)).pack(side="left", padx=(8, 0))
+    _reg(ttk.Button(fr_auto2, text="부스트적용", width=8, command=_apply_drawboost)).pack(side="left", padx=(8, 0))
 
-    MODE_FRAMES = {"grid": f_grid, "train": f_train, "auto": f_auto}
+    MODE_FRAMES = {"train": f_train, "auto": f_auto}
 
     def refresh_detail():
         for m, fr in MODE_FRAMES.items():
@@ -1232,19 +1109,11 @@ def main():
             ver_label.pack(side="left")
             lbl_acc.pack_forget()
             val_acc.pack_forget()
-            try:
-                scrub_scale.state(["disabled"])
-            except (tk.TclError, AttributeError):
-                pass
         else:
             ver_label.pack_forget()
             btn_del_ver.pack_forget()
             cb_ver.pack(side="left")
             btn_del_ver.pack(side="left", padx=(6, 0))
-            try:
-                scrub_scale.state(["!disabled"])
-            except (tk.TclError, AttributeError):
-                pass
             lbl_acc.pack(side="left", padx=(8, 2))
             val_acc.pack(side="left")
         hint.configure(text=HINTS.get(cur, ""))
@@ -1279,100 +1148,6 @@ def main():
     fig.subplots_adjust(left=0.10, right=0.96, top=0.92, bottom=0.10, hspace=0.50)
     canvas = FigureCanvasTkAgg(fig, master=mid)
     canvas.get_tk_widget().pack(fill="both", expand=True)
-    canvas.mpl_connect("button_press_event", lambda event: _on_ax_click(event))
-    canvas.mpl_connect("motion_notify_event", lambda event: _on_ax_motion(event))
-    canvas.mpl_connect("button_release_event", lambda event: _on_ax_release(event))
-    chart_drag = {"on": False}
-    scrub_bar = ttk.Frame(mid)
-    scrub_bar.pack(fill="x", pady=(4, 0))
-    scrub_var = tk.DoubleVar(value=0)
-    scrub_scale = ttk.Scale(scrub_bar, from_=0, to=0, orient="horizontal",
-                            variable=scrub_var, command=lambda *_: on_scrub())
-    scrub_scale.pack(side="left", fill="x", expand=True)
-    scrub_scale.state(["disabled"])
-    _scrub_drag = {"on": False}
-
-    def _scale_set_from_x(ev):
-        try:
-            n = len(whist["x"])
-            if n == 0:
-                return
-            w = scrub_scale.winfo_width()
-            if w <= 1:
-                return
-            frac = min(1.0, max(0.0, ev.x / w))
-            scrub_var.set(frac * (n - 1))
-        except (tk.TclError, AttributeError, ValueError, TypeError):
-            pass
-
-    def _on_scale_press(ev):
-        if runner["obj"] is not None:
-            return
-        _scrub_drag["on"] = True
-        try:
-            scrub_scale.grab_set()
-        except tk.TclError:
-            pass
-        _scale_set_from_x(ev)
-        on_scrub()
-        return "break"
-
-    def _on_scale_motion(ev):
-        if not _scrub_drag["on"]:
-            return
-        if runner["obj"] is not None:
-            return
-        _scale_set_from_x(ev)
-        on_scrub()
-        return "break"
-
-    def _on_scale_release(ev):
-        _scrub_drag["on"] = False
-        try:
-            scrub_scale.grab_release()
-        except tk.TclError:
-            pass
-    scrub_scale.bind("<ButtonPress-1>", _on_scale_press)
-    scrub_scale.bind("<B1-Motion>", _on_scale_motion)
-    scrub_scale.bind("<ButtonRelease-1>", _on_scale_release)
-
-    def _scrub_keystep(step):
-        if runner["obj"] is not None:
-            return
-        if len(whist["x"]) == 0:
-            return
-        try:
-            cur = int(float(scrub_var.get()))
-        except (ValueError, TypeError):
-            return
-        nxt = max(0, min(len(whist["x"]) - 1, cur + step))
-        scrub_var.set(nxt)
-        _scrub_to(nxt)
-
-    def _on_scale_key(ev, step):
-        _scrub_keystep(step)
-        return "break"
-
-    scrub_scale.bind("<Left>", lambda e: _on_scale_key(e, -1))
-    scrub_scale.bind("<Right>", lambda e: _on_scale_key(e, 1))
-
-    def _on_key_global(ev):
-        try:
-            focus = app.focus_get()
-            if focus is not None and focus.winfo_class() in ("TEntry", "Entry", "TCombobox", "Text"):
-                return
-        except tk.TclError:
-            pass
-        if ev.keysym == "Left":
-            _scrub_keystep(-1)
-        elif ev.keysym == "Right":
-            _scrub_keystep(1)
-    app.bind_all("<Left>", _on_key_global)
-    app.bind_all("<Right>", _on_key_global)
-    scrub_label = ttk.Label(scrub_bar, text="—", width=46)
-    scrub_label.pack(side="left", padx=(6, 0))
-    scrub = {"active": False, "cursor": None, "order": None,
-             "blit_bg": None, "blit_key": None}
 
     wedit_frame = ttk.LabelFrame(mid, text="가중치 직접편집", padding=6)
     wedit_frame.pack(fill="x", pady=(4, 0))
@@ -1454,14 +1229,10 @@ def main():
     wedit_info.pack(side="left", padx=(8, 0))
 
     runner = {"obj": None}
-    cumu_out = {"ver": ""}
     live = {"best": None, "cur_acc": None}
     prog = {"t": 0.0, "ndone": 0, "cps": 0.0}
     hist = {"x": [], "best": [], "cur": []}
     hist_state = {"last_draw": 0.0, "t0": 0.0, "xmode": "%"}
-    whist = {"x": [], "W": [], "O": [], "a": [], "n": [], "N": [], "t": [],
-             "names": None, "ver": None, "t0": 0.0,
-             "last_rec": 0.0, "last_best": None}
     gfx = {"labels": None, "bars": None, "texts": [],
            "step_lines": [],
            "last_mtime": 0.0, "last_sig": None,
@@ -1515,13 +1286,13 @@ def main():
         try:
             wmin = float(v_wmin.get())
         except (ValueError, AttributeError):
-            wmin = -3.0
+            wmin = -10.0
         try:
             wmax = float(v_wmax.get())
         except (ValueError, AttributeError):
-            wmax = 3.0
+            wmax = 10.0
         if not (wmin < 0 < wmax):
-            wmin, wmax = -3.0, 3.0
+            wmin, wmax = -10.0, 10.0
         return wmin, wmax, (wmax - wmin) * 0.02
 
     def _ensure_bars(labels):
@@ -1610,7 +1381,6 @@ def main():
         ax_p.set_ylim(max(0.0, mn - pad), min(1.0, mx + pad))
 
     def _draw_progress():
-        _hide_cursor()
         xs, yb, yc = hist["x"], hist["best"], hist["cur"]
         n = len(xs)
         st = max(1, -(-n // 2000))
@@ -1676,381 +1446,14 @@ def main():
             preview_art["line"] = None
         except Exception:
             pass
-        _clear_whist()
 
-    def _clear_whist():
-        for k in ("x", "W", "O", "a", "n", "N", "t"):
-            whist[k].clear()
-        whist["names"] = None
-        whist["ver"] = None
-        whist["t0"] = 0.0
-        whist["last_rec"] = 0.0
-        whist["last_best"] = None
-        scrub["active"] = False
-        scrub["order"] = None
-        scrub["blit_bg"] = None
-        scrub["blit_key"] = None
-        scrub.pop("pending", None)
-        _hide_cursor()
-        try:
-            scrub_scale.configure(to=0)
-            scrub_var.set(0)
-            scrub_label.configure(text="—")
-        except (tk.TclError, AttributeError):
-            pass
 
-    def _update_scrub_label(i=None):
-        try:
-            n = len(whist["x"])
-            if n == 0:
-                scrub_label.configure(text="—")
-                return
-            if i is None:
-                i = int(float(scrub_var.get()))
-            i = max(0, min(n - 1, i))
-            a = whist["a"][i]
-            atxt = f" · acc {a:.3f}" if isinstance(a, (int, float)) else ""
-            try:
-                nn, NN = whist["n"][i], whist["N"][i]
-                nntxt = f" · {nn:,}/{NN:,}" if isinstance(nn, int) and isinstance(NN, int) and NN > 0 else ""
-            except (IndexError, TypeError):
-                nntxt = ""
-            try:
-                tt = whist["t"][i]
-                ttxt = f" · {tt:.1f}s" if isinstance(tt, (int, float)) else ""
-            except (IndexError, TypeError):
-                ttxt = ""
-            scrub_label.configure(text=f"{i + 1}/{n} · {whist['x'][i]:.1f}%{nntxt}{ttxt}{atxt}")
-        except (tk.TclError, AttributeError, ValueError, TypeError):
-            pass
 
-    def _hide_cursor():
-        try:
-            ln = scrub.get("cursor")
-            if ln is not None:
-                ln.remove()
-        except Exception:
-            pass
-        scrub["cursor"] = None
 
-    def _enable_scrub():
-        try:
-            if len(whist["x"]) >= 2:
-                scrub_scale.state(["!disabled"])
-                scrub_scale.configure(to=len(whist["x"]) - 1)
-                scrub_var.set(len(whist["x"]) - 1)
-                _update_scrub_label(len(whist["x"]) - 1)
-                return True
-        except (tk.TclError, AttributeError):
-            pass
-        return False
 
-    def _refresh_whist(league, ver):
-        tag = f"{league}|{ver}" if ver else ""
-        if tag and whist.get("ver") == tag and len(whist["x"]) >= 2:
-            _enable_scrub()
-            return
-        _clear_whist()
-        if not ver:
-            return
-        try:
-            d = json.load(open(whist_path(league, ver), encoding="utf-8"))
-            xs, W = d.get("x"), d.get("W")
-            if not (isinstance(xs, list) and isinstance(W, list)) or len(xs) < 2 or len(xs) != len(W):
-                return
-            O, a = d.get("O"), d.get("a")
-            whist["x"] = [float(v) for v in xs]
-            whist["W"] = [list(map(float, r)) for r in W]
-            whist["O"] = [(list(map(float, r)) if isinstance(r, list) else None) for r in O] if isinstance(O, list) and len(O) == len(xs) else [None] * len(xs)
-            whist["a"] = [(float(v) if isinstance(v, (int, float)) else None) for v in a] if isinstance(a, list) and len(a) == len(xs) else [None] * len(xs)
-            nn, NN, tt = d.get("n"), d.get("N"), d.get("t")
-            whist["n"] = [int(v) for v in nn] if isinstance(nn, list) and len(nn) == len(xs) else [0] * len(xs)
-            whist["N"] = [int(v) for v in NN] if isinstance(NN, list) and len(NN) == len(xs) else [0] * len(xs)
-            whist["t"] = [(float(v) if isinstance(v, (int, float)) else 0.0) for v in tt] if isinstance(tt, list) and len(tt) == len(xs) else [0.0] * len(xs)
-            whist["names"] = list(d.get("names")) if isinstance(d.get("names"), list) else None
-            whist["ver"] = tag
-            hist["x"].clear()
-            hist["best"].clear()
-            hist["cur"].clear()
-            _b = float("-inf")
-            for _i in range(len(whist["x"])):
-                _ca = whist["a"][_i]
-                _ca = _ca if isinstance(_ca, (int, float)) else 0.0
-                _b = max(_b, _ca)
-                hist["x"].append(whist["x"][_i])
-                hist["best"].append(_b)
-                hist["cur"].append(_ca)
-            hist_state["xmode"] = "%"
-            _draw_progress()
-            _enable_scrub()
-        except (OSError, ValueError, TypeError):
-            _clear_whist()
 
-    def _blit_key(labels):
-        try:
-            wgt = canvas.get_tk_widget()
-            return (tuple(labels),
-                    tuple(ax_w.get_xlim()), tuple(ax_w.get_ylim()),
-                    tuple(ax_p.get_xlim()), tuple(ax_p.get_ylim()),
-                    (wgt.winfo_width(), wgt.winfo_height()))
-        except Exception:
-            return None
 
-    def _blit_update():
-        try:
-            bg = scrub.get("blit_bg")
-            if bg is None:
-                return False
-            fig.canvas.restore_region(bg)
-            for art in list(gfx["bars"] or []) + list(gfx["texts"] or []):
-                ax_w.draw_artist(art)
-            ln = scrub.get("cursor")
-            if ln is not None and ln.axes is ax_p and ln.get_visible():
-                ax_p.draw_artist(ln)
-            pv = preview_art.get("line")
-            if pv is not None and pv.axes is ax_p and pv.get_visible():
-                ax_p.draw_artist(pv)
-            fig.canvas.blit(fig.bbox)
-            return True
-        except Exception:
-            scrub["blit_bg"] = None
-            return False
 
-    def _move_cursor(x):
-        try:
-            ln = scrub.get("cursor")
-            if ln is None or ln.axes is not ax_p:
-                ln = ax_p.axvline(x, color="#f59e0b", linewidth=1.2, zorder=5)
-                scrub["cursor"] = ln
-                return False
-            ln.set_xdata([x, x])
-            lo, hi = ax_p.get_xlim()
-            if not (lo <= x <= hi):
-                span = hi - lo if hi > lo else 10.0
-                ax_p.set_xlim(x - span / 2, x + span / 2)
-                return False
-            return True
-        except Exception:
-            return False
-
-    def _capture_bg():
-        try:
-            for art in list(gfx["bars"] or []) + list(gfx["texts"] or []):
-                art.set_visible(False)
-            ln = scrub.get("cursor")
-            if ln is not None:
-                try:
-                    ln.set_visible(False)
-                except Exception:
-                    pass
-            pv = preview_art.get("line")
-            if pv is not None:
-                try:
-                    pv.set_visible(False)
-                except Exception:
-                    pass
-            fig.canvas.draw()
-            scrub["blit_bg"] = fig.canvas.copy_from_bbox(fig.bbox)
-            for art in list(gfx["bars"] or []) + list(gfx["texts"] or []):
-                art.set_visible(True)
-            if ln is not None:
-                try:
-                    ln.set_visible(True)
-                except Exception:
-                    pass
-            if pv is not None:
-                try:
-                    pv.set_visible(True)
-                except Exception:
-                    pass
-            return True
-        except Exception:
-            scrub["blit_bg"] = None
-            return False
-
-    def show_w_hist(i):
-        n = len(whist["x"])
-        if n == 0:
-            return
-        i = max(0, min(n - 1, int(i)))
-        try:
-            if scrub.get("order") is None:
-                ref = None
-                for k in range(n - 1, -1, -1):
-                    if isinstance(whist["O"][k], list):
-                        ref = whist["O"][k]
-                        break
-                if ref is None:
-                    ref = whist["W"][n - 1]
-                scrub["order"] = sorted(range(len(ref)),
-                                        key=lambda j: -abs(ref[j]) if isinstance(ref[j], (int, float)) else 0)
-            order = scrub["order"]
-            raw = whist["names"] or [f"f{j}" for j in range(len(whist["W"][i]))]
-            labels = [FEATURE_KO.get(raw[j], raw[j]) if j < len(raw) else f"f{j}" for j in order]
-            vals = [whist["W"][i][j] if j < len(whist["W"][i]) else 0.0 for j in order]
-            _ensure_bars(labels)
-            _update_bars(vals, None, draw=False)
-            moved = _move_cursor(whist["x"][i])
-            key = _blit_key(labels)
-            if (not moved) or scrub.get("blit_bg") is None or key != scrub.get("blit_key"):
-                if _capture_bg():
-                    scrub["blit_key"] = _blit_key(labels)
-            if not _blit_update():
-                canvas.draw_idle()
-        except Exception:
-            pass
-        try:
-            wrow = whist["W"][i]
-            if wedit_vars and len(wrow) == len(wedit_vars):
-                for pos, (_, var) in enumerate(wedit_vars):
-                    j = wedit_order[pos] if pos < len(wedit_order) else pos
-                    v = wrow[j] if 0 <= j < len(wrow) else 0.0
-                    try:
-                        var.set(f"{v:.4f}" if isinstance(v, (int, float)) else "0.0000")
-                    except tk.TclError:
-                        pass
-                wedit_pending["w"] = None
-                try:
-                    wedit_info.configure(text="")
-                except tk.TclError:
-                    pass
-        except (IndexError, TypeError):
-            pass
-        _update_scrub_label(i)
-
-    def _pump_scrub():
-        scrub["scheduled"] = False
-        try:
-            if runner["obj"] is not None:
-                return
-            if "pending" not in scrub:
-                return
-            scrub["last_show"] = time.monotonic()
-            show_w_hist(scrub.pop("pending"))
-        except (tk.TclError, AttributeError):
-            pass
-
-    def _scrub_to(i):
-        scrub["active"] = True
-        scrub["pending"] = i
-        now = time.monotonic()
-        if now - scrub.get("last_show", 0.0) < 0.04:
-            _update_scrub_label(i)
-            if not scrub.get("scheduled"):
-                scrub["scheduled"] = True
-                try:
-                    app.after(40, _pump_scrub)
-                except tk.TclError:
-                    scrub["scheduled"] = False
-            return
-        scrub["last_show"] = now
-        show_w_hist(scrub.pop("pending"))
-
-    def on_scrub(*_):
-        if runner["obj"] is not None:
-            return
-        if len(whist["x"]) == 0:
-            _refresh_whist(v_league.get(), v_ver.get().strip())
-            if len(whist["x"]) == 0:
-                v_status.set("기록 없음 — 전수탐색 실행 후 생성됨")
-                return
-        try:
-            want = int(float(scrub_var.get()))
-        except (ValueError, TypeError):
-            return
-        _scrub_to(want)
-
-    def _record_w(d, shown, names, league="", ver=""):
-        tot, nd = d.get("total"), d.get("ndone")
-        if not (isinstance(tot, int) and tot > 0 and isinstance(nd, int)):
-            return
-        w, o, a = shown
-        if len(whist["W"]) > 0 and list(w) == whist["W"][-1]:
-            return
-        max_c = d.get("max_c", 0)
-        eff = max_c if isinstance(max_c, int) and max_c > 0 else tot
-        pct = min(100.0, nd / eff * 100)
-        now = time.monotonic()
-        whist["last_rec"] = now
-        whist["last_best"] = d.get("best")
-        if league and ver:
-            whist["ver"] = f"{league}|{ver}"
-        if not whist.get("t0"):
-            whist["t0"] = now
-        whist["x"].append(pct)
-        whist["n"].append(nd)
-        whist["N"].append(eff)
-        whist["t"].append(now - whist["t0"])
-        whist["W"].append(list(w))
-        whist["O"].append(list(o) if isinstance(o, list) else None)
-        whist["a"].append(a)
-        whist["names"] = names
-        if len(whist["x"]) > 50000:
-            cut = len(whist["x"]) - 50000
-            del whist["x"][:cut]
-            del whist["W"][:cut]
-            del whist["O"][:cut]
-            del whist["a"][:cut]
-            del whist["n"][:cut]
-            del whist["N"][:cut]
-            del whist["t"][:cut]
-        try:
-            n = len(whist["x"])
-            scrub_scale.configure(to=max(0, n - 1))
-            if not scrub["active"]:
-                scrub_var.set(n - 1)
-                _update_scrub_label(n - 1)
-        except (tk.TclError, AttributeError):
-            pass
-
-    def _on_ax_click(event):
-        try:
-            if event.inaxes is not ax_p:
-                return
-            if runner["obj"] is not None:
-                return
-            xs = whist["x"]
-            if len(xs) == 0 or event.xdata is None:
-                return
-            i = min(range(len(xs)), key=lambda k: abs(xs[k] - event.xdata))
-            try:
-                canvas.get_tk_widget().grab_set()
-            except tk.TclError:
-                pass
-            chart_drag["on"] = True
-            scrub_var.set(i)
-            _scrub_to(i)
-        except Exception:
-            pass
-
-    def _on_ax_motion(event):
-        try:
-            if not chart_drag["on"]:
-                return
-            if runner["obj"] is not None:
-                return
-            xs = whist["x"]
-            if len(xs) == 0:
-                return
-            if event.xdata is None:
-                try:
-                    bbox = ax_p.get_window_extent()
-                    i = 0 if event.x <= bbox.x0 else len(xs) - 1
-                except Exception:
-                    return
-            else:
-                i = min(range(len(xs)), key=lambda k: abs(xs[k] - event.xdata))
-            scrub_var.set(i)
-            _scrub_to(i)
-        except Exception:
-            pass
-
-    def _on_ax_release(event):
-        chart_drag["on"] = False
-        try:
-            canvas.get_tk_widget().grab_release()
-        except tk.TclError:
-            pass
 
     def clear_train_view():
         gfx["labels"] = None
@@ -2134,7 +1537,7 @@ def main():
 
     def poll_ckpt():
         o = current_options()
-        if o["mode"] != "grid":
+        if o:
             now_live = time.monotonic()
             if now_live - gfx.get("last_art_db", 0.0) >= 1.0:
                 gfx["last_art_db"] = now_live
@@ -2180,62 +1583,6 @@ def main():
                         pass
                 app.after(16, poll_ckpt)
             return
-        cp = ckpt_path(o["league"], o["ver"])
-        if os.path.exists(cp):
-            try:
-                try:
-                    mt = os.path.getmtime(cp)
-                except OSError:
-                    mt = 0.0
-                if mt != gfx["last_mtime"]:
-                    gfx["last_mtime"] = mt
-                    d = json.load(open(cp, encoding="utf-8"))
-                    if isinstance(d.get("best"), (int, float)):
-                        live["best"] = float(d["best"])
-                    cur_w = d.get("curW")
-                    cur_acc = d.get("curAcc")
-                    best_w = d.get("bestW")
-                    if isinstance(cur_acc, (int, float)):
-                        live["cur_acc"] = float(cur_acc)
-                    sig = (d.get("ndone"), d.get("best"), d.get("curAcc"))
-                    tot = d.get("total")
-                    max_c = d.get("max_c", 0)
-                    eff = max_c if isinstance(max_c, int) and max_c > 0 else tot
-                    if isinstance(d.get("ndone"), int) and isinstance(eff, int) and eff > 0:
-                        _refresh_status(d["ndone"], eff)
-                    if isinstance(d.get("ndone"), int) and isinstance(d.get("best"), (int, float)):
-                        pct = min(100.0, d["ndone"] / eff * 100) if isinstance(eff, int) and eff > 0 else 0.0
-                        _push_hist(pct, float(d["best"]),
-                                   float(cur_acc) if isinstance(cur_acc, (int, float)) else None)
-                    if sig != gfx["last_sig"]:
-                        gfx["last_sig"] = sig
-                        running = runner["obj"] is not None
-                        fnames = _feat_names_for(o["league"], o["ver"])
-                        shown = None
-                        rargs = None
-                        if running and isinstance(cur_w, list) and cur_w and isinstance(cur_acc, (int, float)):
-                            rargs = (cur_w, fnames, float(cur_acc), best_w)
-                            shown = (cur_w, best_w if isinstance(best_w, list) else None, float(cur_acc))
-                        elif isinstance(best_w, list) and best_w:
-                            rargs = (best_w, fnames, None, None)
-                            bb = d.get("best")
-                            shown = (best_w, None, float(bb) if isinstance(bb, (int, float)) else None)
-                        if shown is not None:
-                            try:
-                                _record_w(d, shown, fnames, o["league"], o["ver"])
-                            except Exception:
-                                pass
-                            now = time.monotonic()
-                            if now - gfx.get("last_render", 0.0) >= 0.05:
-                                gfx["last_render"] = now
-                                try:
-                                    redraw_graphs(rargs[0], rargs[1], title_acc=rargs[2], order_w=rargs[3])
-                                except Exception:
-                                    pass
-            except (OSError, ValueError):
-                pass
-        if runner["obj"] is not None:
-            app.after(16, poll_ckpt)
 
     def append_log(line):
         m = RE_BEST.search(line)
@@ -2324,10 +1671,6 @@ def main():
             poll_once()
             refresh_wedit()
             _draw_progress()
-            if len(whist["x"]) >= 2:
-                _enable_scrub()
-            else:
-                _refresh_whist(v_league.get(), v_ver.get().strip())
         app.after(0, _ui)
 
     def poll_once():
@@ -2338,25 +1681,12 @@ def main():
             else:
                 clear_train_view()
                 return
-        cp = ckpt_path(o["league"], o["ver"])
         bw, names, src = None, None, "아티팩트"
         try:
-            try:
-                cp_mt = os.path.getmtime(cp)
-            except OSError:
-                cp_mt = 0.0
             d0 = load_tune(o["league"], o["ver"])
             if isinstance(d0, dict):
                 names = d0.get("features")
                 bw = d0.get("weights")
-            if o["mode"] == "grid" and cp_mt > 0.0:
-                try:
-                    cb = json.load(open(cp, encoding="utf-8")).get("bestW")
-                except (OSError, ValueError):
-                    cb = None
-                if isinstance(cb, list) and cb and (not names or len(cb) == len(names)):
-                    bw = cb
-                    src = "ckpt"
             if not (isinstance(bw, list) and bw and (not names or len(bw) == len(names))):
                 bw = None
                 src = "없음"
@@ -2370,9 +1700,9 @@ def main():
 
     def on_start():
         v_league.set(KO2CODE.get(v_league_ko.get(), "k_league_1"))
-        v_mode.set(MO2CODE.get(v_mode_ko.get(), "grid"))
+        v_mode.set(MO2CODE.get(v_mode_ko.get(), "train"))
         # 상세 직접 입력을 보존: 프리셋 재적용 금지, 버전 공백시에만 복원
-        if not v_ver.get().strip() and v_train.get().strip() and v_mode.get() not in ("grid", "auto"):
+        if not v_ver.get().strip() and v_train.get().strip() and v_mode.get() not in ("auto",):
             apply_train_ver()
         o = current_options()
         if not selected_feats():
@@ -2381,7 +1711,7 @@ def main():
         if o["mode"] == "train" and not o["train"]:
             v_status.set("학습시즌이 필요합니다 (상세에서 확인)")
             return
-        if o["mode"] in ("grid", "auto"):
+        if o["mode"] in ("auto",):
             if not o["ver"]:
                 v_status.set("버전을 선택하세요 (상세에서 확인)")
                 return
@@ -2396,24 +1726,12 @@ def main():
                 v_status.set(f"legacy 베이스 필요: {o['ver']} (현재 {art0.get('model_type')})")
                 return
         set_opts_enabled(False)
-        for _w in list(_dw_widgets):
-            try:
-                _w.state(["!disabled"])
-            except (tk.TclError, AttributeError):
-                pass
         cmd = build_command(o)
-        write_live_draw_w(force=True)
         env = dict(os.environ)
         env.update(load_dotenv(os.path.join(ROOT, ".env.local")))
         env.setdefault("OMP_NUM_THREADS", "1")
         env.setdefault("MKL_NUM_THREADS", "1")
         env.setdefault("OPENBLAS_NUM_THREADS", "1")
-        if o["mode"] == "grid":
-            try:
-                j = int(o.get("jobs") or 1)
-            except ValueError:
-                j = 1
-            env["NUMBA_NUM_THREADS"] = str(max(j, 1))
         live["best"] = None
         live["cur_acc"] = None
         prog["t"] = 0.0
@@ -2428,10 +1746,6 @@ def main():
         v_status.set("실행 중…")
         btn_start.configure(state="disabled")
         btn_stop.configure(state="normal")
-        try:
-            scrub_scale.state(["disabled"])
-        except (tk.TclError, AttributeError):
-            pass
         r = Runner(lambda line: app.after(0, append_log, line), on_done)
         runner["obj"] = r
         try:
@@ -2467,7 +1781,7 @@ def main():
             return
         base = os.path.join(ROOT, "ml", "permatch", f"{lg}_{ver}")
         gone = []
-        for ext in (".json", ".grid.json", ".auto.json", ".live.json", ".whist.json", ".xgb.json", ".cumu.json", ".wrong.json", ".lstm.pt"):
+        for ext in (".json", ".grid.json", ".auto.json", ".live.json", ".whist.json", ".xgb.json", ".lstm.pt"):
             try:
                 os.remove(base + ext)
                 gone.append("로컬" + ext)
@@ -2496,7 +1810,6 @@ def main():
     def on_league_pick(*_):
         v_league.set(KO2CODE.get(v_league_ko.get(), v_league.get()))
         apply_preset()
-        _refresh_whist(v_league.get(), v_ver.get().strip())
         refresh_ver_list()
         request_acc()
         poll_once()
@@ -2504,7 +1817,6 @@ def main():
     def on_mode_pick(*_):
         v_mode.set(MO2CODE.get(v_mode_ko.get(), v_mode.get()))
         refresh_detail()
-        _refresh_whist(v_league.get(), v_ver.get().strip())
         if v_mode.get() == "train":
             apply_preset()
             ui_state["just_done"] = False
@@ -2517,18 +1829,6 @@ def main():
 
     def live_path(league, ver):
         return _eph(f"{league}_{ver}.live.json")
-
-    def write_live_draw_w(*_, force=False):
-        if runner["obj"] is None and not force:
-            return
-        ver = v_ver.get().strip()
-        if not ver:
-            return
-        try:
-            with open(live_path(v_league.get(), ver), "w") as f:
-                json.dump({"draw_w": v_draww.get().strip()}, f)
-        except (OSError, ValueError):
-            pass
 
     def on_close():
         r = runner.get("obj")
@@ -2568,7 +1868,6 @@ def main():
     v_train.trace_add("write", refresh_summary)
     v_valid.trace_add("write", refresh_summary)
     v_traincount.trace_add("write", apply_preset)
-    v_draww.trace_add("write", write_live_draw_w)
     v_gridstep.trace_add("write", refresh_step_lines)
     v_wmin.trace_add("write", refresh_step_lines)
     v_wmax.trace_add("write", refresh_step_lines)
