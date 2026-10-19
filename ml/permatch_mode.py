@@ -1,34 +1,10 @@
-"""Permatch 학습 단일 진입점 (autotune + 단발).
+"""Permatch 학습 엔진 (GUI 전용).
 
-사용법 (버전 형식 {league}_tr{학습시즌수}-f{피처수}-x{해시4}, 예: premier_league_tr6-f13-x8e60.json):
+학습·탐색은 GUI(grid_console.py)와 웹 UI에서만 실행합니다. 이 스크립트는
+GUI/웹이 내부적으로 호출하며(--ui 플래그), CLI에서 직접 실행하면 차단됩니다.
+예외: 예측(--mode predict)은 CLI에서도 가능.
 
-  # 계속학습 (기본): ml/permatch/{league}_{ver}.json 있으면 최고점으로 로드 후 계속 탐색
-  ml/.venv/bin/python ml/permatch_mode.py --league premier_league \\
-    --train 2016-2017,2017-2018,2018-2019,2019-2020,2020-2021,2021-2022 \\
-    --valid 2022-2023 --ver tr6-f13-x8e60 \\
-    --trials 10000 --jobs 4
-
-  # 처음부터 (--new): 기존 아티팩트 무시하고 새로 탐색
-  ml/.venv/bin/python ml/permatch_mode.py --league premier_league \\
-    --train 2016-2017,2017-2018 --valid 2018-2019 --ver tr2-f13-x0000 --trials 20 --new
-
-  # 단발 학습 (빠른 1회 fit, 기존과 비교해 좋으면 저장)
-  ml/.venv/bin/python ml/permatch_mode.py --league k_league_1 \\
-    --train 2025 --valid 2024 --ver tr1-f13-x0000 --fast
-  ml/.venv/bin/python ml/permatch_mode.py --league k_league_1 \\
-    --train 2025 --valid 2024 --ver tr1-f13-x0000 --fast --new   # 비교 없이 덮어쓰기
-
-  # 예측 (학습 없이 아티팩트로 확률 확인)
-  ml/.venv/bin/python ml/permatch_mode.py --league k_league_1 \\
-    --predict 2026 --ver tr6-f13-x0000 --mode predict
-
-  # 랜덤탐색 (웹과 동일: 순차 1바퀴 후 랜덤워크, 개선될 때마다 저장, Ctrl+C로 중지)
-  ml/.venv/bin/python ml/permatch_mode.py --mode auto --league k_league_1 \\
-    --ver tr6-f13-x0000 --tune 2022,2023,2024,2025
-
-  # 전수탐색 (주판 순서로 모든 조합, 체크포인트 계속학습, Ctrl+C로 중지)
-  ml/.venv/bin/python ml/permatch_mode.py --mode grid --league k_league_1 \\
-    --ver tr6-f13-x0000 --grid-step 0.5
+버전 형식: {league}_tr{학습시즌수}-f{피처수}-x{해시4} (+ 선택 접미사 -d/-r/-f5)
 """
 
 from __future__ import annotations
@@ -1022,7 +998,7 @@ def all_nontrain_seasons(league: str, train_s: set) -> set:
 
 def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_rounds: int = 0,
               max_minutes: float = 0.0, noise: float = 0.1, hfa_noise: float = 0.05,
-              wmin: float = -3.0, wmax: float = 3.0, log_every: int = 200,
+              wmin: float = -10.0, wmax: float = 10.0, log_every: int = 200,
               seed: int = 7, fresh: bool = False, use_cache: bool = True,
               grid_step: float = 0.0, draw_w: float = 0.0, recency_w: float = 0.0):
     import numpy as _np
@@ -1153,17 +1129,23 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
         save_artifact(league, ver, art)
         return ("saved", list(bestW), bestHfa, best, best_rec)
 
+    _save_ts = [0.0]
+
     def commit(tag):
         nonlocal w, hfa, best, best_rec, bestW, bestHfa, improved_any
         improved_any = True
-        st, bw, bh, ba, br = persist()
-        if st == "adopted":
-            best, best_rec, w, hfa, bestW, bestHfa = ba, br, bw, bh, list(bw), bh
+        st = "deferred"
+        if time.time() - _save_ts[0] >= _SAVE_EVERY:
+            st, bw, bh, ba, br = persist()
+            _save_ts[0] = time.time()
+            if st == "adopted":
+                best, best_rec, w, hfa, bestW, bestHfa = ba, br, bw, bh, list(bw), bh
         ise = season_acc(bestW, bestHfa)
         log(f"{tag} acc={best:.3f} " +
             " ".join(f"{s}={ise[s]:.3f}" for s in sorted(ise)) +
             (" → 외부파일 채택" if st == "adopted" else
-             " → 동일, 저장 생략" if st == "same" else " → 저장"))
+             " → 동일, 저장 생략" if st == "same" else
+             " → 저장 보류(스로틀)" if st == "deferred" else " → 저장"))
 
     order = sorted(range(nw), key=lambda j: -abs(w[j])) + ["hfa"]
     best, best_rec = accrec_of(w, hfa)
@@ -1173,6 +1155,16 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
     log(f"랜덤탐색 시작: acc={best:.3f} " +
         " ".join(f"{s}={se[s]:.3f}" for s in sorted(se)) +
         f" 순서={[FEATURES[j] if j != 'hfa' else 'hfa' for j in order]}")
+    _prev_sigterm = None
+    try:
+        import signal as _signal
+
+        def _on_term(signum, frame):
+            raise KeyboardInterrupt()
+
+        _prev_sigterm = _signal.signal(_signal.SIGTERM, _on_term)
+    except (ValueError, RuntimeError, OSError, AttributeError):
+        _prev_sigterm = None
     try:
         time_up = False
         for sw in range(max(0, seq_sweeps)):
@@ -1232,12 +1224,15 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
             if time_up:
                 break
             log(f"순차 {sw + 1}바퀴 완료 best={best:.3f}")
-        rng = random.Random(seed)
+        _nprng = _np.random.default_rng(seed)
         rnd = 0
-        log(f"랜덤워크 시작 (noise={noise} hfa_noise={hfa_noise} grid_step={grid_step} rounds=" +
-            ("무한" if random_rounds <= 0 else str(random_rounds)) + ", Ctrl+C로 중지)")
-        RK = 16
+        RK = 512
+        log(f"랜덤탐색 시작 (SA 1+λ λ={RK} σ초기={noise} grid_step={grid_step} rounds=" +
+            ("무한" if random_rounds <= 0 else str(random_rounds)) + ", Ctrl+C/중지로 종료)")
         last_prog = 0.0
+        sigma = max(0.002, float(noise or 0.1))
+        sigma_h = max(0.001, float(hfa_noise or 0.05))
+        fail_streak = 0
         _gvals = None
         try:
             _gs0 = float(grid_step)
@@ -1262,6 +1257,24 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
         Pc = _np.ascontiguousarray(PP, dtype=float) if PP is not None else _np.zeros((1, 3))
         use_pp = PP is not None
         capf = float(cap or 0.0)
+        _TT = _TTh = _TA = _TB = None
+        _perm_a = None
+        if _gvals is not None:
+            try:
+                _gv_arr = _np.asarray(_gvals, dtype=float)
+                _TT, _TTh = _grid_tables(_gv_arr, Xn, nw, capf)
+                _TA, _TB = _grid_thr(dc, Pc, palpha)
+                _perm_a = _np.arange(nw, dtype=_np.int64)
+                _snapw = []
+                for _j in range(nw):
+                    _snapw.append(float(_gv_arr[int(_np.abs(_gv_arr - w[_j]).argmin())]))
+                hfa = float(_gv_arr[int(_np.abs(_gv_arr - hfa).argmin())])
+                w = _snapw
+                log("축간격 격자에 스냅 후 국소 점프 탐색")
+            except Exception as _ex:
+                log(f"테이블 생성 실패, 연속모드 전환: {_ex}")
+                _gvals = None
+                _TT = None
         if _HAVE_NUMBA:
             try:
                 _numba.set_num_threads(max(1, int(os.cpu_count() or 4)))
@@ -1278,45 +1291,81 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
             if max_minutes > 0 and (time.time() - _START) / 60 > max_minutes:
                 log(f"{max_minutes}분 제한 도달 → 종료")
                 break
-            cand_w, cand_h = [], []
-            cw_, ch_ = list(w), hfa
-            for _ in range(n):
-                if _gvals is not None:
-                    cw_ = [rng.choice(_gvals) for _ in range(len(cw_))]
-                    ch_ = rng.choice(_gvals)
-                else:
-                    cw_ = [clamp(v + rng.uniform(-noise, noise)) for v in cw_]
-                    ch_ = clamp(ch_ + rng.uniform(-hfa_noise, hfa_noise))
-                cand_w.append(cw_)
-                cand_h.append(ch_)
-            if _HAVE_NUMBA:
+            if _gvals is not None and _TT is not None:
+                _base = _np.empty(nw + 1, dtype=_np.int64)
+                for _j in range(nw):
+                    _base[_j] = int(_np.abs(_gv_arr - w[_j]).argmin())
+                _base[nw] = int(_np.abs(_gv_arr - hfa).argmin())
+                _jmp = _nprng.integers(-2, 3, size=(n, nw + 1))
+                _msk = _nprng.random((n, nw + 1)) < 0.4
+                IDX = _np.clip(_base[None, :] + _np.where(_msk, _jmp, 0), 0, len(_gvals) - 1)
+                _zr = _np.nonzero((IDX == _base[None, :]).all(axis=1))[0]
+                if len(_zr):
+                    _ax = _nprng.integers(0, nw + 1, len(_zr))
+                    _dv = _nprng.choice(_np.array([-1, 1]), len(_zr))
+                    IDX[_zr, _ax] = _np.clip(IDX[_zr, _ax] + _dv, 0, len(_gvals) - 1)
+                VW = _gv_arr[IDX]
+                Wc = _np.tile(_np.asarray(w, dtype=float), (n, 1))
+                for _j in range(nw):
+                    Wc[:, _j] = VW[:, _j]
+                hc = VW[:, nw]
                 out = _np.empty(n)
                 out_rec = _np.empty(n)
-                _grid_acc_nb(Xc, yc, dc, Pc,
-                             _np.ascontiguousarray(cand_w, dtype=float),
-                             _np.ascontiguousarray(cand_h, dtype=float),
-                             capf, use_pp, out, out_rec)
+                _grid_table_nb(_TT, _TTh, IDX, _perm_a, nw, _TA, _TB, yc,
+                               1 if capf else 0, out, out_rec)
+                accs, recs = out, out_rec
+            elif _HAVE_NUMBA:
+                _steps = _nprng.uniform(-sigma, sigma, size=(n, nw))
+                Wc = _np.clip(_np.asarray(w, dtype=float)[None, :] + _steps, wmin, wmax)
+                _hsteps = _nprng.uniform(-sigma_h, sigma_h, size=n)
+                hc = _np.clip(hfa + _hsteps, wmin, wmax)
+                out = _np.empty(n)
+                out_rec = _np.empty(n)
+                _grid_acc_nb(Xc, yc, dc, Pc, Wc, hc, capf, palpha, out, out_rec)
                 accs, recs = out, out_rec
             else:
-                pairs = [accrec_of(cw_, ch_) for cw_, ch_ in zip(cand_w, cand_h)]
+                cand_w = [_np.clip(_np.asarray(w, dtype=float) + _nprng.uniform(-sigma, sigma, nw), wmin, wmax) for _ in range(n)]
+                cand_h = [_np.clip(hfa + _nprng.uniform(-sigma_h, sigma_h), wmin, wmax) for _ in range(n)]
+                pairs = [accrec_of(list(cw_), float(ch_)) for cw_, ch_ in zip(cand_w, cand_h)]
+                Wc = _np.asarray(cand_w, dtype=float)
+                hc = _np.asarray(cand_h, dtype=float)
                 accs = [p[0] for p in pairs]
                 recs = [p[1] for p in pairs]
-            for t in range(n):
-                rnd += 1
-                a = float(accs[t])
-                r = float(recs[t])
-                kw, kh = cand_w[t], cand_h[t]
-                w, hfa = kw, kh
-                if _sel_bonus(a, r, draw_w) > _sel_bonus(best, best_rec, draw_w):
-                    best, best_rec, bestW, bestHfa = a, r, list(kw), kh
-                    commit(f"★ 랜덤 #{rnd}")
-                elif rnd % max(1, log_every) == 0:
-                    log(f"랜덤 #{rnd} 진행중 best={best:.3f} 현재={a:.3f}")
+            keys = _np.asarray(accs, dtype=float) + draw_w * _np.asarray(recs, dtype=float)
+            bi = int(_np.argmax(keys))
+            a = float(accs[bi])
+            r = float(recs[bi])
+            prev_rnd = rnd
+            rnd += n
+            if _sel_bonus(a, r, draw_w) > _sel_bonus(best, best_rec, draw_w):
+                w, hfa = [float(v) for v in Wc[bi]], float(hc[bi])
+                best, best_rec, bestW, bestHfa = a, r, list(w), hfa
+                commit(f"★ 랜덤 #{rnd}")
+                fail_streak = 0
+                if _TT is None:
+                    sigma = max(0.002, sigma * 0.9)
+                    sigma_h = max(0.001, sigma_h * 0.9)
+            else:
+                fail_streak += 1
+                if fail_streak >= 3:
+                    fail_streak = 0
+                    if _TT is None:
+                        sigma = min(1.0, sigma * 1.6)
+                        sigma_h = min(0.5, sigma_h * 1.6)
+            if rnd // max(1, log_every) > prev_rnd // max(1, log_every):
+                log(f"랜덤 #{rnd} 진행중 best={best:.3f} 현재={a:.3f}" + (f" σ={sigma:.3f}" if _TT is None else ""))
             if time.time() - last_prog >= 0.016:
                 last_prog = time.time()
                 write_auto_prog(league, ver, rnd, best, bestW, list(w), a, tune_s)
     except KeyboardInterrupt:
-        log("중단됨(Ctrl+C) → 최고점 유지 후 종료")
+        log("중단됨(Ctrl+C/중지) → 최고점 유지 후 종료")
+    if _prev_sigterm is not None:
+        try:
+            import signal as _signal
+
+            _signal.signal(_signal.SIGTERM, _prev_sigterm)
+        except (ValueError, RuntimeError, OSError, AttributeError):
+            pass
     if time_up:
         log(f"{max_minutes}분 제한 도달 → 종료")
     if improved_any:
@@ -1346,7 +1395,7 @@ class _GridStop(Exception):
 def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
                 max_combos: int = 0, max_minutes: float = 0.0,
                 ckpt_every: int = 5000, log_every: int = 20000,
-                wmin: float = -3.0, wmax: float = 3.0,
+                wmin: float = -10.0, wmax: float = 10.0,
                 batch: int = 4096, log_secs: float = 10.0,
                 split: int = 1, part: int = 0,
                 fresh: bool = False, use_cache: bool = True,
@@ -1666,11 +1715,24 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
     Pc = _np.ascontiguousarray(PP, dtype=float) if PP is not None else _np.zeros((1, 3))
     use_pp = PP is not None
     capf = float(cap or 0.0)
+    _TT = _TTh = _TA = _TB = None
+    _perm_t = None
+    _hpos_t = nf - 1
+    if _HAVE_NUMBA and os.environ.get("OPICK_GRID_LEGACY") != "1":
+        try:
+            _posf = {feat: k for k, feat in enumerate(order) if feat != "hfa"}
+            _TT, _TTh = _grid_tables(vals, Xn, nw, capf)
+            _TA, _TB = _grid_thr(dc, Pc, palpha)
+            _perm_t = _np.asarray([_posf[f] for f in range(nw)], dtype=_np.int64)
+        except Exception as _ex:
+            log(f"테이블 생성 실패, 기존 커널 유지: {_ex}")
+            _TT = None
     _pows = None
     _vals_arr = None
     if total <= 9_000_000_000_000_000_000:
         _pows = _np.array([nv ** k for k in range(nf)], dtype=_np.int64)
         _vals_arr = _np.asarray(vals, dtype=float)
+    _last_save = 0.0
     try:
         while ndone < seg_len:
             M = int(min(B, seg_len - ndone))
@@ -1715,12 +1777,17 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
             if _HAVE_NUMBA:
                 out = _np.empty(M)
                 out_rec = _np.empty(M)
-                _grid_acc_nb(Xc, yc, dc, Pc, Wc, hc, capf, use_pp, out, out_rec)
+                if _TT is not None and _pows is not None:
+                    IDX = (nums[:, None] // _pows[None, :]) % nv
+                    _grid_table_nb(_TT, _TTh, IDX, _perm_t, _hpos_t, _TA, _TB, yc,
+                                   1 if capf else 0, out, out_rec)
+                else:
+                    _grid_acc_nb(Xc, yc, dc, Pc, Wc, hc, capf, palpha, out, out_rec)
                 accs, recs = out, out_rec
             else:
                 accs, recs = _acc_batch32(X32, yn, dd32, PP32, cap, nw,
                                     _np.ascontiguousarray(Wc, dtype=_np.float32),
-                                    _np.ascontiguousarray(hc, dtype=_np.float32))
+                                    _np.ascontiguousarray(hc, dtype=_np.float32), palpha)
             keys = accs + draw_w * recs
             bi = int(_np.argmax(keys))
             ba = float(accs[bi])
@@ -1728,14 +1795,18 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
             curW, curHfa, curAcc = list(Wc[bi]), float(hc[bi]), ba
             if _sel_bonus(ba, br, draw_w) > _sel_bonus(best, best_rec, draw_w):
                 best, best_rec, bestW, bestHfa = ba, br, list(Wc[bi]), float(hc[bi])
-                st, bw, bh, bba, bbr = persist()
-                if st == "adopted":
-                    best, best_rec, bestW, bestHfa = bba, bbr, bw, bh
+                st = "deferred"
+                if time.time() - _last_save >= _SAVE_EVERY:
+                    st, bw, bh, bba, bbr = persist()
+                    _last_save = time.time()
+                    if st == "adopted":
+                        best, best_rec, bestW, bestHfa = bba, bbr, bw, bh
                 ise = season_acc(bestW, bestHfa)
                 log(f"★ #{ndone:,} acc={best:.3f} " +
                     " ".join(f"{s}={ise[s]:.3f}" for s in sorted(ise)) +
                     (" → 외부파일 채택" if st == "adopted" else
-                     " → 동일, 저장 생략" if st == "same" else " → 저장"))
+                     " → 동일, 저장 생략" if st == "same" else
+                     " → 저장 보류(스로틀)" if st == "deferred" else " → 저장"))
                 last_log = time.time()
                 write_ckpt()
             now = time.time()
@@ -1802,10 +1873,18 @@ def grid_search(league: str, ver: str, tune_s: set, grid_step: float = 0.5,
     if bestW != artW or bestHfa != artH:
         persist()
     log(f"전수탐색 종료 {ndone:,}/{seg_len:,} best={best:.3f}" + (" (전체 완료)" if complete else ""))
+    try:
+        _a2 = load_artifact_any(league, ver)
+        if isinstance(_a2, dict):
+            _sv = eval_artifact(rows, set(), set(tune_s), _a2).get("valid", {})
+            if _sv.get("n"):
+                log(f"서빙 기준 acc={_sv['acc']:.3f} (n={int(_sv['n'])}) ← 후처리 반영·웹과 동일 기준")
+    except Exception as _ex:
+        log(f"서빙 기준 acc 계산 실패: {_ex}")
     return True
 
 
-def _acc_batch32(X32, yn, dd32, PP32, cap, nw, Wmat, hvec):
+def _acc_batch32(X32, yn, dd32, PP32, cap, nw, Wmat, hvec, alpha=0.0):
     import numpy as _np
     f32 = _np.float32
     B = Wmat.shape[0]
@@ -1822,10 +1901,15 @@ def _acc_batch32(X32, yn, dd32, PP32, cap, nw, Wmat, hvec):
     P0 = Ph * (1.0 - dd32)
     P1 = _np.broadcast_to(dd32, Ph.shape)
     P2 = (1.0 - Ph) * (1.0 - dd32)
-    if PP32 is not None:
-        P0 = f32(0.5) * P0 + f32(0.5) * PP32[:, 0]
-        P1 = f32(0.5) * P1 + f32(0.5) * PP32[:, 1]
-        P2 = f32(0.5) * P2 + f32(0.5) * PP32[:, 2]
+    try:
+        ia = f32(1.0 - float(alpha))
+    except (TypeError, ValueError):
+        ia = f32(1.0)
+    if PP32 is not None and ia != f32(1.0):
+        a32 = f32(1.0) - ia
+        P0 = ia * P0 + a32 * PP32[:, 0]
+        P1 = ia * P1 + a32 * PP32[:, 1]
+        P2 = ia * P2 + a32 * PP32[:, 2]
     pick = _np.where((P0 >= P1) & (P0 >= P2), 0, _np.where(P1 >= P2, 1, 2))
     accs = (pick == yn[None, :]).mean(axis=1)
     dm = yn == 1
@@ -1837,8 +1921,8 @@ def _acc_batch32(X32, yn, dd32, PP32, cap, nw, Wmat, hvec):
 
 
 if _HAVE_NUMBA:
-    @_numba.njit(cache=False, nogil=True, parallel=True)
-    def _grid_acc_nb(X, y, dd, PP, Wb, hb, cap, use_pp, out, out_rec):
+    @_numba.njit(cache=True, nogil=True, parallel=True)
+    def _grid_acc_nb(X, y, dd, PP, Wb, hb, cap, alpha, out, out_rec):
         B = Wb.shape[0]
         N = X.shape[0]
         F = X.shape[1]
@@ -1863,14 +1947,14 @@ if _HAVE_NUMBA:
                 ph = 1.0 / (1.0 + _np_nb.exp(-s))
                 ddi = dd[i]
                 omd = 1.0 - ddi
-                if use_pp:
-                    q0 = 0.5 * ph * omd + 0.5 * PP[i, 0]
-                    q1 = 0.5 * ddi + 0.5 * PP[i, 1]
-                    q2 = 0.5 * (1.0 - ph) * omd + 0.5 * PP[i, 2]
-                else:
-                    q0 = ph * omd
-                    q1 = ddi
-                    q2 = (1.0 - ph) * omd
+                q0 = ph * omd
+                q1 = ddi
+                q2 = (1.0 - ph) * omd
+                if alpha > 0.0:
+                    ia = 1.0 - alpha
+                    q0 = ia * q0 + alpha * PP[i, 0]
+                    q1 = ia * q1 + alpha * PP[i, 1]
+                    q2 = ia * q2 + alpha * PP[i, 2]
                 if q0 >= q1 and q0 >= q2:
                     pk = 0
                 elif q1 >= q2:
@@ -1888,6 +1972,106 @@ if _HAVE_NUMBA:
                 out_rec[b] = dhit / dn
             else:
                 out_rec[b] = 0.0
+
+
+def _grid_tables(vals, Xn, nw, cap):
+    import numpy as _np
+
+    vals = _np.asarray(vals, dtype=float)
+    nv = len(vals)
+    n = Xn.shape[0]
+    T = _np.empty((nw, nv, n), dtype=_np.float64)
+    for j in range(nw):
+        outer = _np.outer(vals, Xn[:, j])
+        T[j] = (cap * _np.tanh(outer / cap)) if cap else outer
+    Th = _np.empty((nv, n), dtype=_np.float64)
+    Th[:] = vals[:, None]
+    return T, Th
+
+
+def _grid_thr(dd, PP, alpha):
+    import numpy as _np
+
+    try:
+        a = float(alpha)
+    except (TypeError, ValueError):
+        a = 0.0
+    if not (a >= 0.0):
+        a = 0.0
+    if a >= 0.999 and PP is None:
+        a = 0.0
+    ddc = _np.asarray(dd, dtype=float)
+    n = ddc.shape[0]
+    A = _np.empty(n)
+    B = _np.empty(n)
+    for i in range(n):
+        ddi = float(ddc[i])
+        omd = 1.0 - ddi
+        if a >= 0.999:
+            p0, p1, p2 = PP[i]
+            if p0 >= p1 and p0 >= p2:
+                A[i], B[i] = -1e9, -1e9
+            elif p1 >= p2:
+                A[i], B[i] = 1e9, -1e9
+            else:
+                A[i], B[i] = 1e9, 1e9
+            continue
+        if a > 1e-9:
+            k = a / (1.0 - a)
+            p0, p1, p2 = PP[i]
+            th1 = (ddi + k * (p1 - p0)) / omd
+            th2 = 0.5 + k * (p2 - p0) / (2.0 * omd)
+            th3 = 1.0 - (ddi + k * (p1 - p2)) / omd
+        else:
+            th1 = ddi / omd
+            th2 = 0.5
+            th3 = 1.0 - ddi / omd
+        la = min(1.0 - 1e-12, max(1e-12, max(th1, th2)))
+        lb = min(1.0 - 1e-12, max(1e-12, th3))
+        A[i] = min(30.0, max(-30.0, _np.log(la / (1.0 - la))))
+        B[i] = min(30.0, max(-30.0, _np.log(lb / (1.0 - lb))))
+    return A, B
+
+
+if _HAVE_NUMBA:
+    @_numba.njit(cache=True, nogil=True, parallel=True)
+    def _grid_table_nb(T, Th, IDX, perm, hpos, A, B, y, cap_pos, out, out_rec):
+        M = IDX.shape[0]
+        N = y.shape[0]
+        nw = perm.shape[0]
+        for b in _numba.prange(M):
+            hit = 0
+            dhit = 0
+            dn = 0
+            for i in range(N):
+                hv = Th[IDX[b, hpos], i]
+                if cap_pos == 1:
+                    s = 0.0
+                    for j in range(nw):
+                        s += T[j, IDX[b, perm[j]], i]
+                    s += hv
+                else:
+                    s = hv
+                    for j in range(nw):
+                        s += T[j, IDX[b, perm[j]], i]
+                if s > 30.0:
+                    s = 30.0
+                elif s < -30.0:
+                    s = -30.0
+                if s >= A[i]:
+                    pk = 0
+                elif s >= B[i]:
+                    pk = 1
+                else:
+                    pk = 2
+                if pk == y[i]:
+                    hit += 1
+                if y[i] == 1:
+                    dn += 1
+                    if pk == 1:
+                        dhit += 1
+            out[b] = hit / N
+            out_rec[b] = dhit / dn if dn > 0 else 0.0
 
 
 def save_artifact(league: str, ver: str, artifact: dict):
@@ -2695,6 +2879,7 @@ def _fit_restart(Xa, ya, w0, hfa0, d, l2, steps, sweeps, draw_w=0.0):
 
 
 _TUNE_LADDER = [0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1, 2, 4]
+_SAVE_EVERY = 5.0
 
 
 def sample_steps(rng: random.Random, lo: float = 0.005, hi: float = 0.5, k: int = 4):
@@ -2725,15 +2910,15 @@ def fit_trial(Xn, ty, Vn, vy, d, mu, sd, cfg):
     rng = random.Random()
     dw_ = cfg.get("draw_w", 0.0)
     try:
-        _wmin = float(cfg.get("wmin", -3.0))
+        _wmin = float(cfg.get("wmin", -10.0))
     except (TypeError, ValueError):
-        _wmin = -3.0
+        _wmin = -10.0
     try:
-        _wmax = float(cfg.get("wmax", 3.0))
+        _wmax = float(cfg.get("wmax", 10.0))
     except (TypeError, ValueError):
-        _wmax = 3.0
+        _wmax = 10.0
     if not (_wmin < _wmax):
-        _wmin, _wmax = -3.0, 3.0
+        _wmin, _wmax = -10.0, 10.0
     clamp = lambda v: min(_wmax, max(_wmin, round(float(v), 4)))
     inits = []
     for restart in range(cfg["restarts"]):
@@ -2830,6 +3015,7 @@ def load_existing_best(league: str, ver: str, matches, train_s: set, valid_s: se
 def main():
     ap = argparse.ArgumentParser(description="Prematch 학습 단일 진입점")
     ap.add_argument("--mode", default="train", choices=["train", "predict", "tune", "auto", "grid", "drawfit"])
+    ap.add_argument("--ui", dest="_ui_launch", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("--tune", default="", help="조절용 시즌, 콤마 구분 (auto에서 비우면 미학습 전체)")
     ap.add_argument("--league", required=True)
     ap.add_argument("--train", default="", help="학습 시즌, 콤마 구분")
@@ -2848,6 +3034,7 @@ def main():
     ap.add_argument("--draw-total", type=float, default=None, help="부스트 저득점 조건 직접 지정 (예: 2.55)")
     ap.add_argument("--recency-w", type=float, default=0.0, help="최신시즌 가중 (valid/tune 선발만, 0=끄기, 예: 1.0이면 최신시즌 2배)")
     ap.add_argument("--trials", type=int, default=20)
+    ap.add_argument("--trial-step", type=float, default=0.0, help="새학습 가중치 격자 간격 (0=연속, 예: 0.01)")
     ap.add_argument("--sweeps", type=int, default=6, help="tune 모드용 최대 sweep 수")
     ap.add_argument("--seq-sweeps", type=int, default=1, help="auto 모드 순차 패스 수")
     ap.add_argument("--random-rounds", type=int, default=0, help="auto 모드 랜덤 라운드 수 (0=무한)")
@@ -2855,8 +3042,8 @@ def main():
     ap.add_argument("--noise", type=float, default=0.1, help="auto 랜덤 가중치 이동폭")
     ap.add_argument("--hfa-noise", type=float, default=0.05, help="auto 랜덤 hfa 이동폭")
     ap.add_argument("--auto-step", type=float, default=0.0, help="auto 랜덤 격자 간격(wmin/wmax 구간 스냅, 0=연속)")
-    ap.add_argument("--wmin", type=float, default=-3.0)
-    ap.add_argument("--wmax", type=float, default=3.0)
+    ap.add_argument("--wmin", type=float, default=-10.0)
+    ap.add_argument("--wmax", type=float, default=10.0)
     ap.add_argument("--auto-range", action="store_true", help="단발 fit 결과 범위로 trials 범위 자동 설정")
     ap.add_argument("--range-pad", type=float, default=0.5, help="auto-range 여유폭")
     ap.add_argument("--log-every", type=int, default=200, help="auto 랜덤 진행 로그 간격")
@@ -2873,6 +3060,18 @@ def main():
     ap.add_argument("--no-halving", action="store_true", help="restart halving 끄기 (전 restart 끝까지 탐색)")
     ap.add_argument("--no-cache", action="store_true")
     args = ap.parse_args()
+    if args.mode in ("train", "auto", "grid", "tune", "drawfit") and not getattr(args, "_ui_launch", False):
+        print("학습·탐색은 GUI/웹에서만 실행할 수 있습니다 (CLI 직접 실행 비활성화)", flush=True)
+        sys.exit(2)
+    try:
+        import signal as _sigmod
+
+        def _on_sigterm(_signum, _frame):
+            raise KeyboardInterrupt()
+
+        _sigmod.signal(_sigmod.SIGTERM, _on_sigterm)
+    except (ValueError, RuntimeError, OSError, AttributeError):
+        pass
 
     league, ver = args.league, args.ver
     global _LEAGUE_TAG
@@ -3119,7 +3318,9 @@ def main():
     results: list = [None] * len(cfgs)
     if args.jobs > 1:
         from concurrent.futures import ProcessPoolExecutor, as_completed
-        with ProcessPoolExecutor(max_workers=args.jobs) as ex:
+        ex = ProcessPoolExecutor(max_workers=args.jobs)
+        fut2i = {}
+        try:
             fut2i = {ex.submit(_run, c): i for i, c in enumerate(cfgs)}
             done = 0
             for fut in as_completed(fut2i):
@@ -3127,6 +3328,18 @@ def main():
                 results[i] = fut.result()
                 done += 1
                 log(f"계산 {done}/{len(cfgs)} 완료 (trial {trial_ids[i]})")
+        except KeyboardInterrupt:
+            for _f in fut2i:
+                _f.cancel()
+            try:
+                for _p in list(getattr(ex, "_processes", {}).values()):
+                    _p.terminate()
+            except Exception:
+                pass
+            log("중지됨 → 계산 중단")
+            raise
+        finally:
+            ex.shutdown(wait=False, cancel_futures=True)
     else:
         for i, c in enumerate(cfgs):
             log(f"trial {trial_ids[i]} 계산 시작 ({i + 1}/{len(cfgs)})")
@@ -3134,6 +3347,10 @@ def main():
 
     for t, cfg, res in zip(trial_ids, cfgs, results):
         w, hfa, T, e = res
+        if args.trial_step and args.trial_step > 0:
+            _ts = float(args.trial_step)
+            w = [round(v / _ts) * _ts for v in w]
+            hfa = round(hfa / _ts) * _ts
         acc, ll = ev_metrics(w, hfa, T, e)
         rec = 0.0
         if args.draw_w > 0 and len(vX) and len(vy):
@@ -3248,7 +3465,17 @@ def main():
     else:
         log("아티팩트 없음: 최종 패턴 저장 생략")
     log(f"FINAL best acc={best['acc']:.3f} ll={best['ll']:.4f} trial={best['trial']} ver={ver} total={(time.time() - _START) / 60:.1f}m")
+    if isinstance(_art, dict):
+        try:
+            _sv = eval_artifact(rows, train_s, valid_s, _art).get("valid", {})
+            if _sv.get("n"):
+                log(f"FINAL 서빙 기준 acc={_sv['acc']:.3f} ll={_sv['ll']:.4f} (n={int(_sv['n'])}) ← 후처리 반영·웹과 동일 기준")
+        except Exception as _ex:
+            log(f"FINAL 서빙 기준 acc 계산 실패: {_ex}")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("중지됨", flush=True)
