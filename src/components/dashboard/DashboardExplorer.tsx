@@ -76,10 +76,7 @@ function decimalOdds(m: SoccerMatch): { home: number; draw: number; away: number
 }
 
 function predictLocal(m: SoccerMatch, art: PermatchArtifact, ver: string) {
-  const alertT = (() => {
-    const t = (art as { cumulative?: { draw_alert_t?: unknown } }).cumulative?.draw_alert_t;
-    return typeof t === "number" && Number.isFinite(t) && t > 0 ? t : 0.3;
-  })();
+  const alertT = 0.3;
   try {
     if (art.model_type === "lstm") return null;
     if (art.model_type === "xgb" && art.xgb) {
@@ -195,10 +192,6 @@ export function DashboardExplorer() {
       } | null;
       pattern_stats: Record<string, { rank: number; freq: number; acc: number }[]> | null;
       xgb?: XgbSlim | null;
-      cumulative?: {
-        base_ver?: string;
-        walk?: { n: number; acc: number; seasons: Record<string, { n: number; acc: number }> };
-      } | null;
     } | null;
   };
   const [modelDetail, setModelDetail] = useState<ModelDetail | null>(null);
@@ -298,7 +291,7 @@ export function DashboardExplorer() {
     setRawMatches([]);
     setPredMap({});
     setMatches([]);
-    setHiddenCols([...FIELD_GROUPS.flatMap((g) => (g.id === "odds" ? [] : g.cols)), "sameOdds", "formation"]);
+    setHiddenCols([...FIELD_GROUPS.flatMap((g) => (g.id === "odds" ? [] : g.cols)), "oddsHome", "oddsDraw", "oddsAway", "formation"]);
     fetchModels(league, gen);
     fetch(`/api/seasons?league=${encodeURIComponent(league)}`)
       .then((r) => r.json())
@@ -507,6 +500,15 @@ export function DashboardExplorer() {
     setAppliedVer(selVer);
     setApplyState("done");
   }, [league, selVer, models, seasons]);
+
+  useEffect(() => {
+    if (!league) return;
+    const t = setInterval(() => {
+      if (document.visibilityState === "visible") void fetchModels(leagueRef.current, genRef.current);
+    }, 20000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [league]);
 
   useEffect(() => {
     tuningRef.current = false;
@@ -1192,8 +1194,8 @@ export function DashboardExplorer() {
   }
 
   const singleCols = COLUMNS.filter((c) => SINGLE_COLUMNS.includes(c.id));
-  const predGroupCols: ColumnId[] = ["pred", "predRatio", "result"];
-  const detailSingleIds: ColumnId[] = ["sameOdds", "formation"];
+  const predGroupCols: ColumnId[] = ["pred", "predHome", "predDraw", "predAway", "result"];
+  const detailSingleIds: ColumnId[] = ["oddsHome", "oddsDraw", "oddsAway", "formation"];
   const predSingles = singleCols.filter((c) => predGroupCols.includes(c.id));
   const detailSingles = singleCols.filter((c) => detailSingleIds.includes(c.id));
   const detailGroupCols: ColumnId[] = [...FIELD_GROUPS.flatMap((g) => g.cols), ...detailSingleIds];
@@ -1213,9 +1215,6 @@ export function DashboardExplorer() {
       .filter(([s, v]) => (v.pending ?? 0) > 0 && !trainSet.has(s) && !(validSet ? validSet.has(s) : false))
       .sort(([a], [b]) => (a < b ? -1 : 1));
   };
-  const cumuWalkSeasons = modelDetail?.detail?.cumulative?.walk?.seasons;
-  const showWalk = cumuWalkSeasons && (!validSet || validSet.size === 0);
-  const cumuWalkCount = showWalk ? Object.keys(cumuWalkSeasons as Record<string, unknown>).length : 0;
   const curOverall = overallOf(scopeOf(accuracy));
   const baseOverall = overallOf(scopeOf(baseMapRef.current ?? {}));
   const canSave =
@@ -1253,9 +1252,7 @@ export function DashboardExplorer() {
         <div>
           <div className="flex items-baseline justify-between">
               <span className="text-xs font-medium text-zinc-500">
-                {cumuWalkCount > 0
-                  ? `시즌 적중률 (누적 ${cumuWalkCount})`
-                  : `시즌 적중률 (미학습 ${viewSeasons.filter((s) => !trainSet.has(s)).length}/${viewSeasons.length})`}
+                {`시즌 적중률 (미학습 ${viewSeasons.filter((s) => !trainSet.has(s)).length}/${viewSeasons.length})`}
               </span>
             </div>
             {(() => {
@@ -1280,26 +1277,13 @@ export function DashboardExplorer() {
             ) : (
               (() => {
                 const inScope = (s: string) => !trainSet.has(s) && ((accuracy[s]?.pending ?? 0) === 0);
-                const walk = showWalk ? modelDetail?.detail?.cumulative?.walk : undefined;
-                const walkSeasons = walk?.seasons;
-                const chrono = walkSeasons
-                  ? Object.keys(walkSeasons).sort()
-                  : [...viewSeasons].reverse().filter(inScope);
-                const pts = (walkSeasons
-                  ? chrono
-                      .map((s, i) => {
-                        const a = walkSeasons[s];
-                        if (applyState !== "done" || !a || a.n <= 0) return null;
-                        const hit = Math.round(a.acc * a.n);
-                        return { s, i, acc: a.acc, n: a.n, hit };
-                      })
-                      .filter((p): p is { s: string; i: number; acc: number; n: number; hit: number } => p !== null)
-                  : chrono
-                      .map((s, i) => {
-                        const a = applyState === "done" ? accuracy[s] : undefined;
-                        return a?.acc != null ? { s, i, acc: a.acc, n: a.n, hit: a.hit } : null;
-                      })
-                      .filter((p): p is { s: string; i: number; acc: number; n: number; hit: number } => p !== null));
+                const chrono = [...viewSeasons].reverse().filter(inScope);
+                const pts = chrono
+                  .map((s, i) => {
+                    const a = applyState === "done" ? accuracy[s] : undefined;
+                    return a?.acc != null ? { s, i, acc: a.acc, n: a.n, hit: a.hit } : null;
+                  })
+                  .filter((p): p is { s: string; i: number; acc: number; n: number; hit: number } => p !== null);
                 const W = 232, H = 124, PL = 22, PR = 4, PT = 10, PB = 16;
                 const n = chrono.length;
                 const X = (i: number) => (n <= 1 ? PL + (W - PL - PR) / 2 : PL + (i / (n - 1)) * (W - PL - PR));
@@ -1504,9 +1488,12 @@ export function DashboardExplorer() {
               <option>학습된 모델 없음</option>
             ) : (
               models.map((m) => {
+                const isApplied = m.ver === appliedVer;
+                const isNewest = m.ver === models[0]?.ver;
                 const labelParts = [
                   m.ver.replace("_", " "),
                   m.metrics?.valid_acc != null ? `acc ${m.metrics.valid_acc.toFixed(3)}` : "",
+                  isApplied ? "✓ 적용중" : isNewest ? "최신" : "",
                 ].filter((p) => p !== "");
                 return (
                   <option key={m.ver} value={m.ver}>
@@ -1516,6 +1503,20 @@ export function DashboardExplorer() {
               })
             )}
           </select>
+          {models.length > 0 && selVer && models[0].ver !== selVer && (
+            <button
+              onClick={() => {
+                setSelVer(models[0].ver);
+                setApplyState("idle");
+                setAppliedVer("");
+                setPredMap({});
+                appliedKeyRef.current = "";
+              }}
+              className="mt-1.5 w-full rounded-lg border border-emerald-300 bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 hover:bg-emerald-100 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+            >
+              ⚡ 새 모델 적용: {models[0].ver.replace("_", " ")}
+            </button>
+          )}
           <button
             onClick={reloadModels}
             className="mt-1.5 w-full rounded-lg border border-zinc-300 px-2 py-1 text-[11px] text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-400 dark:hover:bg-zinc-800"

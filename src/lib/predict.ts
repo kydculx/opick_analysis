@@ -41,18 +41,9 @@ export type PermatchArtifact = {
   intercept?: number[];
   classes?: number[];
   seq_len?: number;
-  cumulative?: {
-    base_ver?: string;
-    walk?: { n: number; acc: number; seasons: Record<string, { n: number; acc: number }> };
-  } | null;
 };
 
 export type PredEntry = { home: number; draw: number; away: number; ver: string; drawAlert: boolean };
-
-function alertThreshold(art: PermatchArtifact): number {
-  const t = (art as { cumulative?: { draw_alert_t?: unknown } }).cumulative?.draw_alert_t;
-  return typeof t === "number" && Number.isFinite(t) && t > 0 ? t : 0.3;
-}
 
 function coerceArtifact(a: unknown): PermatchArtifact | null {
   try {
@@ -122,13 +113,13 @@ export function predictForRow(m: SoccerMatch, art: PermatchArtifact, ver: string
     if (art.model_type === "xgb" && art.xgb) {
       const p = xgbProba(art.xgb, selectFeatures(rowFeatures(m), art.features));
       if (p.some((v) => !Number.isFinite(v))) return null;
-      return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertThreshold(art) };
+      return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > 0.3 };
     }
     if (art.model_type === "logreg" && art.scaler_mean && art.scaler_scale && art.coef && art.intercept) {
       const x = selectFeatures(rowFeatures(m), art.features);
       const p = logregProba(x, art.scaler_mean, art.scaler_scale, art.coef, art.intercept);
       if (p.some((v) => !Number.isFinite(v))) return null;
-      return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertThreshold(art) };
+      return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > 0.3 };
     }
     if ((art.model_type === "poisson" || art.model_type === "dixon") && art.teams && art.att && art.def) {
       const idx = new Map(art.teams.map((t, i) => [t, i]));
@@ -139,7 +130,7 @@ export function predictForRow(m: SoccerMatch, art: PermatchArtifact, ver: string
       const rho = art.model_type === "dixon" ? (art.rho ?? 0) : 0;
       const p = dcProba(lam, mu, rho);
       if (p.some((v) => !Number.isFinite(v))) return null;
-      return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertThreshold(art) };
+      return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > 0.3 };
     }
     const b = legacyParts(m, art);
     if (!b) return null;
@@ -153,7 +144,7 @@ export function predictForRow(m: SoccerMatch, art: PermatchArtifact, ver: string
       art.draw_total_max ?? 2.55,
     );
     if (p.some((v) => !Number.isFinite(v))) return null;
-    return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > alertThreshold(art) };
+    return { home: p[0], draw: p[1], away: p[2], ver, drawAlert: p[1] > 0.3 };
   } catch {
     return null;
   }

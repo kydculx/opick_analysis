@@ -156,7 +156,6 @@ export async function GET(req: Request) {
           draw_total_max: a.draw_total_max ?? 2.55,
           grid_params: a.grid_params ?? null,
           pattern_stats: a.pattern_stats ?? null,
-          cumulative: (a.cumulative ?? null) as unknown,
         },
       });
     } catch (e) {
