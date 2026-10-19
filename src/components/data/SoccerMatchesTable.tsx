@@ -302,6 +302,21 @@ function isFilterCol(id: ColumnId): id is FilterCol {
   return id === "season" || id === "round" || id === "home" || id === "away" || id === "result" || id === "pred";
 }
 
+function matchDirectFilter(value: string, text: string): boolean {
+  const tokens = text.split(/[,\s]+/).map((t) => t.trim()).filter(Boolean);
+  if (tokens.length === 0) return true;
+  const vnum = Number(value);
+  for (const t of tokens) {
+    const m = t.match(/^(\d+(?:\.\d+)?)\s*[-~]\s*(\d+(?:\.\d+)?)$/);
+    if (m) {
+      if (Number.isFinite(vnum) && vnum >= Number(m[1]) && vnum <= Number(m[2])) return true;
+      continue;
+    }
+    if (t === value || t.toLowerCase() === value.toLowerCase()) return true;
+  }
+  return false;
+}
+
 type DivColor = "blue" | "gray" | null;
 
 function divAfter(cols: { id: ColumnId }[], index: number): DivColor {
@@ -698,6 +713,7 @@ export function SoccerMatchesTable({
 }) {
   const [openFilter, setOpenFilter] = useState<FilterCol | OddsCol | null>(null);
   const [colFilters, setColFilters] = useState<Partial<Record<FilterCol, string[] | null>>>({});
+  const [colText, setColText] = useState<Partial<Record<FilterCol, string>>>({});
   const [oddsFilters, setOddsFilters] = useState<Partial<Record<OddsCol, { min: string; max: string }>>>({});
 
   const filterOptions = useMemo(
@@ -724,6 +740,7 @@ export function SoccerMatchesTable({
     queueMicrotask(() => {
       setColFilters(latestSeason ? { season: [latestSeason] } : {});
       setOddsFilters({});
+      setColText({});
       setOpenFilter(null);
     });
   }, [leagueKey, latestSeason]);
@@ -748,6 +765,8 @@ export function SoccerMatchesTable({
 
   const visibleRows = rows.filter((m) => {
     const catOk = (Object.keys(filterOptions) as FilterCol[]).every((col) => {
+      const txt = (colText[col] ?? "").trim();
+      if (txt) return matchDirectFilter(filterColValue(col, m), txt);
       const sel = selOf(col);
       return !sel || sel.includes(filterColValue(col, m));
     });
@@ -784,7 +803,8 @@ export function SoccerMatchesTable({
               const oddsId = isOddsCol(c.id) ? c.id : null;
               const fid = catId ?? oddsId;
               const sel = catId ? selOf(catId) : null;
-              const active = catId ? sel !== null : oddsId ? oddsFilters[oddsId] != null : false;
+              const directText = catId ? (colText[catId] ?? "").trim() : "";
+              const active = catId ? (sel !== null || directText !== "") : oddsId ? oddsFilters[oddsId] != null : false;
               return (
                 <th
                   key={c.id}
@@ -846,8 +866,15 @@ export function SoccerMatchesTable({
             title={COLUMNS.find((c) => c.id === openFilter)?.label ?? ""}
             values={filterOptions[openFilter]}
             initial={selOf(openFilter) ?? filterOptions[openFilter]}
-            onApply={(sel) => {
-              commitDraft(openFilter, sel);
+            direct={openFilter === "round"}
+            initialText={colText[openFilter] ?? ""}
+            onApply={(sel, text) => {
+              if (openFilter === "round") {
+                setColFilter("round", null);
+              } else {
+                commitDraft(openFilter, sel);
+              }
+              setColText((prev) => ({ ...prev, [openFilter]: text.trim() }));
               setOpenFilter(null);
             }}
             onCancel={() => setOpenFilter(null)}
@@ -888,16 +915,21 @@ function FilterModal({
   title,
   values,
   initial,
+  direct = false,
+  initialText = "",
   onApply,
   onCancel,
 }: {
   title: string;
   values: string[];
   initial: string[];
-  onApply: (sel: string[]) => void;
+  direct?: boolean;
+  initialText?: string;
+  onApply: (sel: string[], text: string) => void;
   onCancel: () => void;
 }) {
   const [draft, setDraft] = useState<string[]>(initial);
+  const [text, setText] = useState(initialText);
   const [q, setQ] = useState("");
   const shown = values.filter((v) => v.toLowerCase().includes(q.trim().toLowerCase()));
 
@@ -932,41 +964,67 @@ function FilterModal({
             </svg>
           </button>
         </div>
-        <input
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="검색"
-          className="mt-3 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
-        />
-        <div className="mt-2 flex items-center justify-between text-sm">
-          <span className="text-zinc-500">
-            {draft.length}/{values.length}
-          </span>
-          <div className="flex gap-2">
-            <button onClick={() => setDraft(values)} className="underline underline-offset-2">
-              전체
-            </button>
-            <button onClick={() => setDraft([])} className="underline underline-offset-2">
-              해제
-            </button>
-          </div>
-        </div>
-        <div className="mt-2 min-h-0 flex-1 space-y-1 overflow-y-auto">
-          {shown.map((v) => (
-            <label key={v} className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-2 text-sm hover:bg-zinc-50 dark:hover:bg-zinc-800">
+        {!direct && (
+          <input
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            placeholder="검색"
+            className="mt-3 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm dark:border-zinc-700 dark:bg-zinc-950"
+          />
+        )}
+        {direct && (
+          <div className="mt-3">
+            <label className="block text-[11px] text-zinc-500">
+              직접 입력 <span className="text-zinc-400">(쉼표·범위, 예: 1,3,10-12)</span>
               <input
-                type="checkbox"
-                checked={draft.includes(v)}
-                onChange={() => toggle(v)}
-                className="h-4 w-4 shrink-0 accent-blue-600 dark:accent-blue-400"
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder="예: 1,3,10-12"
+                inputMode="numeric"
+                className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-sm dark:border-zinc-700 dark:bg-zinc-950"
               />
-              <span className="whitespace-nowrap">{v}</span>
             </label>
-          ))}
-          {shown.length === 0 && <p className="px-2 py-1.5 text-sm text-zinc-500">일치하는 항목이 없습니다.</p>}
-        </div>
+            <div className="mt-2 flex items-center justify-between text-sm">
+              <span className="text-[11px] text-zinc-400">비우고 적용하면 필터가 해제됩니다.</span>
+              <button onClick={() => setText("")} className="underline underline-offset-2">
+                전체
+              </button>
+            </div>
+          </div>
+        )}
+        {!direct && (
+          <>
+            <div className="mt-2 flex items-center justify-between text-sm">
+              <span className="text-zinc-500">
+                {draft.length}/{values.length}
+              </span>
+              <div className="flex gap-2">
+                <button onClick={() => setDraft(values)} className="underline underline-offset-2">
+                  전체
+                </button>
+                <button onClick={() => setDraft([])} className="underline underline-offset-2">
+                  해제
+                </button>
+              </div>
+            </div>
+            <div className="mt-2 min-h-0 flex-1 space-y-1 overflow-y-auto">
+              {shown.map((v) => (
+                <label key={v} className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-2 text-sm hover:bg-zinc-50 dark:hover:bg-zinc-800">
+                  <input
+                    type="checkbox"
+                    checked={draft.includes(v)}
+                    onChange={() => toggle(v)}
+                    className="h-4 w-4 shrink-0 accent-blue-600 dark:accent-blue-400"
+                  />
+                  <span className="whitespace-nowrap">{v}</span>
+                </label>
+              ))}
+              {shown.length === 0 && <p className="px-2 py-1.5 text-sm text-zinc-500">일치하는 항목이 없습니다.</p>}
+            </div>
+          </>
+        )}
         <button
-          onClick={() => onApply(draft)}
+          onClick={() => onApply(draft, text)}
           className="mt-3 w-full rounded-xl bg-blue-600 py-2 text-sm font-medium text-white hover:brightness-110 dark:bg-blue-400 dark:text-black"
         >
           적용
