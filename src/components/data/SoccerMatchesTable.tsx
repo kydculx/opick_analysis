@@ -104,6 +104,7 @@ export const FIELD_GROUPS: { id: string; label: string; cols: ColumnId[] }[] = [
   { id: "recent", label: "최근승무패", cols: ["recent1", "recent2", "recent3", "recent4", "recent5", "recent6", "recent7", "recent8", "recent9", "recent10", "recent11", "recent12", "recent13", "recent14", "recent15", "recent16", "recent17", "recent18", "recent19", "recent20"] },
   { id: "recentform", label: "최근폼", cols: ["rf1", "rf2", "rf3", "rf4", "rf5", "rf6", "rf7", "rf8", "rf9", "rf10", "rf11", "rf12", "rf13", "rf14", "rf15", "rf16", "rf17", "rf18", "rf19", "rf20"] },
   { id: "odds", label: "배당률", cols: ["bet365Home", "bet365Draw", "bet365Away", "crownHome", "crownDraw", "crownAway", "onexbetHome", "onexbetDraw", "onexbetAway"] },
+  { id: "avgodds", label: "평균 배당률", cols: ["oddsHome", "oddsDraw", "oddsAway"] },
   { id: "teaminfo", label: "팀정보", cols: ["aGoals", "aConceded", "aShots", "aCorners", "aYellow", "aFouls", "aPossession"] },
   { id: "goaltime", label: "득실점 시간대", cols: ["g15", "g30", "g45", "g60", "g75", "g90"] },
   { id: "halffull", label: "HT-FT", cols: ["hWW", "hDW", "hLW", "hWD", "hDD", "hLD", "hWL", "hDL", "hLL", "hfMatches"] },
@@ -111,7 +112,7 @@ export const FIELD_GROUPS: { id: string; label: string; cols: ColumnId[] }[] = [
 
 export const SINGLE_COLUMNS: ColumnId[] = [
   "pred", "predHome", "predDraw", "predAway", "result",
-  "oddsHome", "oddsDraw", "oddsAway", "formation",
+  "formation",
 ];
 
 export const COLUMNS: { id: ColumnId; label: string }[] = [
@@ -181,9 +182,9 @@ export const COLUMNS: { id: ColumnId; label: string }[] = [
   { id: "onexbetHome", label: "1XBet 승" },
   { id: "onexbetDraw", label: "1XBet 무" },
   { id: "onexbetAway", label: "1XBet 패" },
-  { id: "oddsHome", label: "배당 승" },
-  { id: "oddsDraw", label: "배당 무" },
-  { id: "oddsAway", label: "배당 패" },
+  { id: "oddsHome", label: "평균 승" },
+  { id: "oddsDraw", label: "평균 무" },
+  { id: "oddsAway", label: "평균 패" },
   { id: "formation", label: "포메이션" },
   { id: "aGoals", label: "득점" },
   { id: "aConceded", label: "실점" },
@@ -216,6 +217,8 @@ const PRED_IDS: ReadonlySet<ColumnId> = new Set(["pred", "predHome", "predDraw",
 
 type FilterCol = "season" | "round" | "home" | "away" | "result" | "pred";
 
+type AvgOddsCol = "oddsHome" | "oddsDraw" | "oddsAway";
+
 type OddsCol =
   | "bet365Home"
   | "bet365Draw"
@@ -225,9 +228,10 @@ type OddsCol =
   | "crownAway"
   | "onexbetHome"
   | "onexbetDraw"
-  | "onexbetAway";
+  | "onexbetAway"
+  | AvgOddsCol;
 
-const ODDS_COL_MAP: Record<OddsCol, { company: "crown" | "bet365" | "one_x_bet"; part: "home" | "draw" | "away" }> = {
+const ODDS_COL_MAP: Record<Exclude<OddsCol, AvgOddsCol>, { company: "crown" | "bet365" | "one_x_bet"; part: "home" | "draw" | "away" }> = {
   bet365Home: { company: "bet365", part: "home" },
   bet365Draw: { company: "bet365", part: "draw" },
   bet365Away: { company: "bet365", part: "away" },
@@ -239,11 +243,34 @@ const ODDS_COL_MAP: Record<OddsCol, { company: "crown" | "bet365" | "one_x_bet";
   onexbetAway: { company: "one_x_bet", part: "away" },
 };
 
+const AVG_ODDS_COL_MAP: Record<AvgOddsCol, "home" | "draw" | "away"> = {
+  oddsHome: "home",
+  oddsDraw: "draw",
+  oddsAway: "away",
+};
+
 function isOddsCol(id: ColumnId): id is OddsCol {
-  return id in ODDS_COL_MAP;
+  return id in ODDS_COL_MAP || id in AVG_ODDS_COL_MAP;
+}
+
+function isAvgOddsCol(col: OddsCol): col is AvgOddsCol {
+  return col in AVG_ODDS_COL_MAP;
 }
 
 function oddsNumeric(m: SoccerMatch, col: OddsCol): number | null {
+  if (isAvgOddsCol(col)) {
+    const part = AVG_ODDS_COL_MAP[col];
+    const vals: number[] = [];
+    for (const comp of ["bet365", "crown", "one_x_bet"] as const) {
+      const v = m.odds?.[comp]?.win_draw_lose?.[part] ?? null;
+      const pick = v?.initial ?? v?.live ?? null;
+      if (typeof pick === "number" && Number.isFinite(pick)) vals.push(pick);
+    }
+    if (vals.length > 0) return vals.reduce((s, v) => s + v, 0) / vals.length;
+    const wdl = m.same_odds?.win_draw_lose ?? m.same_odds?.same_odds?.win_draw_lose ?? null;
+    const fallback = wdl?.[part];
+    return typeof fallback === "number" && Number.isFinite(fallback) ? fallback : null;
+  }
   const { company, part } = ODDS_COL_MAP[col];
   const v = m.odds?.[company]?.win_draw_lose?.[part] ?? null;
   const pick = v?.initial ?? v?.live ?? null;
@@ -604,11 +631,11 @@ function renderCell(
     case "onexbetAway":
       return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatOddsPart(m.odds, "one_x_bet", "away")}</td>;
     case "oddsHome":
-      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatSameOddsPart(m.same_odds, "home")}</td>;
+      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatAvgOddsPart(m, "home")}</td>;
     case "oddsDraw":
-      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatSameOddsPart(m.same_odds, "draw")}</td>;
+      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatAvgOddsPart(m, "draw")}</td>;
     case "oddsAway":
-      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatSameOddsPart(m.same_odds, "away")}</td>;
+      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatAvgOddsPart(m, "away")}</td>;
     case "formation":
       return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatFormation(m)}</td>;
     case "aGoals":
@@ -1164,6 +1191,20 @@ function formatRecentForm(m: SoccerMatch, n: number): string {
   const away = fmt(rf?.away?.[`recent_${n}`]);
   if (home == null && away == null) return "-";
   return `${home ?? "-"} : ${away ?? "-"}`;
+}
+
+function formatAvgOddsPart(m: SoccerMatch, part: "home" | "draw" | "away"): string {
+  const vals: number[] = [];
+  for (const comp of ["bet365", "crown", "one_x_bet"] as const) {
+    const v = m.odds?.[comp]?.win_draw_lose?.[part] ?? null;
+    const x = v?.initial ?? v?.live ?? null;
+    const n = Number(x);
+    if (x != null && Number.isFinite(n) && n > 0) vals.push(n);
+  }
+  if (vals.length > 0) {
+    return (vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(2);
+  }
+  return formatSameOddsPart(m.same_odds, part);
 }
 
 function formatSameOddsPart(same: SameOdds | undefined, part: "home" | "draw" | "away"): string {

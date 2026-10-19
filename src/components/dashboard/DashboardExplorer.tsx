@@ -291,7 +291,7 @@ export function DashboardExplorer() {
     setRawMatches([]);
     setPredMap({});
     setMatches([]);
-    setHiddenCols([...FIELD_GROUPS.flatMap((g) => (g.id === "odds" ? [] : g.cols)), "oddsHome", "oddsDraw", "oddsAway", "formation"]);
+    setHiddenCols([...FIELD_GROUPS.flatMap((g) => (g.id === "odds" ? [] : g.cols)), "formation"]);
     fetchModels(league, gen);
     fetch(`/api/seasons?league=${encodeURIComponent(league)}`)
       .then((r) => r.json())
@@ -1195,8 +1195,10 @@ export function DashboardExplorer() {
 
   const singleCols = COLUMNS.filter((c) => SINGLE_COLUMNS.includes(c.id));
   const predGroupCols: ColumnId[] = ["pred", "predHome", "predDraw", "predAway", "result"];
-  const detailSingleIds: ColumnId[] = ["oddsHome", "oddsDraw", "oddsAway", "formation"];
-  const predSingles = singleCols.filter((c) => predGroupCols.includes(c.id));
+  const predPctCols: ColumnId[] = ["predHome", "predDraw", "predAway"];
+  const detailSingleIds: ColumnId[] = ["formation"];
+  const predSingles = singleCols.filter((c) => predGroupCols.includes(c.id) && !predPctCols.includes(c.id));
+  const predUnits: ColumnId[][] = [predPctCols, ...predSingles.map((c) => [c.id])];
   const detailSingles = singleCols.filter((c) => detailSingleIds.includes(c.id));
   const detailGroupCols: ColumnId[] = [...FIELD_GROUPS.flatMap((g) => g.cols), ...detailSingleIds];
   const applying =
@@ -1812,7 +1814,7 @@ export function DashboardExplorer() {
           <div className="rounded-xl border border-blue-600 bg-blue-600/10 p-2.5 dark:border-blue-400 dark:bg-blue-400/10">
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-blue-600 dark:text-blue-400">
-                예측 그룹 ({predSingles.filter((c) => !hiddenCols.includes(c.id)).length}/{predSingles.length})
+                예측 그룹 ({predUnits.filter((cols) => cols.every((id) => !hiddenCols.includes(id))).length}/{predUnits.length})
               </span>
               <button
                 onClick={() => toggleGroup(predGroupCols)}
@@ -1822,6 +1824,15 @@ export function DashboardExplorer() {
               </button>
             </div>
             <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1.5">
+              <label className="flex cursor-pointer items-center gap-1.5 text-xs hover:opacity-80">
+                <input
+                  type="checkbox"
+                  checked={predPctCols.every((id) => !hiddenCols.includes(id))}
+                  onChange={() => toggleGroup(predPctCols)}
+                  className="h-3.5 w-3.5 accent-blue-600 dark:accent-blue-400"
+                />
+                <span>예측률</span>
+              </label>
               {predSingles.map((c) => (
                 <label
                   key={c.id}

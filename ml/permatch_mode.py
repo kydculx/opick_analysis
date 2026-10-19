@@ -225,6 +225,24 @@ def same_odds_wdl(same) -> dict | None:
     return None
 
 
+def avg_odds_wdl(m) -> dict | None:
+    o = m.get("odds") or {}
+    acc = {"home": [], "draw": [], "away": []}
+    for comp in ("bet365", "crown", "one_x_bet"):
+        w = ((o.get(comp) or {}).get("win_draw_lose")) or {}
+        for k in acc:
+            v = w.get(k)
+            if isinstance(v, dict):
+                val = v.get("initial")
+                if val is None:
+                    val = v.get("live")
+                if isinstance(val, (int, float)):
+                    acc[k].append(float(val))
+    if any(not acc[k] for k in acc):
+        return same_odds_wdl(m.get("same_odds"))
+    return {k: sum(v) / len(v) for k, v in acc.items()}
+
+
 def fnum(v, default=0.0):
     try:
         f = float(v)
@@ -254,7 +272,7 @@ def row_features(m: dict) -> list:
     h2h_net = sum(net_wdl(hh.get(f"recent_{i}")) for i in range(1, 6))
     ti = (m.get("team_info") or {}).get("avg_stats") or {}
     th, ta = ti.get("home") or {}, ti.get("away") or {}
-    ph, _, pa = implied_probs(same_odds_wdl(m.get("same_odds"))) or (math.nan, math.nan, math.nan)
+    ph, _, pa = implied_probs(avg_odds_wdl(m)) or (math.nan, math.nan, math.nan)
     market = (ph - pa) if not (isinstance(ph, float) and math.isnan(ph)) else float("nan")
     x = [
         fnum(m.get("home_rank")) - fnum(m.get("away_rank")),
@@ -683,7 +701,7 @@ def draw_row_features(m: dict) -> list:
         rg = abs(float(m.get("home_rank")) - float(m.get("away_rank")))
     except (TypeError, ValueError):
         rg = 0.0
-    ph, pd_mkt, pa = implied_probs(same_odds_wdl(m.get("same_odds"))) or (math.nan, math.nan, math.nan)
+    ph, pd_mkt, pa = implied_probs(avg_odds_wdl(m)) or (math.nan, math.nan, math.nan)
     rf = m.get("recent_form") or {}
     rfh = (rf.get("home") or {})
     rfa = (rf.get("away") or {})
@@ -866,15 +884,19 @@ def load_seasons(league: str, seasons: list[str], use_cache: bool = True):
     if use_cache and os.path.exists(cp):
         with open(cp) as f:
             cached = json.load(f)
-        log(f"cache hit: {cp} ({len(cached)} rows, DB 조회 생략)")
-        return sb, cached
+        if cached and isinstance(cached[0], dict) and "odds" not in cached[0]:
+            log(f"캐시 구버전(odds 컬럼 없음) → DB 재조회: {cp}")
+            cached = None
+        if cached is not None:
+            log(f"cache hit: {cp} ({len(cached)} rows, DB 조회 생략)")
+            return sb, cached
     rows = []
     for s in seasons:
         off = 0
         while True:
             res = _sb_execute(lambda: (sb.table("soccer_matches")
                    .select("id,league_code,season,round,home_team,home_rank,away_team,away_rank,"
-                           "home_score,away_score,same_odds,source_match_id,"
+                           "home_score,away_score,odds,same_odds,source_match_id,"
                            "team_info,recent_form,head_to_head,strength")
                    .eq("league_code", league).eq("season", s).order("round").order("id")
                    .range(off, off + 999)))

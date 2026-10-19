@@ -25,6 +25,32 @@ export function sameWdl(m: SoccerMatch): { home: number; draw: number; away: num
   return { home: inv[0] / sum, draw: inv[1] / sum, away: inv[2] / sum };
 }
 
+export function avgWdl(m: SoccerMatch): { home: number; draw: number; away: number } | null {
+  const o = m.odds as unknown as
+    | Record<string, { win_draw_lose?: Record<string, { initial?: unknown; live?: unknown } | null> | null } | null>
+    | null
+    | undefined;
+  const parts = ["home", "draw", "away"] as const;
+  const acc: number[][] = [[], [], []];
+  if (o && typeof o === "object") {
+    for (const comp of ["bet365", "crown", "one_x_bet"]) {
+      const w = o[comp]?.win_draw_lose;
+      if (!w || typeof w !== "object") continue;
+      parts.forEach((p, i) => {
+        const v = w[p];
+        const x = v?.initial ?? v?.live ?? null;
+        const n = Number(x);
+        if (x != null && Number.isFinite(n) && n > 0) acc[i].push(n);
+      });
+    }
+  }
+  if (acc.some((a) => a.length === 0)) return sameWdl(m);
+  const avg = acc.map((a) => a.reduce((s, v) => s + v, 0) / a.length);
+  const inv = avg.map((v) => 1 / v);
+  const sum = inv[0] + inv[1] + inv[2];
+  return { home: inv[0] / sum, draw: inv[1] / sum, away: inv[2] / sum };
+}
+
 export const ALL_FEATURES = [
   "rank", "power", "hstr", "cond", "att", "def", "val",
   "form5", "h2h5", "avg_goals", "avg_conceded", "avg_poss", "market",
@@ -54,7 +80,7 @@ export function rowFeatures(m: SoccerMatch): number[] {
   for (let i = 1; i <= 5; i++) h2hNet += netWdl(hh[`recent_${i}`]);
   const th = m.team_info?.avg_stats?.home ?? {};
   const ta = m.team_info?.avg_stats?.away ?? {};
-  const imp = sameWdl(m);
+  const imp = avgWdl(m);
   const market = imp ? imp.home - imp.away : NaN;
   return [
     fnum(m.home_rank) - fnum(m.away_rank),
@@ -101,7 +127,7 @@ export function drawFeatures(m: SoccerMatch): number[] {
   } catch {
     rg = 0;
   }
-  const imp = sameWdl(m);
+  const imp = avgWdl(m);
   const rf = (m.recent_form ?? {}) as Record<string, Record<string, { draw?: unknown; scored?: unknown; conceded?: unknown } | null> | undefined>;
   const hd5 = [1, 2, 3, 4, 5].filter((i) => fnum(rf.home?.[`recent_${i}`]?.draw) > 0).length;
   const ad5 = [1, 2, 3, 4, 5].filter((i) => fnum(rf.away?.[`recent_${i}`]?.draw) > 0).length;
