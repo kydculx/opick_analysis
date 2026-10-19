@@ -96,7 +96,7 @@ def db_seasons(league):
 
 
 _COLS = ("id,league_code,season,round,home_team,home_rank,away_team,away_rank,"
-         "home_score,away_score,same_odds,source_match_id,"
+         "home_score,away_score,odds,same_odds,source_match_id,"
          "team_info,recent_form,head_to_head,strength")
 
 
@@ -377,6 +377,10 @@ def build_command(o):
                 cmd += ["--jobs", str(max(1, int(float(o["jobs"]))))]
             except (ValueError, TypeError):
                 pass
+        if o.get("snap_only"):
+            cmd.append("--walk-auto")
+            if o.get("auto_targets"):
+                cmd += ["--auto-targets", o["auto_targets"]]
     else:
         cmd += ["--train", o["train"], "--valid", o["valid"] or "auto",
                 "--trials", o.get("trials") or "10000",
@@ -395,6 +399,8 @@ def build_command(o):
                 pass
         if o.get("arange"):
             cmd.append("--auto-range")
+        if o.get("walk"):
+            cmd.append("--walk")
         for _flag, _key in (("--draw-boost", "draw_boost"), ("--draw-margin", "draw_margin"),
                             ("--draw-total", "draw_total")):
             try:
@@ -452,9 +458,14 @@ def main():
     v_tstep = tk.StringVar(value="0.01")
     v_patience = tk.StringVar(value="0")
     v_arange = tk.BooleanVar(value=False)
+    v_walk = tk.BooleanVar(value=True)
     v_seqsw = tk.StringVar(value="1")
     v_noise = tk.StringVar(value="0.1")
     v_automin = tk.StringVar(value="")
+    v_snap = tk.BooleanVar(value=True)
+    v_snap_label = tk.StringVar(value="전체")
+    snap_sel: dict = {}
+    snap_pop = {"win": None}
     v_drawboost = tk.StringVar(value="")
     v_drawmargin = tk.StringVar(value="")
     v_drawtotal = tk.StringVar(value="")
@@ -507,6 +518,9 @@ def main():
             "jobs": v_jobs.get().strip(), "trial_step": v_tstep.get().strip(),
             "patience": v_patience.get().strip(),
             "arange": bool(v_arange.get()), "seq_sweeps": v_seqsw.get().strip(),
+            "walk": bool(v_walk.get()),
+            "snap_only": bool(v_snap.get()),
+            "auto_targets": ",".join([t for t, on in snap_sel.items() if on]) if snap_sel else "",
             "noise": v_noise.get().strip(), "max_minutes": v_automin.get().strip(),
             "draw_boost": v_drawboost.get().strip(), "draw_margin": v_drawmargin.get().strip(),
             "draw_total": v_drawtotal.get().strip(), "grid_step": v_gridstep.get().strip(),
@@ -582,8 +596,8 @@ def main():
     ttk.Label(app, textvariable=v_status, padding=(8, 2)).pack(fill="x")
 
     HINTS = {
-        "train": "새학습: 학습수만 입력하면 자동배치(학습=오래된순 N개, 검증=나머지·최신 제외)",
-        "auto": "랜덤탐색(SA): 미학습 전체 · 국소 변이+적응 스텝 · jobs=병렬 스레드 · 중지로 종료",
+        "train": "새학습: 학습수만 입력하면 자동배치(학습=오래된순 N개, 검증=나머지·최신 제외) · 워크포워드=직전 학습수(N)시즌 롤링 학습(검증=창의 마지막 시즌, trials는 스냅샷마다)",
+        "auto": "랜덤탐색(SA): 미학습 전체 · 국소 변이+적응 스텝 · jobs=병렬 스레드 · 스냅샷별=시즌 모델 각각 조정 · 대상=스냅샷 선택 · 중지로 종료",
     }
 
     detail = ttk.Frame(app, padding=8)
@@ -1032,6 +1046,7 @@ def main():
     ttk.Label(fr_train_opt, text="조기종료").pack(side="left", padx=(8, 2))
     _reg(ttk.Entry(fr_train_opt, textvariable=v_patience, width=5)).pack(side="left")
     _reg(ttk.Checkbutton(fr_train_opt, text="범위자동", variable=v_arange)).pack(side="left", padx=(8, 0))
+    _reg(ttk.Checkbutton(fr_train_opt, text="워크포워드", variable=v_walk)).pack(side="left", padx=(8, 0))
     ttk.Separator(f_train, orient="horizontal").pack(fill="x", pady=2)
     fr_train2 = ttk.Frame(f_train)
     fr_train2.pack(fill="x", pady=2)
@@ -1048,12 +1063,70 @@ def main():
     for lbl, var, w in [("순차", v_seqsw, 4), ("σ", v_noise, 5), ("제한분", v_automin, 5), ("jobs", v_jobs, 5)]:
         ttk.Label(fr_auto1, text=lbl).pack(side="left", padx=(8, 2))
         _reg(ttk.Entry(fr_auto1, textvariable=var, width=w)).pack(side="left")
+    _reg(ttk.Checkbutton(fr_auto1, text="스냅샷별", variable=v_snap)).pack(side="left", padx=(8, 0))
+    _reg(ttk.Button(fr_auto1, text="대상", width=5,
+                    command=lambda: open_snap_popup())).pack(side="left", padx=(4, 0))
+    ttk.Label(fr_auto1, textvariable=v_snap_label, foreground="gray").pack(side="left", padx=(4, 0))
     ttk.Separator(f_auto, orient="horizontal").pack(fill="x", pady=2)
     fr_auto2 = ttk.Frame(f_auto)
     fr_auto2.pack(fill="x", pady=2)
     for _lbl, _var in (("무부스트", v_drawboost), ("접전폭", v_drawmargin), ("총득점", v_drawtotal)):
         ttk.Label(fr_auto2, text=_lbl).pack(side="left", padx=(8, 2))
         _reg(ttk.Entry(fr_auto2, textvariable=_var, width=5)).pack(side="left")
+
+    def open_snap_popup():
+        lg, ver = v_league.get(), v_ver.get().strip()
+        if not ver:
+            v_status.set("버전을 선택하세요")
+            return
+        art = load_tune(lg, ver)
+        if not isinstance(art, dict):
+            v_status.set(f"아티팩트 없음: {ver}")
+            return
+        walks = (((art.get("walk") or {}).get("snapshots")) or {})
+        keys = sorted(walks.keys())
+        targets = keys + ["top"]
+        if not keys:
+            v_status.set("스냅샷 없음 (최종 모델만 조정)")
+        try:
+            w = snap_pop.get("win")
+            if w is not None and w.winfo_exists():
+                w.destroy()
+        except tk.TclError:
+            pass
+        pop = tk.Toplevel(app)
+        snap_pop["win"] = pop
+        pop.title("랜덤탐색 대상")
+        frm = ttk.Frame(pop, padding=10)
+        frm.pack(fill="both", expand=True)
+        vars_ = {}
+        for t in targets:
+            var = tk.BooleanVar(value=snap_sel.get(t, True))
+            vars_[t] = var
+            if t == "top":
+                label = "최종(top)"
+            else:
+                te = (walks.get(t) or {}).get("train_end")
+                label = f"{t}  (train≤{te})" if te else t
+            _reg(ttk.Checkbutton(frm, text=label, variable=var)).pack(anchor="w")
+
+        def set_all():
+            for v in vars_.values():
+                v.set(True)
+
+        def ok():
+            snap_sel.clear()
+            for t, var in vars_.items():
+                snap_sel[t] = bool(var.get())
+            all_on = all(snap_sel.get(t, False) for t in targets)
+            v_snap_label.set("전체" if all_on else f"{sum(1 for x in snap_sel.values() if x)}/{len(targets)}")
+            pop.destroy()
+
+        brow = ttk.Frame(frm)
+        brow.pack(fill="x", pady=(8, 0))
+        _reg(ttk.Button(brow, text="전체", command=set_all)).pack(side="left")
+        ttk.Button(brow, text="취소", command=pop.destroy).pack(side="right")
+        ttk.Button(brow, text="확인", command=ok).pack(side="right", padx=(0, 6))
 
     def _apply_drawboost(*_):
         lg, ver = v_league.get(), v_ver.get().strip()
@@ -1326,17 +1399,18 @@ def main():
         gfx["labels"] = labels
         return True
 
-    def _update_bars(vals, title_acc=None, draw=True):
+    def _update_bars(vals, title_acc=None, draw=True, title_target=None):
         wmin, wmax, pad = _lim()
         span = wmax - wmin
         z0 = -wmin
         ax_w.set_xlim(0, span)
         chart_state.update(kind="lin", labels=list(gfx["labels"] or []),
                            vals=list(vals), title=title_acc)
+        tprefix = f" · {title_target}" if title_target else ""
         if title_acc is not None:
-            ax_w.set_title(f"피처 가중치 · 탐색 중 {title_acc * 100:.1f}%")
+            ax_w.set_title(f"피처 가중치{tprefix} · 탐색 중 {title_acc * 100:.1f}%")
         else:
-            ax_w.set_title("피처 가중치")
+            ax_w.set_title(f"피처 가중치{tprefix}" if title_target else "피처 가중치")
         for patch, txt, v in zip(gfx["bars"], gfx["texts"], vals):
             yy = txt.get_position()[1]
             if v >= 0:
@@ -1484,7 +1558,7 @@ def main():
         _draw_progress()
         hist_state["last_draw"] = 0.0
 
-    def redraw_graphs(best_w=None, feat_names=None, title_acc=None, order_w=None):
+    def redraw_graphs(best_w=None, feat_names=None, title_acc=None, order_w=None, title_target=None):
         if not best_w:
             wmin, wmax, _ = _lim()
             ax_w.clear()
@@ -1504,7 +1578,7 @@ def main():
         labels = [FEATURE_KO.get(raw_names[i], raw_names[i]) for i in idx]
         vals = [best_w[i] for i in idx]
         _ensure_bars(labels)
-        _update_bars(vals, title_acc)
+        _update_bars(vals, title_acc, title_target=title_target)
 
     def _feat_names_for(league, ver):
         key = f"{league}|{ver}"
@@ -1555,7 +1629,9 @@ def main():
                         if sig != gfx["last_asig"]:
                             gfx["last_asig"] = sig
                             try:
-                                redraw_graphs(bw, names)
+                                redraw_graphs(bw, names,
+                                              title_target=(gfx.get("last_target") or None)
+                                              if runner["obj"] is not None else None)
                             except Exception:
                                 pass
             if runner["obj"] is not None:
@@ -1568,6 +1644,13 @@ def main():
                     try:
                         pd = json.load(open(ap, encoding="utf-8"))
                         cw, ca = pd.get("curW"), pd.get("curAcc")
+                        tgt = pd.get("target") or ""
+                        if tgt != gfx.get("last_target"):
+                            gfx["last_target"] = tgt
+                            try:
+                                _reset_progress()
+                            except Exception:
+                                pass
                         psig = (amt, pd.get("ndone"))
                         if isinstance(cw, list) and cw and psig != gfx.get("last_psig"):
                             gfx["last_psig"] = psig
@@ -1580,7 +1663,8 @@ def main():
                                     try:
                                         redraw_graphs(cw, _feat_names_for(o["league"], o["ver"]),
                                                       title_acc=float(ca) if isinstance(ca, (int, float)) else None,
-                                                      order_w=bw2 if isinstance(bw2, list) else None)
+                                                      order_w=bw2 if isinstance(bw2, list) else None,
+                                                      title_target=tgt or None)
                                     except Exception:
                                         pass
                                 _push_time(pd.get("best"), ca)
@@ -1730,6 +1814,9 @@ def main():
             if not isinstance(art0.get("weights"), list):
                 v_status.set(f"legacy 베이스 필요: {o['ver']} (현재 {art0.get('model_type')})")
                 return
+            if v_snap.get() and snap_sel and not any(snap_sel.values()):
+                v_status.set("랜덤탐색 대상 스냅샷을 1개 이상 선택하세요 (대상 버튼)")
+                return
         set_opts_enabled(False)
         cmd = build_command(o)
         env = dict(os.environ)
@@ -1746,6 +1833,7 @@ def main():
         gfx["last_sig"] = None
         gfx["last_amtime"] = 0.0
         gfx["last_asig"] = None
+        gfx["last_target"] = ""
         _reset_progress()
         redraw_graphs()
         v_status.set("실행 중…")
@@ -1869,6 +1957,7 @@ def main():
     v_league_ko.trace_add("write", on_league_pick)
     v_mode_ko.trace_add("write", on_mode_pick)
     v_ver.trace_add("write", apply_ver_features)
+    v_ver.trace_add("write", lambda *_: (snap_sel.clear(), v_snap_label.set("전체")))
     v_train.trace_add("write", apply_train_ver)
     v_train.trace_add("write", refresh_summary)
     v_valid.trace_add("write", refresh_summary)
