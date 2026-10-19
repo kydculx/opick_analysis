@@ -28,6 +28,7 @@ except ImportError:
 _START = time.time()
 
 _LEAGUE_TAG = ""
+_STOP_FLAG = False
 
 def league_tag(code: str) -> str:
     return {"premier_league": "EPL", "k_league_1": "K1", "k_league_2": "K2",
@@ -831,12 +832,12 @@ def read_live_draw_w(league, ver, cur):
     return v
 
 
-def write_auto_prog(league, ver, rnd, best, bestW, curW, curAcc, tune_s):
+def write_auto_prog(league, ver, rnd, best, bestW, curW, curAcc, tune_s, target=""):
     try:
         with open(auto_prog_path(league, ver), "w") as f:
             json.dump({"mode": "auto-prog", "ndone": rnd, "best": best,
                        "bestW": bestW, "curW": curW, "curAcc": curAcc,
-                       "tune": sorted(tune_s)}, f)
+                       "tune": sorted(tune_s), "target": target}, f)
     except (OSError, ValueError, TypeError):
         pass
 
@@ -869,7 +870,7 @@ def load_seasons(league: str, seasons: list[str], use_cache: bool = True):
         with open(cp) as f:
             cached = json.load(f)
         if cached and isinstance(cached[0], dict) and "odds" not in cached[0]:
-            log(f"캐시 구버전(odds 컬럼 없음) → DB 재조회: {cp}")
+            log(f"캐시 자동 갱신: odds 컬럼 없음 → DB 재조회 ({os.path.basename(cp)})")
             cached = None
         if cached is not None:
             log(f"cache hit: {cp} ({len(cached)} rows, DB 조회 생략)")
@@ -1007,13 +1008,25 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
               wmin: float = -10.0, wmax: float = 10.0, log_every: int = 200,
               seed: int = 7, fresh: bool = False, use_cache: bool = True,
               grid_step: float = 0.0, draw_w: float = 0.0, recency_w: float = 0.0,
-              jobs: int = 0):
+              jobs: int = 0, target_season: str = "", target_label: str = ""):
     import numpy as _np
+    global _STOP_FLAG
+    _t0 = time.time()
     p = model_ref(league, ver)
     art = load_artifact_any(league, ver)
     if not isinstance(art, dict):
         log(f"아티팩트 없음: {p} (먼저 학습 필요)")
         return False
+    if target_season:
+        _snap = _artifact_for_season(art, target_season)
+        if _snap is art:
+            log(f"스냅샷 없음: {target_season} → 스킵")
+            return False
+        art_full = art
+        art = _snap
+        log(f"[auto] 대상 스냅샷: {target_season} (train={art.get('train_seasons')} valid={art.get('valid')})")
+    else:
+        art_full = art
     if not isinstance(art.get("weights"), list):
         log(f"조절/탐색은 legacy 가중치 모델만 지원 (현재: {art.get('model_type')})")
         return False
@@ -1043,8 +1056,14 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
     mu_d, sd_d = art.get("draw_mu"), art.get("draw_sd")
     use_draw = bool(dw and mu_d and sd_d)
     if not tune_s:
-        tune_s = all_nontrain_seasons(league, set(art.get("train_seasons", [])))
-        log(f"조절 시즌 자동선택(미학습): {sorted(tune_s)}")
+        if target_season:
+            _v = art.get("valid")
+            tune_s = {str(x) for x in (_v if isinstance(_v, list) else ([_v] if _v else [])) if x and x != "auto"}
+            if tune_s:
+                log(f"조절 시즌(스냅샷 검증): {sorted(tune_s)}")
+        if not tune_s:
+            tune_s = all_nontrain_seasons(league, set(art.get("train_seasons", [])))
+            log(f"조절 시즌 자동선택(미학습): {sorted(tune_s)}")
     _, rows = load_seasons(league, sorted(tune_s), use_cache=use_cache)
     feats, labels, ssn, xds = [], [], [], []
     for r in rows:
@@ -1120,23 +1139,40 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
         return min(wmax, max(wmin, round(v, 4)))
 
     def persist():
+        def cur_w(a):
+            if not isinstance(a, dict):
+                return None, None
+            if target_season:
+                s = (((a.get("walk") or {}).get("snapshots")) or {}).get(target_season)
+                if isinstance(s, dict):
+                    return s.get("weights"), s.get("hfa")
+                return None, None
+            return a.get("weights"), a.get("hfa")
         cur = load_artifact_any(league, ver)
-        if isinstance(cur, dict):
-            cw, chh = cur.get("weights"), cur.get("hfa")
-            if isinstance(cw, list) and len(cw) == nw and isinstance(chh, (int, float)):
-                facc, frec = accrec_of(cw, chh)
-                if _sel_bonus(facc, frec, draw_w) > _sel_bonus(best, best_rec, draw_w):
-                    return ("adopted", list(cw), float(chh), facc, frec)
+        cw, chh = cur_w(cur)
+        if isinstance(cw, list) and len(cw) == nw and isinstance(chh, (int, float)):
+            facc, frec = accrec_of(cw, chh)
+            if _sel_bonus(facc, frec, draw_w) > _sel_bonus(best, best_rec, draw_w):
+                return ("adopted", list(cw), float(chh), facc, frec)
         cur0 = load_artifact_any(league, ver)
-        if isinstance(cur0, dict):
-            if cur0.get("weights") == list(bestW) and cur0.get("hfa") == bestHfa:
+        cw0, ch0 = cur_w(cur0)
+        if cw0 == list(bestW) and ch0 == bestHfa:
+            return ("same", list(bestW), bestHfa, best, best_rec)
+        if target_season:
+            snaps = ((art_full.get("walk") or {}).get("snapshots")) or {}
+            s = snaps.get(target_season)
+            if not isinstance(s, dict):
                 return ("same", list(bestW), bestHfa, best, best_rec)
-        art["weights"] = list(bestW)
-        art["hfa"] = bestHfa
-        save_artifact(league, ver, art)
+            s["weights"] = list(bestW)
+            s["hfa"] = bestHfa
+        else:
+            art_full["weights"] = list(bestW)
+            art_full["hfa"] = bestHfa
+        save_artifact(league, ver, art_full)
         return ("saved", list(bestW), bestHfa, best, best_rec)
 
     _save_ts = [0.0]
+    _prog_ts = [0.0]
 
     def commit(tag):
         nonlocal w, hfa, best, best_rec, bestW, bestHfa, improved_any
@@ -1153,6 +1189,9 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
             (" → 외부파일 채택" if st == "adopted" else
              " → 동일, 저장 생략" if st == "same" else
              " → 저장 보류(스로틀)" if st == "deferred" else " → 저장"))
+        if time.time() - _prog_ts[0] >= 0.1:
+            _prog_ts[0] = time.time()
+            write_auto_prog(league, ver, 0, best, bestW, list(w), best, tune_s, _prog_target)
 
     order = sorted(range(nw), key=lambda j: -abs(w[j])) + ["hfa"]
     best, best_rec = accrec_of(w, hfa)
@@ -1162,6 +1201,8 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
     log(f"랜덤탐색 시작: acc={best:.3f} " +
         " ".join(f"{s}={se[s]:.3f}" for s in sorted(se)) +
         f" 순서={[FEATURES[j] if j != 'hfa' else 'hfa' for j in order]}")
+    _prog_target = target_label or target_season
+    write_auto_prog(league, ver, 0, best, bestW, list(w), best, tune_s, _prog_target)
     _prev_sigterm = None
     try:
         import signal as _signal
@@ -1190,7 +1231,7 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
                         cw[j] = clamp(cw[j] + sgn * delta)
                     if (ch == hfa) if j == "hfa" else (cw[j] == w[j]):
                         return "stop"
-                    if max_minutes > 0 and (time.time() - _START) / 60 > max_minutes:
+                    if max_minutes > 0 and (time.time() - _t0) / 60 > max_minutes:
                         time_up = True
                         return "stop"
                     a, r = accrec_of(cw, ch)
@@ -1297,7 +1338,7 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
                 if n <= 0:
                     log(f"라운드 {random_rounds} 도달 → 종료")
                     break
-            if max_minutes > 0 and (time.time() - _START) / 60 > max_minutes:
+            if max_minutes > 0 and (time.time() - _t0) / 60 > max_minutes:
                 log(f"{max_minutes}분 제한 도달 → 종료")
                 break
             if _gvals is not None and _TT is not None:
@@ -1365,8 +1406,9 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
                 log(f"랜덤 #{rnd} 진행중 best={best:.3f} 현재={a:.3f}" + (f" σ={sigma:.3f}" if _TT is None else ""))
             if time.time() - last_prog >= 0.016:
                 last_prog = time.time()
-                write_auto_prog(league, ver, rnd, best, bestW, list(w), a, tune_s)
+                write_auto_prog(league, ver, rnd, best, bestW, list(w), a, tune_s, _prog_target)
     except KeyboardInterrupt:
+        _STOP_FLAG = True
         log("중단됨(Ctrl+C/중지) → 최고점 유지 후 종료")
     if _prev_sigterm is not None:
         try:
@@ -1387,6 +1429,46 @@ def auto_tune(league: str, ver: str, tune_s: set, seq_sweeps: int = 1, random_ro
         " ".join(f"{s}={fin_se[s]:.3f}" for s in sorted(fin_se)) +
         (" (개선 저장됨)" if improved_any else " (개선 없음)"))
     return improved_any
+
+
+def auto_tune_walk(league: str, ver: str, args):
+    global _STOP_FLAG
+    _STOP_FLAG = False
+    full = load_artifact_any(league, ver)
+    if not isinstance(full, dict):
+        log(f"아티팩트 없음: {model_ref(league, ver)} (먼저 학습 필요)")
+        return False
+    snap_keys = sorted((((full.get("walk") or {}).get("snapshots")) or {}).keys())
+    raw = (getattr(args, "auto_targets", "") or "").strip()
+    if raw:
+        want = [t.strip() for t in raw.split(",") if t.strip()]
+        unknown = [t for t in want if t != "top" and t not in snap_keys]
+        targets = [t for t in snap_keys if t in want]
+        if "top" in want:
+            targets.append("")
+        if unknown:
+            log(f"[walk-auto] 없는 대상 무시: {unknown}")
+        if not targets:
+            log("[walk-auto] 선택된 대상 없음 → 종료")
+            return False
+        log(f"[walk-auto] 선택 대상 {len(targets)}개: {', '.join(t or '최종(top)' for t in targets)}")
+    else:
+        targets = snap_keys + [""]
+        log(f"[walk-auto] 대상 {len(targets)}개: {', '.join(snap_keys) if snap_keys else '스냅샷 없음'} + 최종(top)")
+    for i, S in enumerate(targets, 1):
+        if _STOP_FLAG:
+            log("[walk-auto] 중지됨 → 나머지 건너뜀")
+            break
+        label = S if S else "최종(top)"
+        log(f"[walk-auto {i}/{len(targets)}] {label}")
+        auto_tune(league, ver, set(), seq_sweeps=args.seq_sweeps,
+                  random_rounds=args.random_rounds, max_minutes=args.max_minutes,
+                  noise=args.noise, hfa_noise=args.hfa_noise,
+                  wmin=args.wmin, wmax=args.wmax, log_every=args.log_every,
+                  seed=args.seed, fresh=args.new, use_cache=not args.no_cache,
+                  grid_step=args.auto_step, draw_w=args.draw_w, recency_w=args.recency_w,
+                  jobs=args.jobs, target_season=S, target_label=("최종(top)" if not S else ""))
+    return True
 
 
 def _acc_batch32(X32, yn, dd32, PP32, cap, nw, Wmat, hvec, alpha=0.0):
@@ -2024,19 +2106,30 @@ def train_model(matches, train_s: set, valid_s: set, ver: str, test: str = "", d
 
 
 
+def _artifact_for_season(artifact: dict, season) -> dict:
+    walk = artifact.get("walk") if isinstance(artifact, dict) else None
+    snaps = walk.get("snapshots") if isinstance(walk, dict) else None
+    if isinstance(snaps, dict):
+        snap = snaps.get(str(season))
+        if isinstance(snap, dict):
+            merged = {k: v for k, v in artifact.items() if k != "walk"}
+            merged.update(snap)
+            return merged
+    return artifact
+
+
 def eval_artifact(matches, train_s: set, valid_s: set, artifact: dict):
-    mu, sd = artifact["mu"], artifact["sd"]
-    tau, taus, _w, alpha = _pat_params_from_art(artifact)
-    boost, margin, total_max = _boost_params_from_art(artifact)
-    pats = artifact.get("patterns")
-    T = artifact.get("T", 1.0)
-    out = {}
-    w, hfa, d = (artifact["weights"], artifact["hfa"], artifact["draw_prior"])
-    e = artifact.get("emphasis", [1.0] * len(w))
-    cap = artifact.get("contrib_cap")
-    dw, db = artifact.get("draw_weights"), artifact.get("draw_bias", 0.0)
-    mu_d, sd_d = artifact.get("draw_mu"), artifact.get("draw_sd")
-    for split, cond in (("train", lambda s: s in train_s), ("valid", lambda s: s in valid_s)):
+    def _eval(art, cond):
+        mu, sd = art["mu"], art["sd"]
+        tau, taus, _w, alpha = _pat_params_from_art(art)
+        boost, margin, total_max = _boost_params_from_art(art)
+        pats = art.get("patterns")
+        T = art.get("T", 1.0)
+        w, hfa, d = (art["weights"], art["hfa"], art["draw_prior"])
+        e = art.get("emphasis", [1.0] * len(w))
+        cap = art.get("contrib_cap")
+        dw, db = art.get("draw_weights"), art.get("draw_bias", 0.0)
+        mu_d, sd_d = art.get("draw_mu"), art.get("draw_sd")
         n = hit = tot = 0.0
         for r in matches:
             s = str(r.get("season"))
@@ -2060,11 +2153,26 @@ def eval_artifact(matches, train_s: set, valid_s: set, artifact: dict):
             n += 1
             hit += (p.index(max(p)) == y)
             tot += -math.log(max(p[y], 1e-12))
-        out[split] = {"n": n, "acc": hit / max(n, 1), "ll": tot / max(n, 1)}
+        return {"n": n, "acc": hit / max(n, 1), "ll": tot / max(n, 1)}
+
+    out = {"train": _eval(artifact, lambda s: s in train_s)}
+    walk = artifact.get("walk") if isinstance(artifact, dict) else None
+    snaps = walk.get("snapshots") if isinstance(walk, dict) else None
+    if isinstance(snaps, dict) and snaps:
+        seasons = sorted({str(r.get("season")) for r in matches if str(r.get("season")) in valid_s})
+        n = hit = tot = 0.0
+        for S in seasons:
+            m = _eval(_artifact_for_season(artifact, S), lambda s, S=S: s == S)
+            n += m["n"]
+            hit += m["acc"] * m["n"]
+            tot += m["ll"] * m["n"]
+        out["valid"] = {"n": n, "acc": hit / max(n, 1), "ll": tot / max(n, 1)}
+        out["static"] = _eval(artifact, lambda s: s in valid_s)
+    else:
+        out["valid"] = _eval(artifact, lambda s: s in valid_s)
     return out
 
 
-# ---------------------------------------------------------------- autotune
 def _cand_mult(steps):
     """좌표 하강용 후보 이동폭 [+s0,-s0,+s1,-s1,...]."""
     import numpy as _np
@@ -2517,202 +2625,9 @@ def load_existing_best(league: str, ver: str, matches, train_s: set, valid_s: se
 
 
 # ---------------------------------------------------------------- main
-def main():
-    ap = argparse.ArgumentParser(description="Prematch 학습 단일 진입점")
-    ap.add_argument("--mode", default="train", choices=["train", "predict", "tune", "auto", "drawfit"])
-    ap.add_argument("--ui", dest="_ui_launch", action="store_true", help=argparse.SUPPRESS)
-    ap.add_argument("--tune", default="", help="조절용 시즌, 콤마 구분 (auto에서 비우면 미학습 전체)")
-    ap.add_argument("--league", required=True)
-    ap.add_argument("--train", default="", help="학습 시즌, 콤마 구분")
-    ap.add_argument("--valid", default="", help="검증 시즌, 콤마 구분 (비우면 미학습 전체)")
-    ap.add_argument("--test", default="", help="테스트 시즌 (참고용)")
-    ap.add_argument("--predict", default="", help="--mode predict일 때 대상 시즌")
-    ap.add_argument("--ver", required=True)
-    ap.add_argument("--fast", action="store_true", help="단발 학습 (autotune 없이 1회 fit)")
-    ap.add_argument("--new", action="store_true", help="기존 아티팩트 무시하고 처음부터")
-    ap.add_argument("--five", action="store_true", help="5피처(rank,power,val,form5,market) 모드 (ver 뒤에 -f5 자동 추가)")
-    ap.add_argument("--features", default="", help="임의 피처 선택, 콤마 구분 (예: rank,power,att). 지정 시 --five보다 우선")
-    ap.add_argument("--model", default="legacy", choices=["legacy"], help="모델 구조 (legacy 단일)")
-    ap.add_argument("--draw-w", type=float, default=0.0, help="무승부 가중 (선발 리콜가중 + 샘플가중, 0=끄기, 예: 0.5)")
-    ap.add_argument("--draw-boost", type=float, default=None, help="무 부스트 직접 지정 (valid 튜닝 생략, 예: 0.02)")
-    ap.add_argument("--draw-margin", type=float, default=None, help="부스트 접전 조건 직접 지정 (예: 0.12)")
-    ap.add_argument("--draw-total", type=float, default=None, help="부스트 저득점 조건 직접 지정 (예: 2.55)")
-    ap.add_argument("--recency-w", type=float, default=0.0, help="최신시즌 가중 (valid/tune 선발만, 0=끄기, 예: 1.0이면 최신시즌 2배)")
-    ap.add_argument("--trials", type=int, default=20)
-    ap.add_argument("--trial-step", type=float, default=0.0, help="새학습 가중치 격자 간격 (0=연속, 예: 0.01)")
-    ap.add_argument("--sweeps", type=int, default=6, help="tune 모드용 최대 sweep 수")
-    ap.add_argument("--seq-sweeps", type=int, default=1, help="auto 모드 순차 패스 수")
-    ap.add_argument("--random-rounds", type=int, default=0, help="auto 모드 랜덤 라운드 수 (0=무한)")
-    ap.add_argument("--max-minutes", type=float, default=0.0, help="auto 모드 시간 제한(분, 0=무제한)")
-    ap.add_argument("--noise", type=float, default=0.1, help="auto 랜덤 가중치 이동폭")
-    ap.add_argument("--hfa-noise", type=float, default=0.05, help="auto 랜덤 hfa 이동폭")
-    ap.add_argument("--auto-step", type=float, default=0.0, help="auto 랜덤 격자 간격(wmin/wmax 구간 스냅, 0=연속)")
-    ap.add_argument("--wmin", type=float, default=-10.0)
-    ap.add_argument("--wmax", type=float, default=10.0)
-    ap.add_argument("--auto-range", action="store_true", help="단발 fit 결과 범위로 trials 범위 자동 설정")
-    ap.add_argument("--range-pad", type=float, default=0.5, help="auto-range 여유폭")
-    ap.add_argument("--log-every", type=int, default=200, help="auto 랜덤 진행 로그 간격")
-    ap.add_argument("--seed", type=int, default=7)
-    ap.add_argument("--jobs", type=int, default=1, help="새학습 워커(프로세스) 수 · 랜덤탐색 numba 스레드 수 (1=자동)")
-    ap.add_argument("--patience", type=int, default=0)
-    ap.add_argument("--no-halving", action="store_true", help="restart halving 끄기 (전 restart 끝까지 탐색)")
-    ap.add_argument("--no-cache", action="store_true")
-    args = ap.parse_args()
-    if args.mode in ("train", "auto", "tune", "drawfit") and not getattr(args, "_ui_launch", False):
-        print("학습·탐색은 GUI/웹에서만 실행할 수 있습니다 (CLI 직접 실행 비활성화)", flush=True)
-        sys.exit(2)
-    try:
-        import signal as _sigmod
-
-        def _on_sigterm(_signum, _frame):
-            raise KeyboardInterrupt()
-
-        _sigmod.signal(_sigmod.SIGTERM, _on_sigterm)
-    except (ValueError, RuntimeError, OSError, AttributeError):
-        pass
-
-    league, ver = args.league, args.ver
-    global _LEAGUE_TAG
-    _LEAGUE_TAG = league_tag(league)
-
-    if args.features:
-        names = [s.strip() for s in args.features.split(",") if s.strip()]
-        bad = [n for n in names if n not in FEATURES13]
-        assert bad == [] and len(names) >= 1, f"--features 오류: {bad or names} (가능: {','.join(FEATURES13)})"
-        seen = set()
-        uniq = [n for n in names if not (n in seen or seen.add(n))]
-        global FEATURES, SEL
-        FEATURES = list(uniq)
-        SEL = [FEATURES13.index(n) for n in uniq]
-        log(f"피처 선택: {','.join(FEATURES)} ver={ver}")
-    elif args.five:
-        FEATURES = list(FIVE)
-        SEL = list(FIVE_IDX)
-        if not ver.endswith("-f5"):
-            ver = ver + "-f5"
-        log(f"5피처 모드: {','.join(FEATURES)} ver={ver}")
-
-    if args.mode == "predict":
-        assert args.predict, "--predict 필요"
-        art = load_artifact_any(league, ver)
-        if not isinstance(art, dict):
-            log(f"아티팩트 없음: {model_ref(league, ver)}")
-            return
-        T = art["T"]
-        mu, sd = art.get("mu"), art.get("sd")
-        e = art.get("emphasis", [1.0] * len(art.get("features", [])))
-        _tau_p, _taus_p, _w_p, _alpha_p = _pat_params_from_art(art)
-        _b_p, _m_p, _tm_p = _boost_params_from_art(art)
-        pats, tau, taus, palpha = art.get("patterns"), _tau_p, _taus_p, _alpha_p
-        w, hfa, d = art["weights"], art["hfa"], art["draw_prior"]
-        dw = art.get("draw_weights")
-        db = art.get("draw_bias", 0.0)
-        mu_d, sd_d = art.get("draw_mu"), art.get("draw_sd")
-        cap = art.get("contrib_cap")
-        _, matches = load_seasons(league, [args.predict], use_cache=not args.no_cache)
-        pred_s = set(args.predict.split(","))
-        targets = [r for r in matches if str(r["season"]) in pred_s]
-
-        def _px(r):
-            import numpy as _np
-            x = row_features(r)
-            if mu and sd:
-                x = apply_std(x, mu, sd)
-            xe = apply_emphasis(x, e)
-            xd_raw = draw_row_features(r)
-            if mu_d and sd_d:
-                xd = std_vec_row(xd_raw, mu_d, sd_d)
-            else:
-                xd = xd_raw
-            return served_proba(xe, xd, w, hfa, d, dw, db, cap, pats, tau, palpha, w, T,
-                                _b_p, _m_p, _tm_p,
-                                xd_raw[2] if len(xd_raw) > 2 else 99.0,
-                                xd_raw[3] if len(xd_raw) > 3 else 0.0)
-        probas = [_px(r) for r in targets]
-        n, hit = len(targets), 0
-        for r, p in zip(targets, probas):
-            try:
-                hs, aws = float(r.get("home_score")), float(r.get("away_score"))
-            except (TypeError, ValueError):
-                continue
-            actual = 0 if hs > aws else (1 if hs == aws else 2)
-            if p.index(max(p)) == actual:
-                hit += 1
-        log(f"predictions recomputed on the fly (no DB write): {n} rows, acc={hit / max(n, 1):.3f}")
-        return
-
-    if args.mode == "tune":
-        assert args.tune and args.ver, "--tune과 --ver 필요"
-        tune_s = {s.strip() for s in args.tune.split(",") if s.strip()}
-        tune_weights(league, ver, tune_s, args.sweeps, use_cache=not args.no_cache,
-                     draw_w=args.draw_w, recency_w=args.recency_w)
-        return
-
-    if args.mode == "drawfit":
-        assert args.ver, "--ver 필요"
-        extra_s = {s.strip() for s in (args.tune or "").split(",") if s.strip()}
-        drawfit(league, ver, extra_s, use_cache=not args.no_cache)
-        return
-
-    if args.mode == "auto":
-        assert args.ver, "--ver 필요"
-        tune_s = {s.strip() for s in (args.tune or "").split(",") if s.strip()}
-        auto_tune(league, ver, tune_s, seq_sweeps=args.seq_sweeps,
-                  random_rounds=args.random_rounds, max_minutes=args.max_minutes,
-                  noise=args.noise, hfa_noise=args.hfa_noise,
-                  wmin=args.wmin, wmax=args.wmax, log_every=args.log_every,
-                  seed=args.seed, fresh=args.new, use_cache=not args.no_cache,
-                  grid_step=args.auto_step, draw_w=args.draw_w, recency_w=args.recency_w,
-                  jobs=args.jobs)
-        return
-
-    assert args.train, "--train 필요"
-    train_s = {s.strip() for s in args.train.split(",") if s.strip()}
-    raw_valid = args.valid.strip()
-    if raw_valid == "" or raw_valid.lower() in ("auto", "all", "*"):
-        valid_s = all_nontrain_seasons(league, train_s)
-        log(f"검증시즌 자동선택(미학습): {sorted(valid_s)}")
-    else:
-        valid_s = {s.strip() for s in raw_valid.split(",") if s.strip()}
-    if not valid_s:
-        log("검증시즌 없음 (미학습 시즌이 비어있음). 종료")
-        sys.exit(2)
-    overlap = valid_s & train_s
-    if overlap and train_s != valid_s:
-        log("테스트 시즌이 학습시즌과 겹침. 종료")
-        sys.exit(2)
-    if args.model != "legacy":
-        log("--model은 legacy만 지원 (softmax 제거됨)")
-        sys.exit(2)
-
-    _, rows = load_seasons(league, sorted(train_s | valid_s | ({args.test} if args.test else set())),
-                           use_cache=not args.no_cache)
-
-    # ---- 단발 모드
-    if args.fast:
-        artifact, metrics = train_model(rows, train_s, valid_s, ver, args.test,
-                                        draw_w=args.draw_w, recency_w=args.recency_w,
-                                        draw_boost=args.draw_boost, draw_margin=args.draw_margin,
-                                        draw_total=args.draw_total)
-        for split in ("train", "valid", "test"):
-            m = metrics.get(split, {})
-            if m.get("n"):
-                log(f"[{split}] n={m['n']} acc={m['acc']:.3f} logloss={m['ll']:.4f}")
-        if not args.new:
-            old = load_artifact_any(league, ver)
-            if isinstance(old, dict):
-                old_met = eval_artifact(rows, train_s, valid_s, old)
-                new_acc = metrics.get("valid", {}).get("acc", 0.0)
-                old_acc = old_met.get("valid", {}).get("acc", 0.0)
-                log(f"기존 {ver}: valid acc={old_acc:.3f} / 신규: valid acc={new_acc:.3f}")
-                if old_acc > new_acc:
-                    log("기존 유지 (덮어쓰기 안 함). --new로 강제 저장 가능")
-                    return
-        save_artifact(league, ver, artifact)
-        w = artifact["weights"]
-        log(f"FINAL W {{{', '.join(f'{n}:{v:+.3f}' for n, v in zip(FEATURES, w))}}} T={artifact['T']}")
-        return
-
+def train_autotune(league: str, ver: str, rows, train_s: set, valid_s: set, args,
+                   persist_partial: bool = True, resume: bool = True):
+    """한 window(train_s/valid_s)에 대해 기존 새학습(trials+후처리) 파이프라인을 수행."""
     # ---- autotune 모드
     feats, labels = [], []
     for r in rows:
@@ -2763,7 +2678,7 @@ def main():
         args.wmax = max(max(_rw0), _rh0) + _pad
         log(f"auto-range: 단발fit 범위 [{min(_rw0):.3f},{max(_rw0):.3f}] → wmin={args.wmin:.3f} wmax={args.wmax:.3f}")
 
-    best, old_art = (None, None) if args.new else load_existing_best(league, ver, rows, train_s, valid_s)
+    best, old_art = (None, None) if (args.new or not resume) else load_existing_best(league, ver, rows, train_s, valid_s)
     if args.new:
         log("--new: 기존 무시, 처음부터 탐색")
         start_trial = 0
@@ -2861,12 +2776,15 @@ def main():
             best = {"acc": acc, "ll": ll, "cfg": cfg,
                     "weights": w, "hfa": hfa, "T": T, "e": e,
                     "draw_prior": d, "mu": mu, "sd": sd, "trial": t, "rec": rec}
-            save_artifact(league, ver, {"weights": w, "hfa": hfa, "T": T, "draw_prior": d,
-                                        "mu": mu, "sd": sd, "emphasis": e, "features": FEATURES,
-                                        "train_seasons": sorted(train_s),
-                                        "valid": sorted(valid_s), "trials": t, "best_trial": t,
-                                        "draw_analysis": draw_rep2})
-            tag = " ★ NEW BEST 저장"
+            if persist_partial:
+                save_artifact(league, ver, {"weights": w, "hfa": hfa, "T": T, "draw_prior": d,
+                                            "mu": mu, "sd": sd, "emphasis": e, "features": FEATURES,
+                                            "train_seasons": sorted(train_s),
+                                            "valid": sorted(valid_s), "trials": t, "best_trial": t,
+                                            "draw_analysis": draw_rep2})
+                tag = " ★ NEW BEST 저장"
+            else:
+                tag = " ★ NEW BEST"
             no_improve = 0
         else:
             no_improve += 1
@@ -2924,40 +2842,328 @@ def main():
         b_new, m_new, tm_new = (_num2(args.draw_boost, 0.0), _num2(args.draw_margin, 0.12),
                                _num2(args.draw_total, 2.55))
     log(f"draw_boost={b_new:.2f} margin={m_new:.2f} total_max={tm_new:.2f}")
-    _art = load_artifact_any(league, ver)
-    if isinstance(_art, dict):
-        if _art.get("trials", 0) != trial_ids[-1]:
-            _art["trials"] = trial_ids[-1]
-        _art["T"] = best_T
-        _art["contrib_cap"] = contrib_cap
-        _art["patterns"] = pats
-        _art["pattern_tau"] = tau
-        _art["pattern_taus"] = ptaus
-        _art["pattern_alpha"] = palpha_new
-        _art["draw_boost"] = b_new
-        _art["draw_close_margin"] = m_new
-        _art["draw_total_max"] = tm_new
-        _art["pattern_stats"] = pstats
-        if draw_branch:
-            _art["draw_weights"] = dw_new
-            _art["draw_bias"] = db_new
-            _art["draw_mu"] = mu_d_new
-            _art["draw_sd"] = sd_d_new
-            _art["draw_features"] = DRAW_FEATURES
-        else:
-            for _k in ("draw_weights", "draw_bias", "draw_mu", "draw_sd", "draw_features"):
-                _art.pop(_k, None)
-        save_artifact(league, ver, _art)
+    _art = {
+        "weights": best["weights"], "hfa": best["hfa"], "T": best["T"],
+        "draw_prior": d, "mu": mu, "sd": sd, "emphasis": best["e"],
+        "features": list(FEATURES), "train_seasons": sorted(train_s),
+        "valid": sorted(valid_s), "trials": trial_ids[-1],
+        "best_trial": best["trial"], "draw_analysis": draw_rep2,
+    }
+    _art["T"] = best_T
+    _art["contrib_cap"] = contrib_cap
+    _art["patterns"] = pats
+    _art["pattern_tau"] = tau
+    _art["pattern_taus"] = ptaus
+    _art["pattern_alpha"] = palpha_new
+    _art["draw_boost"] = b_new
+    _art["draw_close_margin"] = m_new
+    _art["draw_total_max"] = tm_new
+    _art["pattern_stats"] = pstats
+    if draw_branch:
+        _art["draw_weights"] = dw_new
+        _art["draw_bias"] = db_new
+        _art["draw_mu"] = mu_d_new
+        _art["draw_sd"] = sd_d_new
+        _art["draw_features"] = DRAW_FEATURES
     else:
-        log("아티팩트 없음: 최종 패턴 저장 생략")
+        for _k in ("draw_weights", "draw_bias", "draw_mu", "draw_sd", "draw_features"):
+            _art.pop(_k, None)
     log(f"FINAL best acc={best['acc']:.3f} ll={best['ll']:.4f} trial={best['trial']} ver={ver} total={(time.time() - _START) / 60:.1f}m")
-    if isinstance(_art, dict):
-        try:
-            _sv = eval_artifact(rows, train_s, valid_s, _art).get("valid", {})
-            if _sv.get("n"):
-                log(f"FINAL 서빙 기준 acc={_sv['acc']:.3f} ll={_sv['ll']:.4f} (n={int(_sv['n'])}) ← 후처리 반영·웹과 동일 기준")
-        except Exception as _ex:
-            log(f"FINAL 서빙 기준 acc 계산 실패: {_ex}")
+    try:
+        _sv = eval_artifact(rows, train_s, valid_s, _art).get("valid", {})
+        if _sv.get("n"):
+            log(f"FINAL 서빙 기준 acc={_sv['acc']:.3f} ll={_sv['ll']:.4f} (n={int(_sv['n'])}) ← 후처리 반영·웹과 동일 기준")
+    except Exception as _ex:
+        log(f"FINAL 서빙 기준 acc 계산 실패: {_ex}")
+    return _art
+
+
+def train_walk(league: str, ver: str, rows, train_s: set, valid_s: set, args):
+    ordered = sorted({str(r.get("season")) for r in rows if r.get("season") is not None})
+    nwin = len([s for s in ordered if s in train_s])
+    if nwin < 2 or len(ordered) < nwin + 1:
+        log("[walk] 시즌이 부족합니다 (학습수 2개 이상 + 대상 1개 이상 필요)")
+        return False
+    targets = ordered[nwin:]
+    base_end = ordered[nwin - 1]
+    log(f"[walk] 롤링 창={nwin}시즌 · 대상 {len(targets)}개: {', '.join(targets)}")
+    art = load_artifact_any(league, ver) or {}
+    prev_walk = art.get("walk") if isinstance(art.get("walk"), dict) else {}
+    prev_snaps = prev_walk.get("snapshots") if isinstance(prev_walk.get("snapshots"), dict) else {}
+    snaps = {}
+    total = len(targets) + 1
+    for i, S in enumerate(targets, 1):
+        idx = ordered.index(S)
+        window = ordered[max(0, idx - nwin):idx]
+        if len(window) < 2:
+            log(f"[walk] {S}: window 부족 → 건너뜀")
+            continue
+        tw, vw = window[:-1], [window[-1]]
+        old = prev_snaps.get(S)
+        if (isinstance(old, dict)
+                and sorted(str(x) for x in (old.get("train_seasons") or [])) == sorted(tw)
+                and sorted(str(x) for x in (old.get("valid") or [])) == sorted(vw)):
+            log(f"[walk {i}/{total}] {S} 스냅샷 재사용 (train={tw} valid={vw})")
+            snaps[S] = old
+            continue
+        log(f"[walk {i}/{total}] {S} 스냅샷 학습: train={tw} valid={vw}")
+        fields = train_autotune(league, ver, rows, set(tw), set(vw), args,
+                                persist_partial=False, resume=False)
+        if not isinstance(fields, dict):
+            log(f"[walk] {S} 스냅샷 학습 실패 → 중단")
+            return False
+        fields["train_end"] = vw[-1]
+        snaps[S] = fields
+        dump = {**art, "walk": {"enabled": True, "mode": "rolling", "window": nwin, "base_end": base_end, "snapshots": snaps}}
+        if not isinstance(dump.get("weights"), list):
+            dump.update({k: v for k, v in fields.items() if k != "train_end"})
+        save_artifact(league, ver, dump)
+        log(f"[walk {i}/{total}] {S} 스냅샷 저장 완료")
+
+    winf = ordered[-nwin:]
+    twf, vwf = winf[:-1], [winf[-1]]
+    log(f"[walk {total}/{total}] 다음 시즌 예측 스냅샷 학습: train={twf} valid={vwf}")
+    fin = train_autotune(league, ver, rows, set(twf), set(vwf), args,
+                         persist_partial=False, resume=False)
+    if not isinstance(fin, dict):
+        log("[walk] 최종 스냅샷 학습 실패 → 중단")
+        return False
+    out = {**art, **fin, "walk": {"enabled": True, "mode": "rolling", "window": nwin, "base_end": base_end, "snapshots": snaps}}
+    out["valid"] = sorted(snaps.keys())
+    save_artifact(league, ver, out)
+    log("[walk] 최종 아티팩트 저장 완료 (top-level = 다음 시즌 예측 스냅샷)")
+    try:
+        met = eval_artifact(rows, train_s, valid_s, out)
+        for split in ("train", "valid", "static"):
+            m = met.get(split, {})
+            if m.get("n"):
+                log(f"FINAL[{split}] acc={m['acc']:.3f} ll={m['ll']:.4f} n={int(m['n'])}")
+    except Exception as _ex:
+        log(f"[walk] FINAL 평가 실패: {_ex}")
+    return True
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Prematch 학습 단일 진입점")
+    ap.add_argument("--mode", default="train", choices=["train", "predict", "tune", "auto", "drawfit"])
+    ap.add_argument("--ui", dest="_ui_launch", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--tune", default="", help="조절용 시즌, 콤마 구분 (auto에서 비우면 미학습 전체)")
+    ap.add_argument("--league", required=True)
+    ap.add_argument("--train", default="", help="학습 시즌, 콤마 구분")
+    ap.add_argument("--valid", default="", help="검증 시즌, 콤마 구분 (비우면 미학습 전체)")
+    ap.add_argument("--test", default="", help="테스트 시즌 (참고용)")
+    ap.add_argument("--predict", default="", help="--mode predict일 때 대상 시즌")
+    ap.add_argument("--ver", required=True)
+    ap.add_argument("--fast", action="store_true", help="단발 학습 (autotune 없이 1회 fit)")
+    ap.add_argument("--new", action="store_true", help="기존 아티팩트 무시하고 처음부터")
+    ap.add_argument("--five", action="store_true", help="5피처(rank,power,val,form5,market) 모드 (ver 뒤에 -f5 자동 추가)")
+    ap.add_argument("--features", default="", help="임의 피처 선택, 콤마 구분 (예: rank,power,att). 지정 시 --five보다 우선")
+    ap.add_argument("--model", default="legacy", choices=["legacy"], help="모델 구조 (legacy 단일)")
+    ap.add_argument("--draw-w", type=float, default=0.0, help="무승부 가중 (선발 리콜가중 + 샘플가중, 0=끄기, 예: 0.5)")
+    ap.add_argument("--draw-boost", type=float, default=None, help="무 부스트 직접 지정 (valid 튜닝 생략, 예: 0.02)")
+    ap.add_argument("--draw-margin", type=float, default=None, help="부스트 접전 조건 직접 지정 (예: 0.12)")
+    ap.add_argument("--draw-total", type=float, default=None, help="부스트 저득점 조건 직접 지정 (예: 2.55)")
+    ap.add_argument("--recency-w", type=float, default=0.0, help="최신시즌 가중 (valid/tune 선발만, 0=끄기, 예: 1.0이면 최신시즌 2배)")
+    ap.add_argument("--trials", type=int, default=20)
+    ap.add_argument("--trial-step", type=float, default=0.0, help="새학습 가중치 격자 간격 (0=연속, 예: 0.01)")
+    ap.add_argument("--walk", action="store_true", help="워크포워드: 시즌별 확장윈도 스냅샷을 같은 파이프라인으로 학습")
+    ap.add_argument("--sweeps", type=int, default=6, help="tune 모드용 최대 sweep 수")
+    ap.add_argument("--seq-sweeps", type=int, default=1, help="auto 모드 순차 패스 수")
+    ap.add_argument("--random-rounds", type=int, default=0, help="auto 모드 랜덤 라운드 수 (0=무한)")
+    ap.add_argument("--max-minutes", type=float, default=0.0, help="auto 모드 시간 제한(분, 0=무제한)")
+    ap.add_argument("--noise", type=float, default=0.1, help="auto 랜덤 가중치 이동폭")
+    ap.add_argument("--hfa-noise", type=float, default=0.05, help="auto 랜덤 hfa 이동폭")
+    ap.add_argument("--auto-step", type=float, default=0.0, help="auto 랜덤 격자 간격(wmin/wmax 구간 스냅, 0=연속)")
+    ap.add_argument("--wmin", type=float, default=-10.0)
+    ap.add_argument("--wmax", type=float, default=10.0)
+    ap.add_argument("--auto-range", action="store_true", help="단발 fit 결과 범위로 trials 범위 자동 설정")
+    ap.add_argument("--range-pad", type=float, default=0.5, help="auto-range 여유폭")
+    ap.add_argument("--log-every", type=int, default=200, help="auto 랜덤 진행 로그 간격")
+    ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--jobs", type=int, default=1, help="새학습 워커(프로세스) 수 · 랜덤탐색 numba 스레드 수 (1=자동)")
+    ap.add_argument("--walk-auto", action="store_true", help="랜덤탐색을 워크포워드 스냅샷별로 순차 실행(각 스냅샷 검증 시즌 기준, 마지막에 최종 모델)")
+    ap.add_argument("--auto-targets", default="", help="랜덤탐색 대상 제한: 쉼표 구분 시즌/‘top’ (비우면 전체)")
+    ap.add_argument("--patience", type=int, default=0)
+    ap.add_argument("--no-halving", action="store_true", help="restart halving 끄기 (전 restart 끝까지 탐색)")
+    ap.add_argument("--no-cache", action="store_true")
+    args = ap.parse_args()
+    if args.mode in ("train", "auto", "tune", "drawfit") and not getattr(args, "_ui_launch", False):
+        print("학습·탐색은 GUI/웹에서만 실행할 수 있습니다 (CLI 직접 실행 비활성화)", flush=True)
+        sys.exit(2)
+    try:
+        import signal as _sigmod
+
+        def _on_sigterm(_signum, _frame):
+            raise KeyboardInterrupt()
+
+        _sigmod.signal(_sigmod.SIGTERM, _on_sigterm)
+    except (ValueError, RuntimeError, OSError, AttributeError):
+        pass
+
+    league, ver = args.league, args.ver
+    global _LEAGUE_TAG
+    _LEAGUE_TAG = league_tag(league)
+
+    if args.features:
+        names = [s.strip() for s in args.features.split(",") if s.strip()]
+        bad = [n for n in names if n not in FEATURES13]
+        assert bad == [] and len(names) >= 1, f"--features 오류: {bad or names} (가능: {','.join(FEATURES13)})"
+        seen = set()
+        uniq = [n for n in names if not (n in seen or seen.add(n))]
+        global FEATURES, SEL
+        FEATURES = list(uniq)
+        SEL = [FEATURES13.index(n) for n in uniq]
+        log(f"피처 선택: {','.join(FEATURES)} ver={ver}")
+    elif args.five:
+        FEATURES = list(FIVE)
+        SEL = list(FIVE_IDX)
+        if not ver.endswith("-f5"):
+            ver = ver + "-f5"
+        log(f"5피처 모드: {','.join(FEATURES)} ver={ver}")
+
+    if args.mode == "predict":
+        assert args.predict, "--predict 필요"
+        art = load_artifact_any(league, ver)
+        if not isinstance(art, dict):
+            log(f"아티팩트 없음: {model_ref(league, ver)}")
+            return
+        _want = [s.strip() for s in args.predict.split(",") if s.strip()]
+        _, matches = load_seasons(league, _want, use_cache=not args.no_cache)
+        pred_s = set(_want)
+        targets = [r for r in matches if str(r["season"]) in pred_s]
+        _acache = {}
+
+        def _px(r):
+            season = str(r.get("season"))
+            a = _acache.get(season)
+            if a is None:
+                a = _artifact_for_season(art, season)
+                _acache[season] = a
+            mu, sd = a.get("mu"), a.get("sd")
+            e = a.get("emphasis", [1.0] * len(a.get("features", [])))
+            tau, taus, _w, alpha = _pat_params_from_art(a)
+            boost, margin, total_max = _boost_params_from_art(a)
+            pats = a.get("patterns")
+            T = a.get("T", 1.0)
+            w, hfa, d = a["weights"], a["hfa"], a["draw_prior"]
+            dw = a.get("draw_weights")
+            db = a.get("draw_bias", 0.0)
+            mu_d, sd_d = a.get("draw_mu"), a.get("draw_sd")
+            cap = a.get("contrib_cap")
+            x = row_features(r)
+            if mu and sd:
+                x = apply_std(x, mu, sd)
+            xe = apply_emphasis(x, e)
+            xd_raw = draw_row_features(r)
+            if mu_d and sd_d:
+                xd = std_vec_row(xd_raw, mu_d, sd_d)
+            else:
+                xd = xd_raw
+            return served_proba(xe, xd, w, hfa, d, dw, db, cap, pats, tau, alpha, w, T,
+                                boost, margin, total_max,
+                                xd_raw[2] if len(xd_raw) > 2 else 99.0,
+                                xd_raw[3] if len(xd_raw) > 3 else 0.0)
+        probas = [_px(r) for r in targets]
+        n, hit = len(targets), 0
+        for r, p in zip(targets, probas):
+            try:
+                hs, aws = float(r.get("home_score")), float(r.get("away_score"))
+            except (TypeError, ValueError):
+                continue
+            actual = 0 if hs > aws else (1 if hs == aws else 2)
+            if p.index(max(p)) == actual:
+                hit += 1
+        log(f"predictions recomputed on the fly (no DB write): {n} rows, acc={hit / max(n, 1):.3f}")
+        return
+
+    if args.mode == "tune":
+        assert args.tune and args.ver, "--tune과 --ver 필요"
+        tune_s = {s.strip() for s in args.tune.split(",") if s.strip()}
+        tune_weights(league, ver, tune_s, args.sweeps, use_cache=not args.no_cache,
+                     draw_w=args.draw_w, recency_w=args.recency_w)
+        return
+
+    if args.mode == "drawfit":
+        assert args.ver, "--ver 필요"
+        extra_s = {s.strip() for s in (args.tune or "").split(",") if s.strip()}
+        drawfit(league, ver, extra_s, use_cache=not args.no_cache)
+        return
+
+    if args.mode == "auto":
+        assert args.ver, "--ver 필요"
+        if args.walk_auto:
+            auto_tune_walk(league, ver, args)
+            return
+        tune_s = {s.strip() for s in (args.tune or "").split(",") if s.strip()}
+        auto_tune(league, ver, tune_s, seq_sweeps=args.seq_sweeps,
+                  random_rounds=args.random_rounds, max_minutes=args.max_minutes,
+                  noise=args.noise, hfa_noise=args.hfa_noise,
+                  wmin=args.wmin, wmax=args.wmax, log_every=args.log_every,
+                  seed=args.seed, fresh=args.new, use_cache=not args.no_cache,
+                  grid_step=args.auto_step, draw_w=args.draw_w, recency_w=args.recency_w,
+                  jobs=args.jobs)
+        return
+
+    assert args.train, "--train 필요"
+    train_s = {s.strip() for s in args.train.split(",") if s.strip()}
+    raw_valid = args.valid.strip()
+    if raw_valid == "" or raw_valid.lower() in ("auto", "all", "*"):
+        valid_s = all_nontrain_seasons(league, train_s)
+        log(f"검증시즌 자동선택(미학습): {sorted(valid_s)}")
+    else:
+        valid_s = {s.strip() for s in raw_valid.split(",") if s.strip()}
+    if not valid_s:
+        log("검증시즌 없음 (미학습 시즌이 비어있음). 종료")
+        sys.exit(2)
+    overlap = valid_s & train_s
+    if overlap and train_s != valid_s:
+        log("테스트 시즌이 학습시즌과 겹침. 종료")
+        sys.exit(2)
+    if args.model != "legacy":
+        log("--model은 legacy만 지원 (softmax 제거됨)")
+        sys.exit(2)
+
+    _, rows = load_seasons(league, sorted(train_s | valid_s | ({args.test} if args.test else set())),
+                           use_cache=not args.no_cache)
+
+    # ---- 워크포워드(확장윈도) 체인
+    if args.walk:
+        if args.fast:
+            log("워크포워드는 --fast와 함께 사용할 수 없습니다")
+            sys.exit(2)
+        train_walk(league, ver, rows, train_s, valid_s, args)
+        return
+
+    # ---- 단발 모드
+    if args.fast:
+        artifact, metrics = train_model(rows, train_s, valid_s, ver, args.test,
+                                        draw_w=args.draw_w, recency_w=args.recency_w,
+                                        draw_boost=args.draw_boost, draw_margin=args.draw_margin,
+                                        draw_total=args.draw_total)
+        for split in ("train", "valid", "test"):
+            m = metrics.get(split, {})
+            if m.get("n"):
+                log(f"[{split}] n={m['n']} acc={m['acc']:.3f} logloss={m['ll']:.4f}")
+        if not args.new:
+            old = load_artifact_any(league, ver)
+            if isinstance(old, dict):
+                old_met = eval_artifact(rows, train_s, valid_s, old)
+                new_acc = metrics.get("valid", {}).get("acc", 0.0)
+                old_acc = old_met.get("valid", {}).get("acc", 0.0)
+                log(f"기존 {ver}: valid acc={old_acc:.3f} / 신규: valid acc={new_acc:.3f}")
+                if old_acc > new_acc:
+                    log("기존 유지 (덮어쓰기 안 함). --new로 강제 저장 가능")
+                    return
+        save_artifact(league, ver, artifact)
+        w = artifact["weights"]
+        log(f"FINAL W {{{', '.join(f'{n}:{v:+.3f}' for n, v in zip(FEATURES, w))}}} T={artifact['T']}")
+        return
+
+    # ---- autotune 모드 (단일 window)
+    art = train_autotune(league, ver, rows, train_s, valid_s, args)
+    if isinstance(art, dict):
+        save_artifact(league, ver, art)
+    return
 
 
 if __name__ == "__main__":
