@@ -11,7 +11,9 @@ export type ColumnId =
   | "away"
   | "result"
   | "pred"
-  | "predRatio"
+  | "predHome"
+  | "predDraw"
+  | "predAway"
   | "power"
   | "h2h"
   | "condition"
@@ -38,10 +40,18 @@ export type ColumnId =
   | "recent18"
   | "recent19"
   | "recent20"
-  | "crown"
-  | "bet365"
-  | "onexbet"
-  | "sameOdds"
+  | "bet365Home"
+  | "bet365Draw"
+  | "bet365Away"
+  | "crownHome"
+  | "crownDraw"
+  | "crownAway"
+  | "onexbetHome"
+  | "onexbetDraw"
+  | "onexbetAway"
+  | "oddsHome"
+  | "oddsDraw"
+  | "oddsAway"
   | "formation"
   | "aGoals"
   | "aConceded"
@@ -93,13 +103,16 @@ export const FIELD_GROUPS: { id: string; label: string; cols: ColumnId[] }[] = [
   { id: "power", label: "전력대비", cols: ["power", "h2h", "condition", "attack", "defense", "value"] },
   { id: "recent", label: "최근승무패", cols: ["recent1", "recent2", "recent3", "recent4", "recent5", "recent6", "recent7", "recent8", "recent9", "recent10", "recent11", "recent12", "recent13", "recent14", "recent15", "recent16", "recent17", "recent18", "recent19", "recent20"] },
   { id: "recentform", label: "최근폼", cols: ["rf1", "rf2", "rf3", "rf4", "rf5", "rf6", "rf7", "rf8", "rf9", "rf10", "rf11", "rf12", "rf13", "rf14", "rf15", "rf16", "rf17", "rf18", "rf19", "rf20"] },
-  { id: "odds", label: "배당률", cols: ["bet365", "crown", "onexbet"] },
+  { id: "odds", label: "배당률", cols: ["bet365Home", "bet365Draw", "bet365Away", "crownHome", "crownDraw", "crownAway", "onexbetHome", "onexbetDraw", "onexbetAway"] },
   { id: "teaminfo", label: "팀정보", cols: ["aGoals", "aConceded", "aShots", "aCorners", "aYellow", "aFouls", "aPossession"] },
   { id: "goaltime", label: "득실점 시간대", cols: ["g15", "g30", "g45", "g60", "g75", "g90"] },
   { id: "halffull", label: "HT-FT", cols: ["hWW", "hDW", "hLW", "hWD", "hDD", "hLD", "hWL", "hDL", "hLL", "hfMatches"] },
 ];
 
-export const SINGLE_COLUMNS: ColumnId[] = ["pred", "predRatio", "result", "sameOdds", "formation"];
+export const SINGLE_COLUMNS: ColumnId[] = [
+  "pred", "predHome", "predDraw", "predAway", "result",
+  "oddsHome", "oddsDraw", "oddsAway", "formation",
+];
 
 export const COLUMNS: { id: ColumnId; label: string }[] = [
   { id: "season", label: "시즌" },
@@ -110,7 +123,9 @@ export const COLUMNS: { id: ColumnId; label: string }[] = [
   { id: "away", label: "원정" },
   { id: "result", label: "결과" },
   { id: "pred", label: "예측" },
-  { id: "predRatio", label: "예측비율" },
+  { id: "predHome", label: "예측 승" },
+  { id: "predDraw", label: "예측 무" },
+  { id: "predAway", label: "예측 패" },
   { id: "power", label: "전력" },
   { id: "h2h", label: "H2H" },
   { id: "condition", label: "컨디션" },
@@ -157,10 +172,18 @@ export const COLUMNS: { id: ColumnId; label: string }[] = [
   { id: "rf18", label: "최근폼18" },
   { id: "rf19", label: "최근폼19" },
   { id: "rf20", label: "최근폼20" },
-  { id: "bet365", label: "Bet365" },
-  { id: "crown", label: "Crown" },
-  { id: "onexbet", label: "1XBet" },
-  { id: "sameOdds", label: "동일배당률" },
+  { id: "bet365Home", label: "B365 승" },
+  { id: "bet365Draw", label: "B365 무" },
+  { id: "bet365Away", label: "B365 패" },
+  { id: "crownHome", label: "Crown 승" },
+  { id: "crownDraw", label: "Crown 무" },
+  { id: "crownAway", label: "Crown 패" },
+  { id: "onexbetHome", label: "1XBet 승" },
+  { id: "onexbetDraw", label: "1XBet 무" },
+  { id: "onexbetAway", label: "1XBet 패" },
+  { id: "oddsHome", label: "배당 승" },
+  { id: "oddsDraw", label: "배당 무" },
+  { id: "oddsAway", label: "배당 패" },
   { id: "formation", label: "포메이션" },
   { id: "aGoals", label: "득점" },
   { id: "aConceded", label: "실점" },
@@ -189,9 +212,43 @@ export const COLUMNS: { id: ColumnId; label: string }[] = [
 
 const CELL = "whitespace-nowrap border-t border-zinc-400 px-4 py-1.5 text-center dark:border-zinc-600";const MONO_CELL =
   "whitespace-nowrap border-t border-zinc-400 px-4 py-1.5 font-mono text-xs text-center text-zinc-900 dark:border-zinc-600 dark:text-white";
-const PRED_IDS: ReadonlySet<ColumnId> = new Set(["pred", "predRatio", "result"]);
+const PRED_IDS: ReadonlySet<ColumnId> = new Set(["pred", "predHome", "predDraw", "predAway", "result"]);
 
 type FilterCol = "season" | "round" | "home" | "away" | "result" | "pred";
+
+type OddsCol =
+  | "bet365Home"
+  | "bet365Draw"
+  | "bet365Away"
+  | "crownHome"
+  | "crownDraw"
+  | "crownAway"
+  | "onexbetHome"
+  | "onexbetDraw"
+  | "onexbetAway";
+
+const ODDS_COL_MAP: Record<OddsCol, { company: "crown" | "bet365" | "one_x_bet"; part: "home" | "draw" | "away" }> = {
+  bet365Home: { company: "bet365", part: "home" },
+  bet365Draw: { company: "bet365", part: "draw" },
+  bet365Away: { company: "bet365", part: "away" },
+  crownHome: { company: "crown", part: "home" },
+  crownDraw: { company: "crown", part: "draw" },
+  crownAway: { company: "crown", part: "away" },
+  onexbetHome: { company: "one_x_bet", part: "home" },
+  onexbetDraw: { company: "one_x_bet", part: "draw" },
+  onexbetAway: { company: "one_x_bet", part: "away" },
+};
+
+function isOddsCol(id: ColumnId): id is OddsCol {
+  return id in ODDS_COL_MAP;
+}
+
+function oddsNumeric(m: SoccerMatch, col: OddsCol): number | null {
+  const { company, part } = ODDS_COL_MAP[col];
+  const v = m.odds?.[company]?.win_draw_lose?.[part] ?? null;
+  const pick = v?.initial ?? v?.live ?? null;
+  return typeof pick === "number" && Number.isFinite(pick) ? pick : null;
+}
 
 function predPickLabel(m: SoccerMatch): string {
   const p = m.pred;
@@ -332,10 +389,22 @@ function renderCell(
           <PredCell m={m} />
         </td>
       );
-    case "predRatio":
+    case "predHome":
       return (
         <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>
-          {formatPredRatio(m)}
+          {formatPredPct(m, "home")}
+        </td>
+      );
+    case "predDraw":
+      return (
+        <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>
+          {formatPredPct(m, "draw")}
+        </td>
+      );
+    case "predAway":
+      return (
+        <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>
+          {formatPredPct(m, "away")}
         </td>
       );
     case "result":
@@ -516,14 +585,30 @@ function renderCell(
       return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatRecentForm(m, 19)}</td>;
     case "rf20":
       return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatRecentForm(m, 20)}</td>;
-    case "crown":
-      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatOdds(m.odds, "crown")}</td>;
-    case "bet365":
-      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatOdds(m.odds, "bet365")}</td>;
-    case "onexbet":
-      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatOdds(m.odds, "one_x_bet")}</td>;
-    case "sameOdds":
-      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatSameOdds(m.same_odds)}</td>;
+    case "bet365Home":
+      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatOddsPart(m.odds, "bet365", "home")}</td>;
+    case "bet365Draw":
+      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatOddsPart(m.odds, "bet365", "draw")}</td>;
+    case "bet365Away":
+      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatOddsPart(m.odds, "bet365", "away")}</td>;
+    case "crownHome":
+      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatOddsPart(m.odds, "crown", "home")}</td>;
+    case "crownDraw":
+      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatOddsPart(m.odds, "crown", "draw")}</td>;
+    case "crownAway":
+      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatOddsPart(m.odds, "crown", "away")}</td>;
+    case "onexbetHome":
+      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatOddsPart(m.odds, "one_x_bet", "home")}</td>;
+    case "onexbetDraw":
+      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatOddsPart(m.odds, "one_x_bet", "draw")}</td>;
+    case "onexbetAway":
+      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatOddsPart(m.odds, "one_x_bet", "away")}</td>;
+    case "oddsHome":
+      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatSameOddsPart(m.same_odds, "home")}</td>;
+    case "oddsDraw":
+      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatSameOddsPart(m.same_odds, "draw")}</td>;
+    case "oddsAway":
+      return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatSameOddsPart(m.same_odds, "away")}</td>;
     case "formation":
       return <td style={borderStyle} className={`${MONO_CELL} ${borderCls}`}>{formatFormation(m)}</td>;
     case "aGoals":
@@ -584,8 +669,9 @@ export function SoccerMatchesTable({
   leagueNames?: Record<string, string>;
   hidden?: ColumnId[];
 }) {
-  const [openFilter, setOpenFilter] = useState<FilterCol | null>(null);
+  const [openFilter, setOpenFilter] = useState<FilterCol | OddsCol | null>(null);
   const [colFilters, setColFilters] = useState<Partial<Record<FilterCol, string[] | null>>>({});
+  const [oddsFilters, setOddsFilters] = useState<Partial<Record<OddsCol, { min: string; max: string }>>>({});
 
   const filterOptions = useMemo(
     () => ({
@@ -610,6 +696,7 @@ export function SoccerMatchesTable({
   useEffect(() => {
     queueMicrotask(() => {
       setColFilters(latestSeason ? { season: [latestSeason] } : {});
+      setOddsFilters({});
       setOpenFilter(null);
     });
   }, [leagueKey, latestSeason]);
@@ -622,10 +709,6 @@ export function SoccerMatchesTable({
     return colFilters[col] ?? null;
   }
 
-  function openFilterPanel(col: FilterCol) {
-    setOpenFilter(col);
-  }
-
   function setColFilter(col: FilterCol, sel: string[] | null) {
     setColFilters((prev) => ({ ...prev, [col]: sel }));
   }
@@ -636,12 +719,22 @@ export function SoccerMatchesTable({
     setColFilter(col, sel.length === all.length ? null : sel);
   }
 
-  const visibleRows = rows.filter((m) =>
-    (Object.keys(filterOptions) as FilterCol[]).every((col) => {
+  const visibleRows = rows.filter((m) => {
+    const catOk = (Object.keys(filterOptions) as FilterCol[]).every((col) => {
       const sel = selOf(col);
       return !sel || sel.includes(filterColValue(col, m));
-    })
-  );
+    });
+    if (!catOk) return false;
+    for (const [col, r] of Object.entries(oddsFilters) as [OddsCol, { min: string; max: string }][]) {
+      const v = oddsNumeric(m, col);
+      if (v == null) return false;
+      const mn = Number.parseFloat(r.min);
+      const mx = Number.parseFloat(r.max);
+      if (Number.isFinite(mn) && v < mn) return false;
+      if (Number.isFinite(mx) && v > mx) return false;
+    }
+    return true;
+  });
   const groupOf: number[] = [];
   {
     let g = 0;
@@ -660,9 +753,11 @@ export function SoccerMatchesTable({
           <tr>
             {cols.map((c, ci) => {
               const frame = frameClasses(cols, ci, { header: true });
-              const fid = isFilterCol(c.id) ? c.id : null;
-              const sel = fid ? selOf(fid) : null;
-              const active = sel !== null;
+              const catId = isFilterCol(c.id) ? c.id : null;
+              const oddsId = isOddsCol(c.id) ? c.id : null;
+              const fid = catId ?? oddsId;
+              const sel = catId ? selOf(catId) : null;
+              const active = catId ? sel !== null : oddsId ? oddsFilters[oddsId] != null : false;
               return (
                 <th
                   key={c.id}
@@ -673,7 +768,7 @@ export function SoccerMatchesTable({
                     <>
                       {c.label}
                       <button
-                        onClick={() => openFilterPanel(fid)}
+                        onClick={() => setOpenFilter(fid)}
                         aria-label={`${c.label} 필터`}
                         className={`absolute top-1/2 right-1 -translate-y-1/2 rounded p-1 hover:bg-zinc-200 dark:hover:bg-zinc-700 ${
                           active ? "text-blue-600 dark:text-blue-400" : "text-zinc-400 dark:text-zinc-500"
@@ -718,17 +813,45 @@ export function SoccerMatchesTable({
         </tbody>
         </table>
       {openFilter && (
-        <FilterModal
-          key={openFilter}
-          title={COLUMNS.find((c) => c.id === openFilter)?.label ?? ""}
-          values={filterOptions[openFilter]}
-          initial={selOf(openFilter) ?? filterOptions[openFilter]}
-          onApply={(sel) => {
-            commitDraft(openFilter, sel);
-            setOpenFilter(null);
-          }}
-          onCancel={() => setOpenFilter(null)}
-        />
+        isFilterCol(openFilter) ? (
+          <FilterModal
+            key={openFilter}
+            title={COLUMNS.find((c) => c.id === openFilter)?.label ?? ""}
+            values={filterOptions[openFilter]}
+            initial={selOf(openFilter) ?? filterOptions[openFilter]}
+            onApply={(sel) => {
+              commitDraft(openFilter, sel);
+              setOpenFilter(null);
+            }}
+            onCancel={() => setOpenFilter(null)}
+          />
+        ) : (
+          <OddsFilterModal
+            key={openFilter}
+            title={COLUMNS.find((c) => c.id === openFilter)?.label ?? ""}
+            initial={oddsFilters[openFilter] ?? { min: "", max: "" }}
+            onApply={(r) => {
+              setOddsFilters((prev) => {
+                const next = { ...prev };
+                const mn = r.min.trim();
+                const mx = r.max.trim();
+                if (mn === "" && mx === "") delete next[openFilter];
+                else next[openFilter] = { min: mn, max: mx };
+                return next;
+              });
+              setOpenFilter(null);
+            }}
+            onAll={() => {
+              setOddsFilters((prev) => {
+                const next = { ...prev };
+                delete next[openFilter];
+                return next;
+              });
+              setOpenFilter(null);
+            }}
+            onCancel={() => setOpenFilter(null)}
+          />
+        )
       )}
     </div>
   );
@@ -826,6 +949,88 @@ function FilterModal({
   );
 }
 
+function OddsFilterModal({
+  title,
+  initial,
+  onApply,
+  onAll,
+  onCancel,
+}: {
+  title: string;
+  initial: { min: string; max: string };
+  onApply: (r: { min: string; max: string }) => void;
+  onAll: () => void;
+  onCancel: () => void;
+}) {
+  const [min, setMin] = useState(initial.min);
+  const [max, setMax] = useState(initial.max);
+  useEffect(() => {
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, []);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+      <div className="w-full max-w-xs rounded-2xl border border-zinc-200 bg-white p-4 shadow-xl dark:border-zinc-700 dark:bg-zinc-900">
+        <div className="flex items-center justify-between">
+          <span className="text-sm font-semibold">{title} 필터</span>
+          <button
+            onClick={onCancel}
+            aria-label="필터 닫기"
+            className="rounded p-1 text-zinc-400 hover:bg-zinc-100 dark:hover:bg-zinc-800"
+          >
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+              <path d="M3.5 3.5l9 9M12.5 3.5l-9 9" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <label className="text-xs text-zinc-500">
+            최소
+            <input
+              value={min}
+              onChange={(e) => setMin(e.target.value)}
+              inputMode="decimal"
+              placeholder="예: 1.80"
+              className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2 py-1.5 font-mono text-sm dark:border-zinc-700 dark:bg-zinc-950"
+            />
+          </label>
+          <label className="text-xs text-zinc-500">
+            최대
+            <input
+              value={max}
+              onChange={(e) => setMax(e.target.value)}
+              inputMode="decimal"
+              placeholder="예: 2.20"
+              className="mt-1 w-full rounded-lg border border-zinc-200 bg-white px-2 py-1.5 font-mono text-sm dark:border-zinc-700 dark:bg-zinc-950"
+            />
+          </label>
+        </div>
+        <p className="mt-2 text-[11px] text-zinc-400">
+          한쪽만 입력하면 열린 범위, 같은 값이면 해당 배당만 표시됩니다.
+        </p>
+        <div className="mt-3 flex gap-2">
+          <button
+            onClick={onAll}
+            className="flex-1 rounded-xl border border-zinc-300 py-2 text-sm text-zinc-600 dark:border-zinc-700 dark:text-zinc-400"
+          >
+            전체
+          </button>
+          <button
+            onClick={() => onApply({ min, max })}
+            className="flex-1 rounded-xl bg-blue-600 py-2 text-sm font-medium text-white hover:brightness-110 dark:bg-blue-400 dark:text-black"
+          >
+            적용
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function parseScore(v: string | null | undefined): number | null {
   if (v == null || v === "") return null;
   const n = Number(v);
@@ -880,11 +1085,10 @@ function formatPred(m: SoccerMatch): string {
   return `${cands[0][0]} ${Math.round(cands[0][1] * 100)}%`;
 }
 
-function formatPredRatio(m: SoccerMatch): string {
+function formatPredPct(m: SoccerMatch, part: "home" | "draw" | "away"): string {
   const p = m.pred;
   if (!p) return "-";
-  const pct = (v: number) => `${Math.round(v * 100)}%`;
-  return `${pct(p.home)} / ${pct(p.draw)} / ${pct(p.away)}`;
+  return `${Math.round(p[part] * 100)}%`;
 }
 
 function formatFormation(m: SoccerMatch): string {
@@ -938,15 +1142,16 @@ function formatStrength(m: SoccerMatch, key: keyof TeamStrength): string {
   return `${home ?? "-"} : ${away ?? "-"}`;
 }
 
-function formatOdds(odds: MatchOdds | undefined, company: "crown" | "bet365" | "one_x_bet"): string {
+function formatOddsPart(
+  odds: MatchOdds | undefined,
+  company: "crown" | "bet365" | "one_x_bet",
+  part: "home" | "draw" | "away"
+): string {
   const wdl: CompanyOdds = odds?.[company] ?? null;
   const pick = (v: { live?: number | null; current?: number | null; initial?: number | null } | null | undefined) =>
     v?.initial ?? v?.live ?? null;
-  const home = pick(wdl?.win_draw_lose?.home);
-  const draw = pick(wdl?.win_draw_lose?.draw);
-  const away = pick(wdl?.win_draw_lose?.away);
-  if (home == null && draw == null && away == null) return "-";
-  return `${home ?? "-"} / ${draw ?? "-"} / ${away ?? "-"}`;
+  const v = pick(wdl?.win_draw_lose?.[part]);
+  return v == null ? "-" : String(v);
 }
 
 function formatRecentForm(m: SoccerMatch, n: number): string {
@@ -961,10 +1166,10 @@ function formatRecentForm(m: SoccerMatch, n: number): string {
   return `${home ?? "-"} : ${away ?? "-"}`;
 }
 
-function formatSameOdds(same: SameOdds | undefined): string {
+function formatSameOddsPart(same: SameOdds | undefined, part: "home" | "draw" | "away"): string {
   const wdl = same?.win_draw_lose ?? same?.same_odds?.win_draw_lose ?? null;
-  if (!wdl || (wdl.home == null && wdl.draw == null && wdl.away == null)) return "-";
-  return `${wdl.home ?? "-"} / ${wdl.draw ?? "-"} / ${wdl.away ?? "-"}`;
+  const v = wdl?.[part];
+  return v == null ? "-" : String(v);
 }
 
 function WdlCell({ r }: { r: H2hRange | undefined }) {
