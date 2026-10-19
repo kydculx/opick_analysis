@@ -61,7 +61,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ ok: false, error: "league, ver, tune이 필요" }, { status: 400 });
   }
   const five = body.five === true;
-  const argv = ["--mode", "grid", "--league", league, "--ver", ver, "--tune", tune.join(",")];
+  const argv = ["--mode", "grid", "--league", league, "--ver", ver, "--tune", tune.join(","), "--ui"];
   const step = Number(body.grid_step);
   if (Number.isFinite(step) && step > 0) argv.push("--grid-step", String(step));
   if (five) argv.push("--five");
