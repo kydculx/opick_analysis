@@ -186,10 +186,6 @@ export function DashboardExplorer() {
       draw_boost?: number | null;
       draw_close_margin?: number | null;
       draw_total_max?: number | null;
-      grid_params?: {
-        grid_step?: unknown; jobs?: unknown; batch?: unknown;
-        draw_w?: unknown; recency_w?: unknown; wmin?: unknown; wmax?: unknown;
-      } | null;
       pattern_stats: Record<string, { rank: number; freq: number; acc: number }[]> | null;
       xgb?: XgbSlim | null;
     } | null;
@@ -201,18 +197,7 @@ export function DashboardExplorer() {
   const [tuning, setTuning] = useState(false);
   const [tuneActive, setTuneActive] = useState<number | null>(null);
   const [tuneInfo, setTuneInfo] = useState<{ sweeps: number; base: number; best: number; stale: number } | null>(null);
-  const gridRef = useRef(false);
-  const gridJobRef = useRef<string | null>(null);
-  const gridBestRef = useRef(-1);
-  const [gridding, setGridding] = useState(false);
-  const [gridInfo, setGridInfo] = useState<{ done: number; total: number; best: number | null; sweep: number | null; curAcc: number | null } | null>(null);
-  const [gridLive, setGridLive] = useState<{ weights: number[]; hfa: number; acc: number } | null>(null);
-  const [gridStepText, setGridStepText] = useState("0.01");
-  const [gridJobsText, setGridJobsText] = useState("4");
-  const [gridWminText, setGridWminText] = useState("-3.0");
-  const [gridWmaxText, setGridWmaxText] = useState("3.0");
-  const [gridDrawWText, setGridDrawWText] = useState("0");
-  const [gridRecWText, setGridRecWText] = useState("0");
+  const [nudgeStepText, setNudgeStepText] = useState("0.01");
   const [modelApplied, setModelApplied] = useState<Record<string, boolean>>({});
   const [minOddsText, setMinOddsText] = useState("1.5");
   const FEATURE_KO: Record<string, string> = {
@@ -534,25 +519,6 @@ export function DashboardExplorer() {
           if (Array.isArray(ws)) {
             setWOrder(ws.map((_, i) => i).sort((a, b) => Math.abs((ws as number[])[b]) - Math.abs((ws as number[])[a])));
           }
-          const gp = j.detail?.grid_params as Record<string, unknown> | null | undefined;
-          if (gp && typeof gp === "object") {
-            const num = (v: unknown, fb: string) => {
-              const n = Number(v);
-              return Number.isFinite(n) ? String(n) : fb;
-            };
-            if (gp.grid_step !== undefined) { setGridStepText(num(gp.grid_step, gridStepText)); applied.step = true; }
-            if (gp.jobs !== undefined) { setGridJobsText(num(gp.jobs, gridJobsText)); applied.jobs = true; }
-            if (gp.draw_w !== undefined) { setGridDrawWText(num(gp.draw_w, gridDrawWText)); applied.drawW = true; }
-            if (gp.recency_w !== undefined) { setGridRecWText(num(gp.recency_w, gridRecWText)); applied.recW = true; }
-            if (gp.wmin !== undefined) { setGridWminText(num(gp.wmin, gridWminText)); applied.wmin = true; }
-            if (gp.wmax !== undefined) { setGridWmaxText(num(gp.wmax, gridWmaxText)); applied.wmax = true; }
-          }
-          if (!applied.step) setGridStepText("0.01");
-          if (!applied.jobs) setGridJobsText("4");
-          if (!applied.drawW) setGridDrawWText("0");
-          if (!applied.recW) setGridRecWText("0");
-          if (!applied.wmin) setGridWminText("-3.0");
-          if (!applied.wmax) setGridWmaxText("3.0");
           const db = j.detail as {
             draw_boost?: unknown; draw_close_margin?: unknown; draw_total_max?: unknown;
           } | null | undefined;
@@ -684,7 +650,7 @@ export function DashboardExplorer() {
   }, [drawBoostText, drawMarginText, drawTotalText]);
 
   function nudgeStep(): number {
-    const s = Number.parseFloat(gridStepText);
+    const s = Number.parseFloat(nudgeStepText);
     return Number.isFinite(s) && s > 0 ? s : 0.01;
   }
 
@@ -714,10 +680,6 @@ export function DashboardExplorer() {
     if (tuningRef.current) {
       tuningRef.current = false;
       setTuning(false);
-      return;
-    }
-    if (gridRef.current) {
-      setError("전수탐색 중에는 랜덤을 시작할 수 없습니다");
       return;
     }
     const d = modelDetail?.detail;
@@ -986,150 +948,6 @@ export function DashboardExplorer() {
     setTuning(false);
   }
 
-  async function gridTune() {
-    if (gridRef.current) {
-      gridRef.current = false;
-      setGridding(false);
-      setGridLive(null);
-      if (gridJobRef.current) {
-        fetch(`/api/grid?jobId=${encodeURIComponent(gridJobRef.current)}`, { method: "DELETE" }).catch(() => {});
-      }
-      return;
-    }
-    if (tuningRef.current) {
-      setError("랜덤 조절 중에는 전수탐색을 시작할 수 없습니다");
-      return;
-    }
-    const d = modelDetail?.detail;
-    if (!d || !league || !selVer) return;
-    if (!d.weights) {
-      setError("가중치 없는 모델은 직접미세조정 미지원");
-      return;
-    }
-    const train = new Set(d.train_seasons);
-    const tune = [...new Set(rawMatches.filter((m) => {
-      if (train.has(String(m.season))) return false;
-      return parseScoreLocal(m.home_score) != null && parseScoreLocal(m.away_score) != null;
-    }).map((m) => String(m.season)))].sort();
-    if (tune.length === 0) {
-      setError("조절할 미학습 시즌 경기가 없습니다");
-      return;
-    }
-    const five = selVer.includes("-f5");
-    const step = parseFloat(gridStepText);
-    if (!Number.isFinite(step) || step < 0.001 || step > 2) {
-      setError("축간격은 0.001~2 사이 숫자로 입력하세요");
-      return;
-    }
-    const jobs = Math.floor(Number(gridJobsText));
-    if (!Number.isFinite(jobs) || jobs < 1) {
-      setError("jobs는 1 이상 정수로 입력하세요");
-      return;
-    }
-    const wmin = Number(gridWminText);
-    const wmax = Number(gridWmaxText);
-    if (!Number.isFinite(wmin) || !Number.isFinite(wmax) || !(wmin < wmax)) {
-      setError("wmin < wmax 숫자로 입력하세요");
-      return;
-    }
-    const drawW = Number(gridDrawWText);
-    if (!Number.isFinite(drawW) || drawW < 0) {
-      setError("무가중은 0 이상 숫자로 입력하세요");
-      return;
-    }
-    const recW = Number(gridRecWText);
-    if (!Number.isFinite(recW) || recW < 0) {
-      setError("최근가중은 0 이상 숫자로 입력하세요");
-      return;
-    }
-    gridRef.current = true;
-    setGridding(true);
-    setGridInfo(null);
-    setGridLive(null);
-    gridBestRef.current = -1;
-    const nw = d.weights.length;
-    const refreshGridView = async (preview: boolean): Promise<void> => {
-      try {
-        const j = await fetch(`/api/models?league=${encodeURIComponent(league)}&ver=${encodeURIComponent(selVer)}`, { cache: "no-store" }).then((r) => r.json());
-        if (!j.ok || !j.detail) return;
-        const ws = j.detail?.weights;
-        setModelDetail({ model_type: j.model_type, detail: j.detail });
-        if (Array.isArray(ws)) {
-          setWOrder(ws.map((_: number, i: number) => i).sort((a: number, b: number) => Math.abs((ws as number[])[b]) - Math.abs((ws as number[])[a])));
-        }
-        if (preview && !tuningRef.current && !tweakedRef.current && Array.isArray(ws)) {
-          previewWith(ws as number[], typeof j.detail?.hfa === "number" ? j.detail.hfa : 0);
-        }
-      } catch {
-      }
-    };
-    try {
-      const res = await fetch("/api/grid", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          league, ver: selVer, tune, five, jobs, grid_step: step,
-          batch: 4096, wmin, wmax, draw_w: drawW, recency_w: recW,
-        }),
-      }).then((r) => r.json());
-      if (!res.ok) {
-        gridRef.current = false;
-        setGridding(false);
-        setError("전수탐색 시작 실패");
-        return;
-      }
-      gridJobRef.current = res.jobId as string;
-      const qs = `jobId=${encodeURIComponent(res.jobId as string)}&league=${encodeURIComponent(league)}&ver=${encodeURIComponent(selVer)}${five ? "&five=1" : ""}`;
-      for (let i = 0; i < 648000 && gridRef.current; i++) {
-        await new Promise((r) => setTimeout(r, 16));
-        if (!gridRef.current) break;
-        try {
-          const st = await fetch(`/api/grid?${qs}`, { cache: "no-store" }).then((r) => r.json());
-          if (st.ok && st.progress) {
-            const pg = st.progress as {
-              done: number; total: number; best: number | null;
-              sweep?: number | null; curW?: number[] | null;
-              curHfa?: number | null; curAcc?: number | null;
-            };
-            setGridInfo({
-              done: pg.done, total: pg.total, best: pg.best,
-              sweep: typeof pg.sweep === "number" ? pg.sweep : null,
-              curAcc: typeof pg.curAcc === "number" ? pg.curAcc : null,
-            });
-            if (Array.isArray(pg.curW) && pg.curW.length === nw
-              && pg.curW.every((v) => typeof v === "number")
-              && typeof pg.curHfa === "number" && typeof pg.curAcc === "number") {
-              setGridLive({ weights: [...pg.curW], hfa: pg.curHfa, acc: pg.curAcc });
-            }
-            const b = st.progress.best;
-            if (typeof b === "number") {
-              if (gridBestRef.current < 0) {
-                gridBestRef.current = b;
-              } else if (b > gridBestRef.current) {
-                gridBestRef.current = b;
-                delete predCacheRef.current[cacheKey(league, selVer)];
-                await refreshGridView(true);
-              }
-            }
-          }
-          if (st.ok && st.job.status !== "running") {
-            if (st.job.status === "done") {
-              await fetchModels(league);
-              delete predCacheRef.current[cacheKey(league, selVer)];
-              await refreshGridView(true);
-            }
-            break;
-          }
-        } catch {
-          break;
-        }
-      }
-    } catch {
-    }
-    gridRef.current = false;
-    setGridding(false);
-    setGridLive(null);
-  }
 
   async function saveTweaks() {
     if (!tweaked) return;
@@ -1591,7 +1409,7 @@ export function DashboardExplorer() {
           )}
           {modelDetail?.model_type === "permatch" && modelDetail.detail && (() => {
             const d = modelDetail.detail;
-            const eff = gridding && gridLive ? gridLive.weights : (tweaked ?? d.weights);
+            const eff = tweaked ?? d.weights;
             const orderIdx = wOrder ?? d.features.map((_, i) => i);
             const rows = orderIdx
               .map((i) => ({ name: d.features[i], w: eff?.[i] ?? 0, fi: i }))
@@ -1602,7 +1420,7 @@ export function DashboardExplorer() {
               <div className="mt-2 rounded-xl border border-zinc-200 p-2.5 dark:border-zinc-800">
                 <div className="mb-1.5 flex items-center justify-between">
                   <span className="text-xs font-medium text-zinc-500">
-                    {gridding && gridLive ? `피처 가중치 · 탐색 중 ${(gridLive.acc * 100).toFixed(1)}%` : "피처 가중치"}
+                    피처 가중치
                   </span>
                   <span className="text-[10px] text-zinc-500">± 클릭: 축간격만큼 · 값 직접 입력 가능</span>
                 </div>
@@ -1661,24 +1479,18 @@ export function DashboardExplorer() {
                 )}
                 <div className="mb-1.5 grid grid-cols-2 gap-1">
                   {[
-                    { label: "축간격", fk: "step", value: gridStepText, set: setGridStepText, ph: "0.01" },
-                    { label: "jobs", fk: "jobs", value: gridJobsText, set: setGridJobsText, ph: "4" },
-                    { label: "무가중", fk: "drawW", value: gridDrawWText, set: setGridDrawWText, ph: "0" },
-                    { label: "최근가중", fk: "recW", value: gridRecWText, set: setGridRecWText, ph: "0" },
-                    { label: "wmin", fk: "wmin", value: gridWminText, set: setGridWminText, ph: "-3.0" },
-                    { label: "wmax", fk: "wmax", value: gridWmaxText, set: setGridWmaxText, ph: "3.0" },
+                    { label: "축간격", fk: "", value: nudgeStepText, set: setNudgeStepText, ph: "0.01" },
                     { label: "무부스트", fk: "boost", value: drawBoostText, set: setDrawBoostText, ph: "-" },
                     { label: "접전", fk: "margin", value: drawMarginText, set: setDrawMarginText, ph: "-" },
                     { label: "득점", fk: "total", value: drawTotalText, set: setDrawTotalText, ph: "-" },
                   ].map((f) => {
-                    const locked = !modelApplied[f.fk];
+                    const locked = f.fk !== "" && !modelApplied[f.fk];
                     return (
                       <label key={f.label} className="flex items-center gap-1 text-[11px] text-zinc-500">
                         <span className="shrink-0">{f.label}</span>
                         <input
                           value={f.value}
                           onChange={(e) => f.set(e.target.value)}
-                          disabled={gridding}
                           readOnly={locked}
                           inputMode="decimal"
                           placeholder={f.ph}
@@ -1692,21 +1504,11 @@ export function DashboardExplorer() {
                 <div className="mt-1.5 flex gap-1.5">
                   <button
                     onClick={autoTune}
-                    disabled={gridding}
                     title="미학습 시즌 적중률이 오르면 자동 저장. 다시 누르면 중지"
                     className={`flex-1 rounded-lg px-2 py-1 text-[11px] text-white hover:brightness-110 disabled:opacity-40 dark:text-black ${tuning ? "bg-red-500 dark:bg-red-400" : "bg-green-600 dark:bg-green-500"
                       }`}
                   >
                     {tuning ? "중지" : "랜덤"}
-                  </button>
-                  <button
-                    onClick={gridTune}
-                    disabled={tuning}
-                    title="전수탐색으로 가중치를 탐색. 다시 누르면 중지"
-                    className={`flex-1 rounded-lg px-2 py-1 text-[11px] text-white hover:brightness-110 disabled:opacity-40 dark:text-black ${gridding ? "bg-red-500 dark:bg-red-400" : "bg-purple-600 dark:bg-purple-400"
-                      }`}
-                  >
-                    {gridding ? "중지" : "전수"}
                   </button>
                   <button
                     disabled={!canSave}
@@ -1734,15 +1536,6 @@ export function DashboardExplorer() {
                   <p className="mt-1 text-[11px] text-zinc-500">
                     {tuning ? (tuneInfo.stale >= 5 ? `정체 ${tuneInfo.stale}` : "조절 중") : "조절됨"} {tuneInfo.sweeps}sweep · {tuneInfo.base.toFixed(3)} → {tuneInfo.best.toFixed(3)}
                   </p>
-                )}
-                {gridInfo && (
-                  <div className="mt-1 text-[11px] text-zinc-500">
-                    <p>{gridding ? "전수탐색중" : "전수탐색됨"} {gridInfo.total > 0 ? `${Math.min(100, gridInfo.done / gridInfo.total * 100).toFixed(1)}%` : "-"}</p>
-                    <p>{gridInfo.done.toLocaleString()}</p>
-                    <p>{gridInfo.total.toLocaleString()}</p>
-                    <p>best={gridInfo.best != null ? gridInfo.best.toFixed(3) : "-"}</p>
-                    <p>탐색중={gridInfo.curAcc != null ? gridInfo.curAcc.toFixed(3) : "-"}</p>
-                  </div>
                 )}
               </div>
             );

@@ -154,7 +154,6 @@ export async function GET(req: Request) {
           draw_boost: a.draw_boost ?? 0,
           draw_close_margin: a.draw_close_margin ?? 0.12,
           draw_total_max: a.draw_total_max ?? 2.55,
-          grid_params: a.grid_params ?? null,
           pattern_stats: a.pattern_stats ?? null,
         },
       });
