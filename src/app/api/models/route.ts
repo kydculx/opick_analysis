@@ -155,6 +155,7 @@ export async function GET(req: Request) {
           draw_close_margin: a.draw_close_margin ?? 0.12,
           draw_total_max: a.draw_total_max ?? 2.55,
           pattern_stats: a.pattern_stats ?? null,
+          walk: a.walk ?? null,
         },
       });
     } catch (e) {

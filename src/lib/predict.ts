@@ -2,6 +2,30 @@ import type { SoccerMatch } from "@/lib/queries";
 import { applyDrawBoost, applyTemp, blendProbs, dcProba, drawFeatures, legacyParts, logregProba, rowFeatures, selectFeatures } from "./permatch-math";
 import { slimBooster, xgbProba, type XgbSlim } from "./xgb";
 
+export type WalkSnapshot = {
+  weights?: number[];
+  hfa?: number;
+  T?: number;
+  draw_prior?: number;
+  mu?: number[];
+  sd?: number[];
+  features?: string[];
+  emphasis?: number[];
+  draw_weights?: number[] | null;
+  draw_bias?: number;
+  draw_mu?: number[] | null;
+  draw_sd?: number[] | null;
+  patterns?: { home: number[][]; draw: number[][]; away: number[][] };
+  pattern_tau?: number;
+  pattern_taus?: Record<string, number> | null;
+  pattern_alpha?: number;
+  draw_boost?: number;
+  draw_close_margin?: number;
+  draw_total_max?: number;
+  contrib_cap?: number | null;
+  train_end?: string;
+};
+
 export type PermatchArtifact = {
   model_type?: string;
   weights?: number[];
@@ -24,6 +48,7 @@ export type PermatchArtifact = {
   draw_close_margin?: number;
   draw_total_max?: number;
   contrib_cap?: number | null;
+  walk?: { enabled?: boolean; base_end?: string; snapshots?: Record<string, WalkSnapshot> | null } | null;
   xgb?: XgbSlim | null;
   train_seasons?: string[];
   teams?: string[];
@@ -146,6 +171,14 @@ export function predictForRow(m: SoccerMatch, art: PermatchArtifact, ver: string
   }
 }
 
+export function artifactForSeason(art: PermatchArtifact, season: unknown): PermatchArtifact {
+  const snaps = art.walk?.snapshots;
+  if (!snaps) return art;
+  const snap = snaps[String(season)];
+  if (!snap) return art;
+  return { ...art, ...snap } as PermatchArtifact;
+}
+
 export async function buildPredMap(
   rows: SoccerMatch[],
   league: string,
@@ -155,7 +188,7 @@ export async function buildPredMap(
   const art = await loadArtifactAsync(league, ver);
   if (!art) return map;
   for (const m of rows) {
-    const p = predictForRow(m, art, ver);
+    const p = predictForRow(m, artifactForSeason(art, m.season), ver);
     if (p) map[m.source_match_id || String(m.id)] = p;
   }
   return map;

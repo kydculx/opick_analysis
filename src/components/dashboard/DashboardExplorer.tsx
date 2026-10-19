@@ -30,6 +30,20 @@ function parseScoreLocal(v: string | null | undefined): number | null {
   return Number.isNaN(n) ? null : n;
 }
 
+function artifactSig(d: unknown): string {
+  const o = (d ?? {}) as {
+    weights?: unknown;
+    hfa?: unknown;
+    T?: unknown;
+    walk?: { snapshots?: Record<string, { weights?: unknown; hfa?: unknown; T?: unknown }> | null } | null;
+  };
+  const snaps = o.walk?.snapshots;
+  const walkSig = snaps
+    ? Object.keys(snaps).sort().map((k) => [k, snaps[k]?.weights ?? null, snaps[k]?.hfa ?? null, snaps[k]?.T ?? null])
+    : null;
+  return JSON.stringify([o.weights ?? null, o.hfa ?? null, o.T ?? null, walkSig]);
+}
+
 function sortMatchRows(a: SoccerMatch, b: SoccerMatch): number {
   if (a.season !== b.season) return a.season < b.season ? 1 : -1;
   const ar = a.round;
@@ -187,6 +201,11 @@ export function DashboardExplorer() {
       draw_close_margin?: number | null;
       draw_total_max?: number | null;
       pattern_stats: Record<string, { rank: number; freq: number; acc: number }[]> | null;
+      walk?: {
+        enabled?: boolean;
+        base_end?: string | null;
+        snapshots?: Record<string, Record<string, unknown>> | null;
+      } | null;
       xgb?: XgbSlim | null;
     } | null;
   };
@@ -561,12 +580,15 @@ export function DashboardExplorer() {
         const j = await fetch(`/api/models?league=${encodeURIComponent(lg)}&ver=${encodeURIComponent(ver)}`, { cache: "no-store" }).then((r) => r.json());
         if (!j.ok || !j.detail || !Array.isArray(j.detail.weights)) return;
         const cur = modelDetailRef.current?.detail;
-        if (JSON.stringify(j.detail.weights) === JSON.stringify(cur?.weights) && j.detail.hfa === cur?.hfa) return;
+        if (artifactSig(j.detail) === artifactSig(cur)) return;
         delete predCacheRef.current[cacheKey(lg, ver)];
         const ws = j.detail.weights as number[];
         setModelDetail({ model_type: j.model_type, detail: j.detail });
         setWOrder(ws.map((_, i) => i).sort((a, b) => Math.abs(ws[b]) - Math.abs(ws[a])));
-        previewRef.current(ws, typeof j.detail.hfa === "number" ? j.detail.hfa : 0);
+        if (typeof j.detail.draw_boost === "number") setDrawBoostText(String(j.detail.draw_boost));
+        if (typeof j.detail.draw_close_margin === "number") setDrawMarginText(String(j.detail.draw_close_margin));
+        if (typeof j.detail.draw_total_max === "number") setDrawTotalText(String(j.detail.draw_total_max));
+        previewRef.current(ws, typeof j.detail.hfa === "number" ? j.detail.hfa : 0, true, j.detail);
       } catch {
       }
     }, 5000);
@@ -580,8 +602,8 @@ export function DashboardExplorer() {
     return n > 0 ? hit / n : null;
   }
 
-  function previewWith(weights: number[], hfa?: number, full = true): number | null {
-    const d = modelDetail?.detail;
+  function previewWith(weights: number[], hfa?: number, full = true, detailOverride?: ModelDetail["detail"]): number | null {
+    const d = detailOverride ?? modelDetail?.detail;
     if (!d || !d.mu || !d.sd || rawMatches.length === 0) return null;
     const numOr = (t: string, fb: number) => {
       const n = Number(t);
@@ -609,9 +631,30 @@ export function DashboardExplorer() {
       draw_total_max: numOr(drawTotalText, d.draw_total_max ?? 2.55),
       contrib_cap: d.contrib_cap ?? null,
     };
+    const topBoost = {
+      boost: d.draw_boost ?? 0,
+      margin: d.draw_close_margin ?? 0.12,
+      total: d.draw_total_max ?? 2.55,
+    };
+    const boostManual =
+      numOr(drawBoostText, topBoost.boost) !== topBoost.boost ||
+      numOr(drawMarginText, topBoost.margin) !== topBoost.margin ||
+      numOr(drawTotalText, topBoost.total) !== topBoost.total;
+    const wChanged =
+      !Array.isArray(d.weights) ||
+      weights.length !== d.weights.length ||
+      weights.some((v, i) => v !== d.weights![i]);
+    const hChanged = hfa !== undefined && hfa !== (d.hfa ?? 0);
+    const manual = wChanged || hChanged || boostManual || tweakedRef.current != null;
+    const walkSnaps = d.walk?.snapshots ?? null;
     const map: Record<string, PredMapEntry> = {};
     for (const m of rawMatches) {
-      const p = predictLocal(m, art, selVer);
+      let artM = art;
+      if (!manual && walkSnaps) {
+        const snap = walkSnaps[String(m.season)];
+        if (snap) artM = { ...art, ...snap } as PermatchArtifact;
+      }
+      const p = predictLocal(m, artM, selVer);
       if (p) map[m.source_match_id || String(m.id)] = p;
     }
     if (full) setPredMap(map);
@@ -1026,13 +1069,15 @@ export function DashboardExplorer() {
     ? (modelDetail.detail.valid as unknown[]).map(String).filter((s) => s && s !== "auto")
     : null;
   const validSet = validList ? new Set(validList) : null;
+  const walkBaseEnd = typeof modelDetail?.detail?.walk?.base_end === "string" ? (modelDetail.detail.walk.base_end as string) : null;
+  const heldOut = (s: string) => (walkBaseEnd ? s > walkBaseEnd : !trainSet.has(s));
   const scopeOf = (m: Record<string, { n: number; hit: number; pending?: number }>) =>
     Object.fromEntries(
-      Object.entries(m).filter(([s, v]) => !trainSet.has(s) && (v.pending ?? 0) === 0)
+      Object.entries(m).filter(([s, v]) => heldOut(s) && (v.pending ?? 0) === 0)
     );
   const upcomingOf = (m: AccuracyMap) => {
     return Object.entries(m)
-      .filter(([s, v]) => (v.pending ?? 0) > 0 && !trainSet.has(s) && !(validSet ? validSet.has(s) : false))
+      .filter(([s, v]) => (v.pending ?? 0) > 0 && heldOut(s) && !(validSet ? validSet.has(s) : false))
       .sort(([a], [b]) => (a < b ? -1 : 1));
   };
   const curOverall = overallOf(scopeOf(accuracy));
@@ -1072,7 +1117,7 @@ export function DashboardExplorer() {
         <div>
           <div className="flex items-baseline justify-between">
               <span className="text-xs font-medium text-zinc-500">
-                {`시즌 적중률 (미학습 ${viewSeasons.filter((s) => !trainSet.has(s)).length}/${viewSeasons.length})`}
+                {`시즌 적중률 (미학습 ${viewSeasons.filter((s) => heldOut(s)).length}/${viewSeasons.length})`}
               </span>
             </div>
             {(() => {
@@ -1096,7 +1141,7 @@ export function DashboardExplorer() {
               <p className="px-2 py-1 text-sm text-zinc-500">조회할 시즌이 없습니다.</p>
             ) : (
               (() => {
-                const inScope = (s: string) => !trainSet.has(s) && ((accuracy[s]?.pending ?? 0) === 0);
+                const inScope = (s: string) => heldOut(s) && ((accuracy[s]?.pending ?? 0) === 0);
                 const chrono = [...viewSeasons].reverse().filter(inScope);
                 const pts = chrono
                   .map((s, i) => {
@@ -1194,6 +1239,32 @@ export function DashboardExplorer() {
                         최저 <span className="font-semibold text-rose-500 dark:text-rose-400">{worst ? `${short(worst.s)} ${(worst.acc * 100).toFixed(1)}%` : "−"}</span>
                       </span>
                     </div>
+                    {pts.length > 0 && (
+                      <div className="mt-1 border-t border-zinc-200 pt-1 dark:border-zinc-800">
+                        <div className="flex items-baseline justify-between px-0.5">
+                          <span className="text-[10px] font-medium text-zinc-500">시즌별 적중률</span>
+                          <span className="font-mono text-[10px] text-zinc-400">{pts.length}시즌</span>
+                        </div>
+                        <div className="mt-0.5 space-y-0.5 px-0.5 font-mono text-[10px] tabular-nums">
+                          {[...pts].reverse().map((p) => (
+                            <div key={p.s} className="flex min-w-0 items-baseline justify-between gap-1">
+                              <span className="shrink-0 text-zinc-500">{p.s}</span>
+                              <span
+                                className={`truncate whitespace-nowrap ${
+                                  best && p.s === best.s
+                                    ? "font-semibold text-emerald-600 dark:text-emerald-400"
+                                    : worst && p.s === worst.s
+                                      ? "font-semibold text-rose-500 dark:text-rose-400"
+                                      : "text-zinc-700 dark:text-zinc-300"
+                                }`}
+                              >
+                                {(p.acc * 100).toFixed(1)}% <span className="font-normal text-zinc-400">({p.hit}/{p.n})</span>
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
                     <div className="mt-2 border-t border-zinc-200 pt-2 dark:border-zinc-800">
                       <div className="flex min-w-0 items-center justify-between gap-1 px-0.5">
                         <span className="text-[11px] font-medium text-zinc-500">
@@ -1217,7 +1288,7 @@ export function DashboardExplorer() {
                         const cutoff = Number.isFinite(minOdds) && minOdds > 0 ? minOdds : 0;
                         let n = 0, staked = 0, returned = 0;
                           const bySeason = new Map<string, { n: number; staked: number; returned: number }>();
-                          const inScope = (s: string) => !trainSet.has(s);
+                          const inScope = (s: string) => heldOut(s);
                         for (const m of rawMatches) {
                           const s = String(m.season);
                           if (!inScope(s)) continue;
